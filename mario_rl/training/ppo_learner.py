@@ -97,7 +97,8 @@ class PPOLearner:
             self.device = best_device()
 
         # Create network
-        state_dim = (4, 64, 64, 1)
+        # State shape: (4, 64, 64) - stack of 4 grayscale frames
+        state_dim = (4, 64, 64)
         action_dim = 12  # COMPLEX_MOVEMENT
         self.net = ActorCritic(
             input_shape=state_dim,
@@ -419,7 +420,7 @@ class PPOLearner:
             try:
                 rollouts = []
                 # Collect available rollouts (non-blocking after first)
-                rollout = self.rollout_queue.get(timeout=1.0)
+                rollout = self.rollout_queue.get(timeout=5.0)
                 rollouts.append(rollout)
 
                 # Get any additional available rollouts

@@ -10,38 +10,38 @@ import torch
 from torch import nn
 from torch.distributions import Categorical
 
-from mario_rl.agent.neural import LambdaLayer
-
 
 class PPOBackbone(nn.Module):
     """
-    Shared CNN backbone for actor-critic.
+    Shared CNN backbone for actor-critic (Nature DQN style).
 
-    Takes frame-stacked observations (N, F, H, W, C) and outputs features.
+    Takes frame-stacked observations (N, C, H, W) where C is the frame stack.
+    Input should already be normalized to [0, 1] and in channels-first format.
     """
 
     def __init__(self, input_shape: Tuple[int, ...], feature_dim: int = 512):
         super().__init__()
-        f, h, w, c = input_shape
+        # input_shape: (C, H, W) where C = num stacked frames
+        c, h, w = input_shape
 
         self.net = nn.Sequential(
-            # Swap NxFxHxWxC -> NxFxCxHxW and normalize to [0, 1]
-            LambdaLayer(lambda t: t.permute(0, 1, 4, 2, 3).float() / 255),
-            # NxFxCxHxW -> (N*F)xCxHxW
-            LambdaLayer(lambda t: t.view(t.shape[0] * f, c, h, w)),
-            # Conv layers
-            nn.LazyConv2d(out_channels=32, kernel_size=8, stride=4),
+            # Conv layers (Nature DQN architecture)
+            nn.Conv2d(in_channels=c, out_channels=32, kernel_size=8, stride=4),
             nn.ReLU(),
-            nn.LazyConv2d(out_channels=64, kernel_size=4, stride=2),
+            nn.Conv2d(in_channels=32, out_channels=64, kernel_size=4, stride=2),
             nn.ReLU(),
-            nn.LazyConv2d(out_channels=64, kernel_size=3, stride=1),
+            nn.Conv2d(in_channels=64, out_channels=64, kernel_size=3, stride=1),
             nn.ReLU(),
-            # Flatten and combine frames
             nn.Flatten(),
         )
 
+        # Calculate flattened size
+        with torch.no_grad():
+            dummy = torch.zeros(1, c, h, w)
+            flat_size = self.net(dummy).shape[1]
+
         # Feature projection
-        self.fc = nn.LazyLinear(feature_dim)
+        self.fc = nn.Linear(flat_size, feature_dim)
         self.feature_dim = feature_dim
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -95,7 +95,7 @@ class ActorCritic(nn.Module):
         Forward pass returning action logits and state value.
 
         Args:
-            x: Observation tensor (N, F, H, W, C)
+            x: Observation tensor (N, C, H, W) where C is frame stack
 
         Returns:
             logits: Action logits (N, num_actions)
@@ -117,7 +117,7 @@ class ActorCritic(nn.Module):
         Used during rollout collection and training.
 
         Args:
-            x: Observation tensor (N, F, H, W, C)
+            x: Observation tensor (N, C, H, W) where C is frame stack
             action: Optional action to evaluate (N,). If None, samples new action.
 
         Returns:

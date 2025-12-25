@@ -116,7 +116,8 @@ class PPOWorker:
             self.device = "cuda" if torch.cuda.is_available() else "cpu"
 
         # Create network (for inference only)
-        state_dim = (4, 64, 64, 1)
+        # State shape after preprocessing: (4, 64, 64) - stack of 4 grayscale frames
+        state_dim = (4, 64, 64)
         self.net = ActorCritic(
             input_shape=state_dim,
             num_actions=self.action_dim,
@@ -163,10 +164,18 @@ class PPOWorker:
         if time.time() - self.last_weight_sync >= self.weight_sync_interval:
             self._load_weights()
 
+    def _preprocess_state(self, state: np.ndarray) -> np.ndarray:
+        """Convert state from (4, 64, 64, 1) to (4, 64, 64)."""
+        # Squeeze out the trailing channel dimension
+        if state.ndim == 4 and state.shape[-1] == 1:
+            state = np.squeeze(state, axis=-1)
+        return state
+
     @torch.no_grad()
     def _get_action_and_value(self, state: np.ndarray) -> tuple[int, float, float]:
         """Get action, log_prob, and value for a state."""
-        state_tensor = torch.from_numpy(np.expand_dims(state, 0)).to(self.device)
+        state = self._preprocess_state(state)
+        state_tensor = torch.from_numpy(np.expand_dims(state, 0)).float().to(self.device)
         action, log_prob, _, value = self.net.get_action_and_value(state_tensor)
         return (
             action.item(),
@@ -177,7 +186,8 @@ class PPOWorker:
     @torch.no_grad()
     def _get_value(self, state: np.ndarray) -> float:
         """Get value for a state (for bootstrapping)."""
-        state_tensor = torch.from_numpy(np.expand_dims(state, 0)).to(self.device)
+        state = self._preprocess_state(state)
+        state_tensor = torch.from_numpy(np.expand_dims(state, 0)).float().to(self.device)
         return float(self.net.get_value(state_tensor).item())
 
     def collect_rollout(self) -> dict:
@@ -203,8 +213,8 @@ class PPOWorker:
             # Get action and value
             action, log_prob, value = self._get_action_and_value(state)
 
-            # Store transition
-            states.append(state.copy())
+            # Store transition (preprocessed state for learner)
+            states.append(self._preprocess_state(state).copy())
             actions.append(action)
             values.append(value)
             log_probs.append(log_prob)
@@ -319,7 +329,10 @@ class PPOWorker:
 
     def run(self) -> None:
         """Main worker loop."""
+        import sys
+
         print(f"Worker {self.worker_id} started (level={self.level})")
+        sys.stdout.flush()
 
         while True:
             # Maybe sync weights
@@ -332,7 +345,6 @@ class PPOWorker:
             try:
                 self.rollout_queue.put(rollout, timeout=1.0)
             except Exception:
-                print(f"Worker {self.worker_id}: Queue full, dropping rollout")
                 continue
 
             # Print progress occasionally

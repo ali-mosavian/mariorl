@@ -18,6 +18,8 @@ from datetime import datetime
 from multiprocessing import Queue
 from multiprocessing import Process
 
+# Ensure unbuffered output for multiprocessing child processes
+os.environ["PYTHONUNBUFFERED"] = "1"
 os.environ["KMP_DUPLICATE_LIB_OK"] = "True"
 
 import click
