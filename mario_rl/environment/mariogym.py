@@ -176,6 +176,26 @@ class SuperMarioBrosMultiLevel(gym.Env):
 
         raise RuntimeError(f"Invalid level_mode: {repr(self.level)}")
 
+    @property
+    def current_level(self) -> str:
+        """Get current level as string (e.g., '1-1', 'random', 'sequential')."""
+        if self.env is None:
+            if isinstance(self.level, str):
+                return self.level
+            else:
+                return f"{self.level[0]}-{self.level[1]}"
+
+        # Get the target from the current env
+        if hasattr(self.env, "_target"):
+            world, stage = self.env._target
+            return f"{world}-{stage}"
+
+        # Fallback to level mode
+        if isinstance(self.level, str):
+            return self.level
+        else:
+            return f"{self.level[0]}-{self.level[1]}"
+
     def seed(self, seed=None):
         if seed is None:
             return []

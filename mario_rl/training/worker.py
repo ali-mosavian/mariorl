@@ -412,6 +412,7 @@ class Worker:
                 last_weight_sync=self.last_weight_sync,
                 weight_sync_count=self.weight_sync_count,
                 snapshot_restores=self.snapshot_restores,
+                current_level=self.base_env.current_level,
             )
         elif step > 0 and step % 200 == 0:
             # Print real-time status during episode (every 200 steps)

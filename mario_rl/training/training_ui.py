@@ -428,12 +428,14 @@ class TrainingUI:
 
     def _draw_worker(self, stdscr, y: int, width: int, height: int, worker_id: int):
         """Draw a worker section."""
-        # Header
-        header = f"├─ WORKER {worker_id} "
+        ws = self.worker_statuses.get(worker_id, {})
+
+        # Header with level info
+        current_level = ws.get("current_level", "?") if ws else "?"
+        header = f"├─ WORKER {worker_id} [{current_level}] "
         stdscr.addstr(y, 2, header, curses.A_BOLD | curses.color_pair(5))
         stdscr.addstr(y, 2 + len(header), "─" * (width - len(header) - 4))
 
-        ws = self.worker_statuses.get(worker_id, {})
         if ws:
             episode = ws.get("episode", 0)
             reward = ws.get("reward", 0)
@@ -588,6 +590,7 @@ def send_worker_status(
     last_weight_sync: float = 0.0,
     weight_sync_count: int = 0,
     snapshot_restores: int = 0,
+    current_level: str = "?",
 ):
     """Send worker status update to UI."""
     try:
@@ -612,6 +615,7 @@ def send_worker_status(
                     "last_weight_sync": last_weight_sync,
                     "weight_sync_count": weight_sync_count,
                     "snapshot_restores": snapshot_restores,
+                    "current_level": current_level,
                 },
             )
         )
