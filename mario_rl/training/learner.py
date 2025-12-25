@@ -163,8 +163,20 @@ class Learner:
         self._last_loss = 0.0
         self._last_wait_print = 0
 
-        # Save initial weights for workers to load
-        self.save_weights()
+        # Load existing weights if available, otherwise save initial weights
+        if self.weights_path.exists():
+            try:
+                checkpoint = torch.load(self.weights_path, map_location=self.device, weights_only=True)
+                self.net.online.load_state_dict(checkpoint)
+                self.net.target.load_state_dict(checkpoint)
+                print(f"✅ Resumed from checkpoint: {self.weights_path}")
+            except Exception as e:
+                print(f"⚠️ Failed to load checkpoint {self.weights_path}: {e}")
+                print("   Starting with random weights instead")
+                self.save_weights()
+        else:
+            # Save initial random weights for workers to load
+            self.save_weights()
 
     def sync_target(self):
         """Copy online network weights to target network."""
