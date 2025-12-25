@@ -39,6 +39,12 @@ from mario_rl.environment.env_factory import LevelType
 from mario_rl.environment.env_factory import make_env_fn
 
 
+def run_training_ui(num_workers: int, ui_queue: Queue) -> None:
+    """Run the training UI in a separate process."""
+    ui = TrainingUI(num_workers=num_workers, ui_queue=ui_queue, use_ppo=True)
+    ui.run()
+
+
 class UICallback(BaseCallback):
     """
     Callback that sends training metrics to the ncurses UI.
@@ -286,14 +292,10 @@ def main(
         # Add UI callback
         callbacks.append(UICallback(ui_queue, num_envs))
 
-        # Start UI in separate process
+        # Start UI in separate process (must use module-level function for pickling)
         from multiprocessing import Process
 
-        def run_ui():
-            ui = TrainingUI(num_workers=num_envs, ui_queue=ui_queue, use_ppo=True)
-            ui.run()
-
-        ui_process = Process(target=run_ui, daemon=True)
+        ui_process = Process(target=run_training_ui, args=(num_envs, ui_queue), daemon=True)
         ui_process.start()
 
     # Handle Ctrl+C gracefully
