@@ -6,6 +6,7 @@ Periodically loads latest network weights from disk.
 """
 
 import os
+import csv
 import sys
 import time
 import multiprocessing as mp
@@ -482,6 +483,28 @@ class Worker:
         self.first_flag_time = 0.0
         self.best_x_ever = 0
 
+        # Initialize CSV logging for episode metrics
+        save_dir = self.weights_path.parent
+        self._episodes_csv = save_dir / f"worker_{self.worker_id}_episodes.csv"
+        if not self._episodes_csv.exists():
+            with open(self._episodes_csv, "w", newline="") as f:
+                writer = csv.writer(f)
+                writer.writerow(
+                    [
+                        "timestamp",
+                        "episode",
+                        "reward",
+                        "x_pos",
+                        "best_x",
+                        "deaths",
+                        "flags",
+                        "steps",
+                        "rolling_avg_reward",
+                        "first_flag_time",
+                        "epsilon",
+                    ]
+                )
+
         # Send initial status
         self._send_status(episode, 0, 0, 0, 0, 0)
 
@@ -513,6 +536,25 @@ class Worker:
                     self._log(f"🏁 FIRST FLAG! Episode {episode}, time={self.first_flag_time:.1f}s, x={stats['x_pos']}")
                 else:
                     self._log(f"🏁 FLAG GET! Episode {episode}, x={stats['x_pos']}, flags={total_flags}")
+
+            # Log episode metrics to CSV
+            with open(self._episodes_csv, "a", newline="") as f:
+                writer = csv.writer(f)
+                writer.writerow(
+                    [
+                        time_module.time(),
+                        episode,
+                        stats["reward"],
+                        stats["x_pos"],
+                        best_x_pos,
+                        stats["deaths"],
+                        total_flags,
+                        stats["steps"],
+                        self.rolling_avg_reward,
+                        self.first_flag_time,
+                        self.exploration_rate,
+                    ]
+                )
 
             # Send end-of-episode status update
             self._send_status(

@@ -5,6 +5,7 @@ Pulls experiences from shared buffer, trains network, saves weights for workers.
 """
 
 import os
+import csv
 import sys
 import time
 import multiprocessing as mp
@@ -176,6 +177,15 @@ class Learner:
             # Save initial random weights for workers to load
             self.save_weights()
 
+        # Initialize CSV logging
+        self._metrics_csv = self.save_dir / "learner_metrics.csv"
+        if not self._metrics_csv.exists():
+            with open(self._metrics_csv, "w", newline="") as f:
+                writer = csv.writer(f)
+                writer.writerow(
+                    ["timestamp", "step", "loss", "avg_loss", "q_mean", "q_max", "td_error", "grad_norm", "reward_mean"]
+                )
+
     def sync_target(self):
         """Copy online network weights to target network."""
         self.net.target.load_state_dict(self.net.online.state_dict())
@@ -263,6 +273,25 @@ class Learner:
         # Save weights for workers
         if self.train_step % self.save_every == 0:
             self.save_weights()
+
+        # Log metrics to CSV every 100 steps
+        if self.train_step % 100 == 0:
+            avg_loss = self.total_loss / max(1, self.train_step)
+            with open(self._metrics_csv, "a", newline="") as f:
+                writer = csv.writer(f)
+                writer.writerow(
+                    [
+                        time.time(),
+                        self.train_step,
+                        loss_val,
+                        avg_loss,
+                        self.last_q_mean,
+                        self.last_q_max,
+                        self.last_td_error,
+                        self.last_grad_norm,
+                        self.last_reward_mean,
+                    ]
+                )
 
         return float(loss_val)
 
