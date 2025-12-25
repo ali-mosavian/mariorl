@@ -266,6 +266,7 @@ def main(
             max_grad_norm=0.5,
             verbose=0 if not no_ui else 1,
             tensorboard_log=str(run_dir / "tensorboard"),
+            policy_kwargs={"normalize_images": False},  # Images already normalized to [0,1]
         )
 
     # Setup callbacks
