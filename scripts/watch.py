@@ -9,6 +9,9 @@ Usage:
     # Watch standard DQN agent:
     uv run python watch.py agents/dueling_ddqn/agent.pt
 
+    # Watch PPO agent (stable-baselines3):
+    uv run python watch.py checkpoints/ppo_*/best_model.zip --ppo
+
     # Watch on a specific level:
     uv run python watch.py agents/test/agent.pt --world-model --level 1-2
 """
@@ -126,6 +129,16 @@ def load_dqn_agent(weights_path: Path, device: str) -> DuelingDDQNNet:
     return net  # type: ignore[no-any-return]
 
 
+def load_ppo_agent(weights_path: Path):
+    """Load PPO agent from stable-baselines3 checkpoint."""
+    from stable_baselines3 import PPO
+
+    # PPO models need the environment to load, but we can use a dummy
+    # by loading without env and just using for prediction
+    model = PPO.load(weights_path)
+    return model
+
+
 @torch.no_grad()
 def select_action_world_model(
     state: np.ndarray,
@@ -154,6 +167,7 @@ def watch(
     weights_path: Path,
     level: tuple[int, int] = (1, 1),
     use_world_model: bool = False,
+    use_ppo: bool = False,
     latent_dim: int = 128,
     num_episodes: int = 5,
 ):
@@ -162,8 +176,20 @@ def watch(
     print(f"Using device: {device}")
     print(f"Loading weights from: {weights_path}")
 
+    # PPO uses a different environment format (channels-first)
+    ppo_model = None
+
     # Load agent
-    if use_world_model:
+    if use_ppo:
+        print("Loading PPO agent...")
+        ppo_model = load_ppo_agent(weights_path)
+
+        def select_fn(s):
+            # PPO expects channels-first: (4, 64, 64) not (4, 64, 64, 1)
+            s_ppo = s.squeeze(-1)  # Remove trailing dim
+            action, _ = ppo_model.predict(s_ppo, deterministic=True)
+            return int(action), 0.0, 0.0  # PPO doesn't expose Q-values
+    elif use_world_model:
         print("Loading world model agent...")
         world_model, q_network = load_world_model_agent(weights_path, device, latent_dim)
 
@@ -233,8 +259,9 @@ def watch(
 
 def main():
     parser = argparse.ArgumentParser(description="Watch trained Mario agent play")
-    parser.add_argument("weights", type=Path, help="Path to weights file (agent.pt)")
+    parser.add_argument("weights", type=Path, help="Path to weights file (.pt or .zip for PPO)")
     parser.add_argument("--world-model", action="store_true", help="Use world model agent")
+    parser.add_argument("--ppo", action="store_true", help="Use PPO agent (stable-baselines3)")
     parser.add_argument(
         "--level",
         type=str,
@@ -254,6 +281,7 @@ def main():
         weights_path=args.weights,
         level=level,
         use_world_model=args.world_model,
+        use_ppo=args.ppo,
         latent_dim=args.latent_dim,
         num_episodes=args.episodes,
     )

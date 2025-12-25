@@ -21,6 +21,7 @@ class MessageType(Enum):
     WORKER_LOG = "worker_log"
     SYSTEM_LOG = "system_log"
     WORLD_MODEL_STATUS = "world_model_status"
+    PPO_STATUS = "ppo_status"
 
 
 @dataclass(frozen=True)
@@ -39,11 +40,13 @@ class TrainingUI:
     num_workers: int
     ui_queue: mp.Queue
     use_world_model: bool = False  # Toggle for world model UI
+    use_ppo: bool = False  # Toggle for PPO UI
 
     # State tracking (initialized in __post_init__)
     running: bool = field(init=False, default=True)
     learner_status: Dict[str, Any] = field(init=False, default_factory=dict)
     world_model_status: Dict[str, Any] = field(init=False, default_factory=dict)
+    ppo_status: Dict[str, Any] = field(init=False, default_factory=dict)
     worker_statuses: Dict[int, Dict[str, Any]] = field(init=False, repr=False)
     logs: List[str] = field(init=False, default_factory=list)
     max_logs: int = field(init=False, default=100)
@@ -52,6 +55,8 @@ class TrainingUI:
     loss_history: List[float] = field(init=False, default_factory=list)
     wm_loss_history: List[float] = field(init=False, default_factory=list)
     q_loss_history: List[float] = field(init=False, default_factory=list)
+    ppo_policy_loss_history: List[float] = field(init=False, default_factory=list)
+    ppo_value_loss_history: List[float] = field(init=False, default_factory=list)
     max_history: int = field(init=False, default=100)
 
     # Global convergence tracking (aggregated from all workers)
@@ -67,12 +72,15 @@ class TrainingUI:
         self.running = True
         self.learner_status = {}
         self.world_model_status = {}
+        self.ppo_status = {}
         self.worker_statuses = {i: {} for i in range(self.num_workers)}
         self.logs = []
         self.max_logs = 100
         self.loss_history = []
         self.wm_loss_history = []
         self.q_loss_history = []
+        self.ppo_policy_loss_history = []
+        self.ppo_value_loss_history = []
         self.max_history = 100
         # Global convergence tracking
         self.reward_history = []
@@ -200,6 +208,20 @@ class TrainingUI:
                         self.q_loss_history.append(msg.data["q_loss"])
                         if len(self.q_loss_history) > self.max_history:
                             self.q_loss_history.pop(0)
+                elif msg.msg_type == MessageType.PPO_STATUS:
+                    self.ppo_status = msg.data
+                    self.use_ppo = True  # Auto-detect PPO mode
+                    # Track loss history for PPO
+                    policy_loss = msg.data.get("policy_loss", 0.0)
+                    value_loss = msg.data.get("value_loss", 0.0)
+                    if policy_loss != 0.0:
+                        self.ppo_policy_loss_history.append(policy_loss)
+                        if len(self.ppo_policy_loss_history) > self.max_history:
+                            self.ppo_policy_loss_history.pop(0)
+                    if value_loss != 0.0:
+                        self.ppo_value_loss_history.append(value_loss)
+                        if len(self.ppo_value_loss_history) > self.max_history:
+                            self.ppo_value_loss_history.pop(0)
 
             except Exception:
                 break  # Queue empty
@@ -268,12 +290,20 @@ class TrainingUI:
         # Calculate layout
         header_height = 3
         world_model_height = 7 if self.use_world_model else 0  # Increased for charts
-        learner_height = 7 if not self.use_world_model else 0  # Increased for chart
+        ppo_height = 7 if self.use_ppo else 0  # PPO section
+        learner_height = 7 if not self.use_world_model and not self.use_ppo else 0  # Standard DQN learner
         worker_height = 4  # Increased for convergence metrics line
         workers_total_height = self.num_workers * worker_height
         convergence_height = 4  # Global convergence charts
         log_height = (
-            height - header_height - world_model_height - learner_height - workers_total_height - convergence_height - 3
+            height
+            - header_height
+            - world_model_height
+            - ppo_height
+            - learner_height
+            - workers_total_height
+            - convergence_height
+            - 3
         )
 
         current_y = 0
@@ -282,12 +312,15 @@ class TrainingUI:
         self._draw_header(stdscr, current_y, width)
         current_y += header_height
 
-        # World Model section (if using world model learner)
+        # Learner section (mutually exclusive: World Model, PPO, or standard DQN)
         if self.use_world_model:
             self._draw_world_model(stdscr, current_y, width, world_model_height)
             current_y += world_model_height
+        elif self.use_ppo:
+            self._draw_ppo(stdscr, current_y, width, ppo_height)
+            current_y += ppo_height
         else:
-            # Standard Learner section
+            # Standard DQN Learner section
             self._draw_learner(stdscr, current_y, width, learner_height)
             current_y += learner_height
 
@@ -388,6 +421,59 @@ class TrainingUI:
             # Loss chart
             if self.loss_history:
                 self._draw_sparkline(stdscr, y + 5, 4, width - 8, self.loss_history, "Loss")
+        else:
+            stdscr.addstr(y + 1, 4, "Initializing...", curses.A_DIM)
+
+    def _draw_ppo(self, stdscr, y: int, width: int, height: int):
+        """Draw the PPO learner section."""
+        # Header
+        stdscr.addstr(y, 2, "┌─ PPO ", curses.A_BOLD | curses.color_pair(4))
+        stdscr.addstr(y, 8, "─" * (width - 10))
+
+        ppo = self.ppo_status
+        if ppo:
+            step = ppo.get("step", 0)
+            policy_loss = ppo.get("policy_loss", 0.0)
+            value_loss = ppo.get("value_loss", 0.0)
+            entropy = ppo.get("entropy", 0.0)
+            clip_fraction = ppo.get("clip_fraction", 0.0)
+            steps_per_sec = ppo.get("steps_per_sec", 0.0)
+            elapsed = ppo.get("elapsed_time", 0.0)
+
+            # Format elapsed time
+            hours = int(elapsed // 3600)
+            minutes = int((elapsed % 3600) // 60)
+            seconds = int(elapsed % 60)
+            time_str = f"{hours:02d}:{minutes:02d}:{seconds:02d}"
+
+            # Main stats line
+            stdscr.addstr(y + 1, 4, f"Step: {step:,}  ", curses.color_pair(4))
+            stdscr.addstr(f"{steps_per_sec:.1f} sps  Time: {time_str}")
+
+            # Loss stats
+            stdscr.addstr(y + 2, 4, "Policy Loss: ")
+            policy_color = curses.color_pair(1) if abs(policy_loss) < 0.1 else curses.color_pair(3)
+            stdscr.addstr(f"{policy_loss:.4f}", policy_color)
+
+            stdscr.addstr("  Value Loss: ")
+            value_color = curses.color_pair(1) if value_loss < 1.0 else curses.color_pair(3)
+            stdscr.addstr(f"{value_loss:.4f}", value_color)
+
+            # Entropy and clip fraction
+            stdscr.addstr(y + 3, 4, f"Entropy: {entropy:.4f}  Clip: {clip_fraction:.3f}")
+
+            # Status indicator
+            stdscr.addstr(y + 4, 4, "Status: ", curses.A_DIM)
+            stdscr.addstr("training", curses.color_pair(1))
+
+            # Loss charts (side by side)
+            chart_width = (width - 20) // 2
+            if self.ppo_policy_loss_history:
+                stdscr.addstr(y + 5, 4, "π:")
+                self._draw_sparkline(stdscr, y + 5, 7, chart_width, self.ppo_policy_loss_history)
+            if self.ppo_value_loss_history:
+                stdscr.addstr(y + 5, 10 + chart_width, "V:")
+                self._draw_sparkline(stdscr, y + 5, 13 + chart_width, chart_width, self.ppo_value_loss_history)
         else:
             stdscr.addstr(y + 1, 4, "Initializing...", curses.A_DIM)
 

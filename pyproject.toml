@@ -18,6 +18,7 @@ dependencies = [
     "pillow>=10.0.0",
     "lz4>=4.0.0",
     "scikit-image>=0.21.0",
+    "stable-baselines3[extra]>=2.0.0",
 ]
 
 [project.optional-dependencies]
@@ -36,6 +37,7 @@ plot = [
 
 [project.scripts]
 mario-train = "scripts.train:main"
+mario-train-ppo = "scripts.train_ppo:main"
 mario-watch = "scripts.watch:main"
 
 [build-system]
