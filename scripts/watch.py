@@ -52,6 +52,7 @@ from mario_rl.agent.neural import DuelingDDQNNet
 from mario_rl.agent.world_model import LatentDDQN
 from mario_rl.environment.wrappers import SkipFrame
 from mario_rl.agent.world_model import MarioWorldModel
+from mario_rl.environment.env_factory import make_mario_env
 from mario_rl.environment.wrappers import ResizeObservation
 from mario_rl.environment.mariogym import SuperMarioBrosMultiLevel
 
@@ -185,10 +186,60 @@ def watch(
         ppo_model = load_ppo_agent(weights_path)
 
         def select_fn(s):
-            # PPO expects channels-first: (4, 64, 64) not (4, 64, 64, 1)
-            s_ppo = s.squeeze(-1)  # Remove trailing dim
-            action, _ = ppo_model.predict(s_ppo, deterministic=True)
+            # PPO model expects the observation directly (already channels-first from env)
+            action, _ = ppo_model.predict(s, deterministic=True)
             return int(action), 0.0, 0.0  # PPO doesn't expose Q-values
+
+        # Use the same environment as training for PPO
+        print(f"Creating PPO environment for level {level[0]}-{level[1]}...")
+        ppo_env = make_mario_env(level=level, render_mode="human")  # type: ignore[arg-type]
+        # Get the underlying base env for rendering
+        base_env = ppo_env.unwrapped
+
+        for episode in range(num_episodes):
+            state, _ = ppo_env.reset()
+            total_reward = 0
+            step = 0
+            max_x = 0
+
+            print(f"\n{'='*50}")
+            print(f"Episode {episode + 1}/{num_episodes}")
+            print(f"{'='*50}")
+
+            while True:
+                # Render
+                base_env.render()
+
+                # Select action
+                action, _, _ = select_fn(state)
+
+                # Step
+                next_state, reward, terminated, truncated, info = ppo_env.step(action)
+                done = terminated or truncated
+
+                total_reward += reward
+                step += 1
+                max_x = max(max_x, info.get("x_pos", 0))
+
+                # Print progress occasionally
+                if step % 100 == 0:
+                    print(f"  Step {step:4d} | x={info.get('x_pos', 0):4d} | reward={total_reward:.0f}")
+
+                state = next_state
+
+                if done:
+                    flag_get = info.get("flag_get", False)
+                    status = "🏁 FLAG!" if flag_get else "💀 DIED"
+                    print(f"\n{status} | Steps: {step} | Max X: {max_x} | Total Reward: {total_reward:.0f}")
+                    break
+
+        try:
+            ppo_env.close()
+        except Exception:
+            pass
+        print("\nDone!")
+        return  # Exit early for PPO path
+
     elif use_world_model:
         print("Loading world model agent...")
         world_model, q_network = load_world_model_agent(weights_path, device, latent_dim)
