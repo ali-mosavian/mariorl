@@ -1,0 +1,627 @@
+"""
+Curses-based UI for distributed training.
+Separates learner and worker outputs into distinct panels.
+"""
+
+import time
+import curses
+import multiprocessing as mp
+
+from enum import Enum
+from typing import Any
+from typing import Dict
+from typing import List
+from dataclasses import field
+from dataclasses import dataclass
+
+
+class MessageType(Enum):
+    LEARNER_STATUS = "learner_status"
+    LEARNER_LOG = "learner_log"
+    WORKER_STATUS = "worker_status"
+    WORKER_LOG = "worker_log"
+    SYSTEM_LOG = "system_log"
+    WORLD_MODEL_STATUS = "world_model_status"
+
+
+@dataclass(frozen=True)
+class UIMessage:
+    """Immutable message for UI queue."""
+
+    msg_type: MessageType
+    source_id: int  # -1 for learner, 0+ for workers
+    data: dict
+
+
+@dataclass
+class TrainingUI:
+    """Curses-based UI for distributed training."""
+
+    num_workers: int
+    ui_queue: mp.Queue
+    use_world_model: bool = False  # Toggle for world model UI
+
+    # State tracking (initialized in __post_init__)
+    running: bool = field(init=False, default=True)
+    learner_status: Dict[str, Any] = field(init=False, default_factory=dict)
+    world_model_status: Dict[str, Any] = field(init=False, default_factory=dict)
+    worker_statuses: Dict[int, Dict[str, Any]] = field(init=False, repr=False)
+    logs: List[str] = field(init=False, default_factory=list)
+    max_logs: int = field(init=False, default=100)
+
+    def __post_init__(self):
+        """Initialize state tracking after dataclass fields are set."""
+        self.running = True
+        self.learner_status = {}
+        self.world_model_status = {}
+        self.worker_statuses = {i: {} for i in range(self.num_workers)}
+        self.logs = []
+        self.max_logs = 100
+
+    def run(self):
+        """Main entry point - runs the curses UI."""
+        curses.wrapper(self._main)
+
+    def _main(self, stdscr):
+        """Main curses loop."""
+        # Setup
+        curses.curs_set(0)  # Hide cursor
+        stdscr.nodelay(True)  # Non-blocking input
+        stdscr.timeout(50)  # 50ms refresh
+
+        # Initialize colors
+        curses.start_color()
+        curses.use_default_colors()
+        curses.init_pair(1, curses.COLOR_GREEN, -1)  # Success/good
+        curses.init_pair(2, curses.COLOR_YELLOW, -1)  # Warning/info
+        curses.init_pair(3, curses.COLOR_RED, -1)  # Error/death
+        curses.init_pair(4, curses.COLOR_CYAN, -1)  # Learner
+        curses.init_pair(5, curses.COLOR_MAGENTA, -1)  # Worker headers
+
+        while self.running:
+            # Process incoming messages
+            self._process_messages()
+
+            # Handle input
+            try:
+                key = stdscr.getch()
+                if key == ord("q") or key == ord("Q"):
+                    self.running = False
+                    break
+            except curses.error:
+                pass
+
+            # Draw UI
+            self._draw(stdscr)
+
+    def _process_messages(self):
+        """Process all pending UI messages."""
+        while True:
+            try:
+                msg: UIMessage = self.ui_queue.get_nowait()
+
+                if msg.msg_type == MessageType.LEARNER_STATUS:
+                    self.learner_status = msg.data
+                elif msg.msg_type == MessageType.LEARNER_LOG:
+                    self._add_log(f"[LEARNER] {msg.data.get('text', '')}")
+                elif msg.msg_type == MessageType.WORKER_STATUS:
+                    self.worker_statuses[msg.source_id] = msg.data
+                elif msg.msg_type == MessageType.WORKER_LOG:
+                    self._add_log(f"[W{msg.source_id}] {msg.data.get('text', '')}")
+                elif msg.msg_type == MessageType.SYSTEM_LOG:
+                    self._add_log(f"[SYSTEM] {msg.data.get('text', '')}")
+                elif msg.msg_type == MessageType.WORLD_MODEL_STATUS:
+                    self.world_model_status = msg.data
+                    self.use_world_model = True  # Auto-detect world model mode
+
+            except Exception:
+                break  # Queue empty or error
+
+    def _add_log(self, text: str):
+        """Add a log entry."""
+        timestamp = time.strftime("%H:%M:%S")
+        self.logs.append(f"{timestamp} {text}")
+        if len(self.logs) > self.max_logs:
+            self.logs.pop(0)
+
+    def _draw(self, stdscr):
+        """Draw the entire UI."""
+        stdscr.clear()
+        height, width = stdscr.getmaxyx()
+
+        # Calculate layout
+        header_height = 3
+        world_model_height = 5 if self.use_world_model else 0
+        learner_height = 6 if not self.use_world_model else 0  # Hide standard learner if using world model
+        worker_height = 3
+        workers_total_height = self.num_workers * worker_height
+        log_height = height - header_height - world_model_height - learner_height - workers_total_height - 2
+
+        current_y = 0
+
+        # Header
+        self._draw_header(stdscr, current_y, width)
+        current_y += header_height
+
+        # World Model section (if using world model learner)
+        if self.use_world_model:
+            self._draw_world_model(stdscr, current_y, width, world_model_height)
+            current_y += world_model_height
+        else:
+            # Standard Learner section
+        self._draw_learner(stdscr, current_y, width, learner_height)
+        current_y += learner_height
+
+        # Worker sections
+        for i in range(self.num_workers):
+            self._draw_worker(stdscr, current_y, width, worker_height, i)
+            current_y += worker_height
+
+        # Separator
+        stdscr.addstr(current_y, 0, "─" * (width - 1), curses.A_DIM)
+        current_y += 1
+
+        # Log section
+        self._draw_logs(stdscr, current_y, width, log_height)
+
+        # Footer
+        footer_y = height - 1
+        footer = " Press 'q' to quit "
+        stdscr.addstr(footer_y, 0, "─" * (width - 1), curses.A_DIM)
+        stdscr.addstr(footer_y, (width - len(footer)) // 2, footer, curses.A_DIM)
+
+        stdscr.refresh()
+
+    def _draw_header(self, stdscr, y: int, width: int):
+        """Draw the header section."""
+        title = "═══ DISTRIBUTED MARIO TRAINING ═══"
+        stdscr.addstr(
+            y, (width - len(title)) // 2, title, curses.A_BOLD | curses.color_pair(1)
+        )
+
+        info = f"Workers: {self.num_workers}"
+        stdscr.addstr(y + 1, 2, info)
+
+        stdscr.addstr(y + 2, 0, "═" * (width - 1))
+
+    def _draw_learner(self, stdscr, y: int, width: int, height: int):
+        """Draw the learner section."""
+        # Header
+        stdscr.addstr(y, 2, "┌─ LEARNER ", curses.A_BOLD | curses.color_pair(4))
+        stdscr.addstr(y, 13, "─" * (width - 15))
+
+        ls = self.learner_status
+        if ls:
+            step = ls.get("step", 0)
+            loss = ls.get("loss", 0)
+            avg_loss = ls.get("avg_loss", 0)
+            buf_size = ls.get("buf_size", 0)
+            pulled = ls.get("pulled", 0)
+            status = ls.get("status", "running")
+            q_mean = ls.get("q_mean", 0)
+            q_max = ls.get("q_max", 0)
+            td_error = ls.get("td_error", 0)
+            grad_norm = ls.get("grad_norm", 0)
+            reward_mean = ls.get("reward_mean", 0)
+            steps_per_sec = ls.get("steps_per_sec", 0)
+            queue_msgs_per_sec = ls.get("queue_msgs_per_sec", 0)
+            queue_kb_per_sec = ls.get("queue_kb_per_sec", 0)
+
+            # Progress bar for steps
+            max_steps = ls.get("max_steps", 1)
+            if max_steps > 0:
+                progress = min(step / max_steps, 1.0)
+                bar_width = 30
+                filled = int(progress * bar_width)
+                bar = "█" * filled + "░" * (bar_width - filled)
+                pct = f"{progress * 100:.1f}%"
+                stdscr.addstr(
+                    y + 1, 4, f"Progress: [{bar}] {pct}  ", curses.color_pair(4)
+                )
+                stdscr.addstr(f"({step:,} / {max_steps:,})  {steps_per_sec:.1f} sps")
+            else:
+                stdscr.addstr(
+                    y + 1,
+                    4,
+                    f"Step: {step:,}  {steps_per_sec:.1f} sps",
+                    curses.color_pair(4),
+                )
+
+            # Loss stats with queue throughput
+            stdscr.addstr(y + 2, 4, "Loss: ")
+            loss_color = (
+                curses.color_pair(1) if loss < avg_loss else curses.color_pair(3)
+            )
+            stdscr.addstr(f"{loss:.2f}", loss_color)
+            stdscr.addstr(
+                f"  Avg: {avg_loss:.2f}  Buffer: {buf_size:,}  Queue: {queue_msgs_per_sec:.0f} msg/s, {queue_kb_per_sec:.0f} KB/s"
+            )
+
+            # Q-value and gradient stats
+            stdscr.addstr(
+                y + 3,
+                4,
+                f"Q-value: μ={q_mean:.1f} max={q_max:.1f}  TD-err: {td_error:.2f}  ∇norm: {grad_norm:.1f}  r̄={reward_mean:.1f}",
+            )
+
+            # Status indicator
+            status_color = (
+                curses.color_pair(1) if status == "training" else curses.color_pair(2)
+            )
+            stdscr.addstr(y + 4, 4, f"Status: {status}", status_color)
+        else:
+            stdscr.addstr(y + 1, 4, "Initializing...", curses.A_DIM)
+
+    def _draw_world_model(self, stdscr, y: int, width: int, height: int):
+        """Draw the world model learner section with all metrics."""
+        # Header
+        stdscr.addstr(y, 2, "┌─ WORLD MODEL ", curses.A_BOLD | curses.color_pair(4))
+        stdscr.addstr(y, 17, "─" * (width - 19))
+
+        wm = self.world_model_status
+        if wm:
+            step = wm.get("step", 0)
+            wm_step = wm.get("wm_step", 0)
+            q_step = wm.get("q_step", 0)
+            buf_size = wm.get("buf_size", 0)
+            status = wm.get("status", "running")
+            phase = wm.get("phase", "world_model")
+            phase_step = wm.get("phase_step", 0)
+            phase_total = wm.get("phase_total", 1)
+            steps_per_sec = wm.get("steps_per_sec", 0)
+            
+            # World model metrics
+            wm_metrics = wm.get("wm_metrics")
+            
+            # Q-network metrics
+            q_mean = wm.get("q_mean", 0)
+            q_max = wm.get("q_max", 0)
+            td_error = wm.get("td_error", 0)
+            q_loss = wm.get("q_loss", 0)
+            
+            # Phase progress bar
+            progress = phase_step / max(phase_total, 1)
+            bar_width = 20
+            filled = int(progress * bar_width)
+            bar = "█" * filled + "░" * (bar_width - filled)
+            
+            phase_label = "WM" if phase == "world_model" else "Q"
+            phase_color = curses.color_pair(4) if phase == "world_model" else curses.color_pair(5)
+            
+            stdscr.addstr(y + 1, 4, f"Step: {step:,}  ", curses.color_pair(4))
+            stdscr.addstr(f"Phase: ")
+            stdscr.addstr(f"{phase_label}", phase_color | curses.A_BOLD)
+            stdscr.addstr(f" [{bar}] {phase_step}/{phase_total}  ")
+            stdscr.addstr(f"WM:{wm_step:,} Q:{q_step:,}  {steps_per_sec:.1f} sps  buf={buf_size:,}")
+            
+            # World model metrics (if available)
+            if wm_metrics:
+                recon_mse = wm_metrics.get("recon_mse", 0) if isinstance(wm_metrics, dict) else wm_metrics.recon_mse
+                pred_mse = wm_metrics.get("pred_mse", 0) if isinstance(wm_metrics, dict) else wm_metrics.pred_mse
+                ssim_val = wm_metrics.get("ssim", 0) if isinstance(wm_metrics, dict) else wm_metrics.ssim
+                dynamics_loss = wm_metrics.get("dynamics_loss", 0) if isinstance(wm_metrics, dict) else wm_metrics.dynamics_loss
+                reward_loss = wm_metrics.get("reward_loss", 0) if isinstance(wm_metrics, dict) else wm_metrics.reward_loss
+                kl_loss = wm_metrics.get("kl_loss", 0) if isinstance(wm_metrics, dict) else wm_metrics.kl_loss
+                
+                # Color SSIM based on quality
+                ssim_color = curses.color_pair(1) if ssim_val > 0.8 else (curses.color_pair(2) if ssim_val > 0.5 else curses.color_pair(3))
+                
+                stdscr.addstr(y + 2, 4, f"Recon MSE: {recon_mse:.4f}  Pred MSE: {pred_mse:.4f}  SSIM: ")
+                stdscr.addstr(f"{ssim_val:.3f}", ssim_color)
+                stdscr.addstr(f"  Dynamics: {dynamics_loss:.4f}  Reward: {reward_loss:.4f}  KL: {kl_loss:.4f}")
+            else:
+                stdscr.addstr(y + 2, 4, "World model metrics: waiting for training...", curses.A_DIM)
+            
+            # Q-network metrics
+            stdscr.addstr(y + 3, 4, f"Q-value: μ={q_mean:.1f} max={q_max:.1f}  TD-err: {td_error:.2f}  Q-loss: {q_loss:.4f}")
+            
+            # Status indicator
+            status_color = curses.color_pair(1) if status == "training" else curses.color_pair(2)
+            stdscr.addstr(y + 4, 4, f"Status: {status}", status_color)
+        else:
+            stdscr.addstr(y + 1, 4, "Initializing world model...", curses.A_DIM)
+
+    def _draw_worker(self, stdscr, y: int, width: int, height: int, worker_id: int):
+        """Draw a worker section."""
+        # Header
+        header = f"├─ WORKER {worker_id} "
+        stdscr.addstr(y, 2, header, curses.A_BOLD | curses.color_pair(5))
+        stdscr.addstr(y, 2 + len(header), "─" * (width - len(header) - 4))
+
+        ws = self.worker_statuses.get(worker_id, {})
+        if ws:
+            episode = ws.get("episode", 0)
+            reward = ws.get("reward", 0)
+            x_pos = ws.get("x_pos", 0)
+            best_x = ws.get("best_x", 0)
+            deaths = ws.get("deaths", 0)
+            flags = ws.get("flags", 0)
+            epsilon = ws.get("epsilon", 1.0)
+            exp = ws.get("experiences", 0)
+            q_mean = ws.get("q_mean", 0)
+            q_max = ws.get("q_max", 0)
+            steps_per_sec = ws.get("steps_per_sec", 0)
+            step = ws.get("step", 0)
+            curr_step = ws.get("curr_step", 0)
+            last_weight_sync = ws.get("last_weight_sync", 0)
+            weight_sync_count = ws.get("weight_sync_count", 0)
+            snapshot_restores = ws.get("snapshot_restores", 0)
+
+            # Calculate time since last weight sync
+            if last_weight_sync > 0:
+                seconds_ago = int(time.time() - last_weight_sync)
+                if seconds_ago < 60:
+                    sync_str = f"{seconds_ago}s"
+                elif seconds_ago < 3600:
+                    sync_str = f"{seconds_ago // 60}m"
+                else:
+                    sync_str = f"{seconds_ago // 3600}h"
+            else:
+                sync_str = "never"
+
+            # Main stats line with Q-values and weight sync
+            stats = f"Ep: {episode:4d}  Step: {step:4d}  X: {x_pos:4d}  Best: {best_x:4d}  Q: {q_mean:.1f}/{q_max:.1f}  {steps_per_sec:.0f} sps  Wgt: {sync_str}"
+            stdscr.addstr(y + 1, 4, stats)
+
+            # Secondary stats
+            death_color = curses.color_pair(3) if deaths > 0 else curses.A_NORMAL
+            flag_color = curses.color_pair(1) if flags > 0 else curses.A_NORMAL
+
+            stdscr.addstr(y + 2, 4, f"r={reward:8.0f}  💀=")
+            stdscr.addstr(f"{deaths:2d}", death_color)
+            stdscr.addstr(f"  ⏮={snapshot_restores:2d}")
+            stdscr.addstr("  🏁=")
+            stdscr.addstr(f"{flags:2d}", flag_color)
+            stdscr.addstr(f"  ε={epsilon:.3f}  Exp={exp:,}  Total={curr_step:,}  Syncs={weight_sync_count}")
+        else:
+            stdscr.addstr(y + 1, 4, "Starting...", curses.A_DIM)
+
+    def _draw_logs(self, stdscr, y: int, width: int, height: int):
+        """Draw the log section."""
+        stdscr.addstr(y, 2, "┌─ LOGS ", curses.A_BOLD)
+        stdscr.addstr(y, 10, "─" * (width - 12))
+
+        # Show most recent logs that fit
+        visible_logs = self.logs[-(height - 1) :] if height > 1 else []
+        for i, log in enumerate(visible_logs):
+            if y + 1 + i < stdscr.getmaxyx()[0] - 1:
+                # Truncate if too long
+                display_log = log[: width - 6] if len(log) > width - 6 else log
+
+                # Color based on content
+                if "[LEARNER]" in log:
+                    color = curses.color_pair(4)
+                elif "FLAG" in log or "🏁" in log:
+                    color = curses.color_pair(1)
+                elif "Synced" in log or "🔄" in log:
+                    color = curses.color_pair(2)
+                else:
+                    color = curses.A_NORMAL
+
+                try:
+                    stdscr.addstr(y + 1 + i, 4, display_log, color)
+                except curses.error:
+                    pass  # Ignore if we can't fit
+
+
+def create_ui_queue() -> mp.Queue:
+    """Create a queue for UI messages."""
+    return mp.Queue(maxsize=1000)
+
+
+def send_learner_status(
+    queue: mp.Queue,
+    step: int,
+    loss: float,
+    avg_loss: float,
+    buf_size: int,
+    pulled: int,
+    max_steps: int,
+    status: str = "training",
+    q_mean: float = 0.0,
+    q_max: float = 0.0,
+    td_error: float = 0.0,
+    grad_norm: float = 0.0,
+    reward_mean: float = 0.0,
+    steps_per_sec: float = 0.0,
+    queue_msgs_per_sec: float = 0.0,
+    queue_kb_per_sec: float = 0.0,
+):
+    """Send learner status update to UI."""
+    try:
+        queue.put_nowait(
+            UIMessage(
+                msg_type=MessageType.LEARNER_STATUS,
+                source_id=-1,
+                data={
+                    "step": step,
+                    "loss": loss,
+                    "avg_loss": avg_loss,
+                    "buf_size": buf_size,
+                    "pulled": pulled,
+                    "max_steps": max_steps,
+                    "status": status,
+                    "q_mean": q_mean,
+                    "q_max": q_max,
+                    "td_error": td_error,
+                    "grad_norm": grad_norm,
+                    "reward_mean": reward_mean,
+                    "steps_per_sec": steps_per_sec,
+                    "queue_msgs_per_sec": queue_msgs_per_sec,
+                    "queue_kb_per_sec": queue_kb_per_sec,
+                },
+            )
+        )
+    except Exception:
+        pass  # Queue full, skip update
+
+
+def send_learner_log(queue: mp.Queue, text: str):
+    """Send learner log message to UI."""
+    try:
+        queue.put_nowait(
+            UIMessage(
+                msg_type=MessageType.LEARNER_LOG, source_id=-1, data={"text": text}
+            )
+        )
+    except Exception:
+        pass
+
+
+def send_worker_status(
+    queue: mp.Queue,
+    worker_id: int,
+    episode: int,
+    reward: float,
+    x_pos: int,
+    best_x: int,
+    deaths: int,
+    flags: int,
+    epsilon: float,
+    experiences: int,
+    q_mean: float = 0.0,
+    q_max: float = 0.0,
+    steps_per_sec: float = 0.0,
+    step: int = 0,
+    curr_step: int = 0,
+    last_weight_sync: float = 0.0,
+    weight_sync_count: int = 0,
+    snapshot_restores: int = 0,
+):
+    """Send worker status update to UI."""
+    try:
+        queue.put_nowait(
+            UIMessage(
+                msg_type=MessageType.WORKER_STATUS,
+                source_id=worker_id,
+                data={
+                    "episode": episode,
+                    "reward": reward,
+                    "x_pos": x_pos,
+                    "best_x": best_x,
+                    "deaths": deaths,
+                    "flags": flags,
+                    "epsilon": epsilon,
+                    "experiences": experiences,
+                    "q_mean": q_mean,
+                    "q_max": q_max,
+                    "steps_per_sec": steps_per_sec,
+                    "step": step,
+                    "curr_step": curr_step,
+                    "last_weight_sync": last_weight_sync,
+                    "weight_sync_count": weight_sync_count,
+                    "snapshot_restores": snapshot_restores,
+                },
+            )
+        )
+    except Exception:
+        pass
+
+
+def send_worker_log(queue: mp.Queue, worker_id: int, text: str):
+    """Send worker log message to UI."""
+    try:
+        queue.put_nowait(
+            UIMessage(
+                msg_type=MessageType.WORKER_LOG,
+                source_id=worker_id,
+                data={"text": text},
+            )
+        )
+    except Exception:
+        pass
+
+
+def send_system_log(queue: mp.Queue, text: str):
+    """Send system log message to UI."""
+    try:
+        queue.put_nowait(
+            UIMessage(
+                msg_type=MessageType.SYSTEM_LOG, source_id=-1, data={"text": text}
+            )
+        )
+    except Exception:
+        pass
+
+
+def send_world_model_status(
+    queue: mp.Queue,
+    step: int,
+    wm_step: int,
+    q_step: int,
+    buf_size: int,
+    pulled: int,
+    max_steps: int,
+    status: str = "training",
+    phase: str = "world_model",
+    phase_step: int = 0,
+    phase_total: int = 1,
+    # World model metrics
+    wm_metrics: Any = None,
+    # Q-network metrics
+    q_mean: float = 0.0,
+    q_max: float = 0.0,
+    td_error: float = 0.0,
+    q_loss: float = 0.0,
+    grad_norm: float = 0.0,
+    reward_mean: float = 0.0,
+    steps_per_sec: float = 0.0,
+    queue_msgs_per_sec: float = 0.0,
+    queue_kb_per_sec: float = 0.0,
+):
+    """Send world model learner status update to UI."""
+    try:
+        # Convert WorldModelMetrics to dict if needed
+        wm_metrics_dict = None
+        if wm_metrics is not None:
+            if hasattr(wm_metrics, "_asdict"):
+                wm_metrics_dict = wm_metrics._asdict()
+            elif isinstance(wm_metrics, dict):
+                wm_metrics_dict = wm_metrics
+            else:
+                wm_metrics_dict = {
+                    "total_loss": getattr(wm_metrics, "total_loss", 0),
+                    "recon_mse": getattr(wm_metrics, "recon_mse", 0),
+                    "pred_mse": getattr(wm_metrics, "pred_mse", 0),
+                    "ssim": getattr(wm_metrics, "ssim", 0),
+                    "dynamics_loss": getattr(wm_metrics, "dynamics_loss", 0),
+                    "reward_loss": getattr(wm_metrics, "reward_loss", 0),
+                    "kl_loss": getattr(wm_metrics, "kl_loss", 0),
+                }
+
+        queue.put_nowait(
+            UIMessage(
+                msg_type=MessageType.WORLD_MODEL_STATUS,
+                source_id=-1,
+                data={
+                    "step": step,
+                    "wm_step": wm_step,
+                    "q_step": q_step,
+                    "buf_size": buf_size,
+                    "pulled": pulled,
+                    "max_steps": max_steps,
+                    "status": status,
+                    "phase": phase,
+                    "phase_step": phase_step,
+                    "phase_total": phase_total,
+                    "wm_metrics": wm_metrics_dict,
+                    "q_mean": q_mean,
+                    "q_max": q_max,
+                    "td_error": td_error,
+                    "q_loss": q_loss,
+                    "grad_norm": grad_norm,
+                    "reward_mean": reward_mean,
+                    "steps_per_sec": steps_per_sec,
+                    "queue_msgs_per_sec": queue_msgs_per_sec,
+                    "queue_kb_per_sec": queue_kb_per_sec,
+                },
+            )
+        )
+    except Exception:
+        pass  # Queue full, skip update
+
+
+def run_ui(num_workers: int, ui_queue: mp.Queue):
+    """Entry point for UI process."""
+    ui = TrainingUI(num_workers=num_workers, ui_queue=ui_queue)
+    ui.run()

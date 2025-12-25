@@ -1,0 +1,50 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg-info/
+dist/
+build/
+.venv/
+.pyenv/
+
+# Checkpoints and training data
+checkpoints/*
+agents/*
+*.pt
+*.chkpt
+*.pkl
+*.lz4
+
+# Logs
+log
+*.log
+*.csv
+
+# Jupyter
+*.ipynb_checkpoints/
+*.ipynb
+
+# IDE
+.vscode/
+.idea/
+.cursor/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Git
+.git/
+.gitignore
+
+# Large files
+*.jpg
+*.png
+*.mp4
+
