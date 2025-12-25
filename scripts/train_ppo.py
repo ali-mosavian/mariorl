@@ -45,6 +45,120 @@ def run_training_ui(num_workers: int, ui_queue: Queue) -> None:
     ui.run()
 
 
+class ProgressMonitorCallback(BaseCallback):
+    """
+    Monitor X-position progress and recover from best checkpoint when stuck.
+
+    Detects stagnation by tracking:
+    - Best X position ever achieved
+    - Episodes since X improvement
+    - Rolling average X position
+
+    When stuck for too long, reloads the best performing checkpoint.
+    """
+
+    def __init__(
+        self,
+        save_path: Path,
+        patience_episodes: int = 2000,
+        check_freq: int = 100,
+        min_improvement: int = 50,
+        verbose: int = 1,
+    ):
+        super().__init__(verbose)
+        self.save_path = Path(save_path)
+        self.patience_episodes = patience_episodes
+        self.check_freq = check_freq
+        self.min_improvement = min_improvement
+
+        # Tracking state
+        self.best_x_ever = 0
+        self.best_x_checkpoint = 0
+        self.episode_count = 0
+        self.episodes_since_improvement = 0
+        self.x_history: List[int] = []
+        self.recovery_count = 0
+        self.last_check_episode = 0
+
+    def _on_step(self) -> bool:
+        """Called after each step."""
+        infos = self.locals.get("infos", [])
+        dones = self.locals.get("dones", [])
+
+        for info, done in zip(infos, dones, strict=False):
+            x_pos = info.get("x_pos", 0)
+
+            # Track best X position this step
+            if x_pos > self.best_x_ever:
+                improvement = x_pos - self.best_x_ever
+                self.best_x_ever = x_pos
+                if improvement >= self.min_improvement:
+                    self.episodes_since_improvement = 0
+                    if self.verbose:
+                        print(f"📈 New best X: {self.best_x_ever} (+{improvement})")
+
+            if done:
+                self.episode_count += 1
+                self.x_history.append(x_pos)
+                if len(self.x_history) > 100:
+                    self.x_history.pop(0)
+
+        # Periodic check
+        if self.episode_count - self.last_check_episode >= self.check_freq:
+            self.last_check_episode = self.episode_count
+            self.episodes_since_improvement += self.check_freq
+            self._check_progress()
+
+        return True
+
+    def _check_progress(self) -> None:
+        """Check if training is making progress."""
+        if not self.x_history:
+            return
+
+        avg_x = sum(self.x_history) / len(self.x_history)
+        best_model_path = self.save_path / "best_progress_model.zip"
+
+        # Save checkpoint if we've improved
+        if self.best_x_ever > self.best_x_checkpoint + self.min_improvement:
+            self.best_x_checkpoint = self.best_x_ever
+            if self.model is not None:
+                self.model.save(best_model_path)
+                if self.verbose:
+                    print(f"💾 Saved best progress checkpoint (x={self.best_x_checkpoint})")
+
+        # Check for stagnation
+        if self.episodes_since_improvement >= self.patience_episodes:
+            print("\n⚠️  STAGNATION DETECTED!")
+            print(f"    Best X ever: {self.best_x_ever}")
+            print(f"    Avg X (last 100): {avg_x:.0f}")
+            print(f"    Episodes without improvement: {self.episodes_since_improvement}")
+
+            # Try to recover by increasing exploration
+            if best_model_path.exists() and self.model is not None:
+                self.recovery_count += 1
+                print(f"    🔄 Recovery #{self.recovery_count}: Increasing exploration...")
+                try:
+                    print("    📊 Boosting entropy coefficient for more exploration...")
+                    if hasattr(self.model, "ent_coef"):
+                        old_ent = self.model.ent_coef
+                        self.model.ent_coef = min(0.1, self.model.ent_coef * 1.5)
+                        print(f"    ent_coef: {old_ent:.4f} → {self.model.ent_coef:.4f}")
+                except Exception as e:
+                    print(f"    ❌ Recovery failed: {e}")
+
+            # Reset improvement counter
+            self.episodes_since_improvement = 0
+
+    def _on_training_end(self) -> None:
+        """Called at end of training."""
+        if self.verbose:
+            print("\n📊 Progress Monitor Summary:")
+            print(f"    Best X ever: {self.best_x_ever}")
+            print(f"    Total episodes: {self.episode_count}")
+            print(f"    Recovery attempts: {self.recovery_count}")
+
+
 class UICallback(BaseCallback):
     """
     Callback that sends training metrics to the ncurses UI.
@@ -283,6 +397,13 @@ def main(
             save_freq=50000 // num_envs,
             save_path=str(run_dir),
             name_prefix="ppo_mario",
+        ),
+        ProgressMonitorCallback(
+            save_path=run_dir,
+            patience_episodes=2000,  # Episodes without X improvement before intervention
+            check_freq=100,  # Check every N episodes
+            min_improvement=50,  # Min X improvement to count as progress
+            verbose=1,
         ),
     ]
 
