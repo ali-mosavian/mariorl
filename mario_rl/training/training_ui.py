@@ -225,7 +225,7 @@ class TrainingUI:
         header_height = 3
         world_model_height = 7 if self.use_world_model else 0  # Increased for charts
         learner_height = 7 if not self.use_world_model else 0  # Increased for chart
-        worker_height = 3
+        worker_height = 4  # Increased for convergence metrics line
         workers_total_height = self.num_workers * worker_height
         log_height = height - header_height - world_model_height - learner_height - workers_total_height - 2
 
@@ -449,10 +449,14 @@ class TrainingUI:
             q_max = ws.get("q_max", 0)
             steps_per_sec = ws.get("steps_per_sec", 0)
             step = ws.get("step", 0)
-            curr_step = ws.get("curr_step", 0)
+            ws.get("curr_step", 0)
             last_weight_sync = ws.get("last_weight_sync", 0)
             weight_sync_count = ws.get("weight_sync_count", 0)
             snapshot_restores = ws.get("snapshot_restores", 0)
+            # Convergence metrics
+            rolling_avg_reward = ws.get("rolling_avg_reward", 0)
+            first_flag_time = ws.get("first_flag_time", 0)
+            best_x_ever = ws.get("best_x_ever", 0)
 
             # Calculate time since last weight sync
             if last_weight_sync > 0:
@@ -479,7 +483,23 @@ class TrainingUI:
             stdscr.addstr(f"  ⏮={snapshot_restores:2d}")
             stdscr.addstr("  🏁=")
             stdscr.addstr(f"{flags:2d}", flag_color)
-            stdscr.addstr(f"  ε={epsilon:.3f}  Exp={exp:,}  Total={curr_step:,}  Syncs={weight_sync_count}")
+            stdscr.addstr(f"  ε={epsilon:.3f}  Exp={exp:,}  Syncs={weight_sync_count}")
+
+            # Convergence metrics line (rolling avg + first flag time)
+            avg_color = curses.color_pair(1) if rolling_avg_reward > 0 else curses.color_pair(3)
+            stdscr.addstr(y + 3, 4, "r̄₁₀₀=")
+            stdscr.addstr(f"{rolling_avg_reward:8.0f}", avg_color)
+            stdscr.addstr(f"  BestX={best_x_ever:5d}  ")
+
+            if first_flag_time > 0:
+                # Format time nicely
+                mins = int(first_flag_time // 60)
+                secs = int(first_flag_time % 60)
+                stdscr.addstr("1st🏁=", curses.A_BOLD)
+                stdscr.addstr(f"{mins}m{secs:02d}s", curses.color_pair(1) | curses.A_BOLD)
+            else:
+                stdscr.addstr("1st🏁=", curses.A_DIM)
+                stdscr.addstr("waiting", curses.A_DIM)
         else:
             stdscr.addstr(y + 1, 4, "Starting...", curses.A_DIM)
 
@@ -591,6 +611,10 @@ def send_worker_status(
     weight_sync_count: int = 0,
     snapshot_restores: int = 0,
     current_level: str = "?",
+    # Convergence metrics
+    rolling_avg_reward: float = 0.0,
+    first_flag_time: float = 0.0,
+    best_x_ever: int = 0,
 ):
     """Send worker status update to UI."""
     try:
@@ -616,6 +640,10 @@ def send_worker_status(
                     "weight_sync_count": weight_sync_count,
                     "snapshot_restores": snapshot_restores,
                     "current_level": current_level,
+                    # Convergence metrics
+                    "rolling_avg_reward": rolling_avg_reward,
+                    "first_flag_time": first_flag_time,
+                    "best_x_ever": best_x_ever,
                 },
             )
         )

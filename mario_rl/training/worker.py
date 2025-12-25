@@ -121,6 +121,13 @@ class Worker:
     weight_sync_count: int = field(init=False, default=0)
     snapshot_restores: int = field(init=False, default=0)
 
+    # Convergence tracking
+    reward_history: list = field(init=False, repr=False, default_factory=list)
+    rolling_avg_reward: float = field(init=False, default=0.0)
+    first_flag_time: float = field(init=False, default=0.0)  # 0 = no flag yet
+    training_start_time: float = field(init=False, default=0.0)
+    best_x_ever: int = field(init=False, default=0)
+
     def __post_init__(self):
         """Initialize environment and network after dataclass fields are set."""
         # Create environment
@@ -410,6 +417,10 @@ class Worker:
                 weight_sync_count=self.weight_sync_count,
                 snapshot_restores=self.snapshot_restores,
                 current_level=self.base_env.current_level,
+                # Convergence metrics
+                rolling_avg_reward=self.rolling_avg_reward,
+                first_flag_time=self.first_flag_time,
+                best_x_ever=self.best_x_ever,
             )
         elif step > 0 and step % 200 == 0:
             # Print real-time status during episode (every 200 steps)
@@ -465,6 +476,12 @@ class Worker:
         best_x_pos = 0
         last_weight_load = 0
 
+        # Initialize convergence tracking
+        self.training_start_time = time_module.time()
+        self.reward_history = []
+        self.first_flag_time = 0.0
+        self.best_x_ever = 0
+
         # Send initial status
         self._send_status(episode, 0, 0, 0, 0, 0)
 
@@ -479,10 +496,23 @@ class Worker:
             # Track best progress
             if stats["x_pos"] > best_x_pos:
                 best_x_pos = stats["x_pos"]
+            if stats["x_pos"] > self.best_x_ever:
+                self.best_x_ever = stats["x_pos"]
+
+            # Update reward history for rolling average (last 100 episodes)
+            self.reward_history.append(stats["reward"])
+            if len(self.reward_history) > 100:
+                self.reward_history.pop(0)
+            self.rolling_avg_reward = sum(self.reward_history) / len(self.reward_history)
 
             if stats["flag_get"]:
                 total_flags += 1
-                self._log(f"🏁 FLAG GET! Episode {episode}, x={stats['x_pos']}, flags={total_flags}")
+                # Record time to first flag
+                if self.first_flag_time == 0.0:
+                    self.first_flag_time = time_module.time() - self.training_start_time
+                    self._log(f"🏁 FIRST FLAG! Episode {episode}, time={self.first_flag_time:.1f}s, x={stats['x_pos']}")
+                else:
+                    self._log(f"🏁 FLAG GET! Episode {episode}, x={stats['x_pos']}, flags={total_flags}")
 
             # Send end-of-episode status update
             self._send_status(
