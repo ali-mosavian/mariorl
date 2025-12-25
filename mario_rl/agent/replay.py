@@ -1,28 +1,25 @@
 # +
 import os
 import pickle
-
 from typing import List
 from typing import Deque
 from typing import Tuple
 from typing import Union
-from typing import Literal
 from typing import TypeVar
 from typing import Iterable
 from typing import Optional
 from typing import Sequence
 from typing import TypedDict
-from typing import NamedTuple
-from itertools import starmap
 from collections import deque
+from itertools import starmap
+from typing import NamedTuple
 from dataclasses import dataclass
 
-import numpy as np
 import lz4.block
 import lz4.frame
+import numpy as np
 
 from mario_rl.environment.frame_stack import LazyFrames
-
 
 T = TypeVar("T")
 
@@ -122,7 +119,7 @@ def batch_sequence(sequence: Sequence[T], batch_size: int) -> Iterable[T]:
 def prepare_batch(batch: Iterable[Experience]) -> ExperienceBatch:
     state, action, reward, next_state, done, actions = starmap(
         np.ndarray.astype,
-        zip(map(np.stack, zip(*batch)), ["u1", "i8", "f4", "u1", "?", "i8"]),
+        zip(map(np.stack, zip(*batch, strict=False)), ["u1", "i8", "f4", "u1", "?", "i8"], strict=False),
     )
 
     return ExperienceBatch(
@@ -140,7 +137,7 @@ class PriorityReplayBuffer:
     _memory: Deque[Memory]
     _priorities: Optional[np.ndarray] = None
 
-    def __init__(self, max_len: int, memory: List[Memory] = tuple()):
+    def __init__(self, max_len: int, memory: List[Memory] = ()):
         self._memory = deque(memory, maxlen=max_len)
 
     def __len__(self):
@@ -153,7 +150,7 @@ class PriorityReplayBuffer:
         return (unpack_experience(m) for m in self._memory)
 
     def to_dict(self) -> dict:
-        return {"max_len": self._memory.maxlen, "memory": [m for m in self._memory]}
+        return {"max_len": self._memory.maxlen, "memory": list(self._memory)}
 
     def _clear_caches(self):
         self._priorities = None
@@ -164,9 +161,7 @@ class PriorityReplayBuffer:
             self._priorities = np.array([m["p"] for m in self._memory], "f4")
         return self._priorities
 
-    def add(
-        self, s: LazyFrames, a: int, r: float, s_: LazyFrames, d: bool, a_: List[int]
-    ):
+    def add(self, s: LazyFrames, a: int, r: float, s_: LazyFrames, d: bool, a_: List[int]):
         self._clear_caches()
         self._memory.append(pack_experience(s=s, a=a, r=r, s_=s_, d=d, a_=a_, p=0.1))
 
@@ -181,15 +176,13 @@ class PriorityReplayBuffer:
         p = np.abs(self.priorities) + 1e-36
         p /= p.sum()
 
-        indices = np.random.choice(
-            np.arange(0, len(p)), size=batch_size, p=p, replace=False
-        )
+        indices = np.random.choice(np.arange(0, len(p)), size=batch_size, p=p, replace=False)
 
         return prepare_batch((self[i] for i in indices)), indices
 
     def update_priorities(self, indices: Sequence[int], priorities: np.array):
         self._clear_caches()
-        for i, p in zip(indices, priorities):
+        for i, p in zip(indices, priorities, strict=False):
             self._memory[i]["p"] = p
 
     def save(self, path: os.PathLike):

@@ -1,5 +1,4 @@
 import dataclasses
-
 from typing import List
 from typing import Tuple
 from typing import Literal
@@ -8,17 +7,12 @@ from dataclasses import dataclass
 
 import numpy as np
 import gymnasium as gym
-
 from nes_py import NESEnv
-from gym_super_mario_bros import SuperMarioBrosEnv
 from nes_py._image_viewer import ImageViewer
-
+from gym_super_mario_bros import SuperMarioBrosEnv
 
 RomModes = Literal["vanilla", "pixel", "downsample"]
-LevelModes = (
-    Literal["sequential", "random"]
-    | Tuple[Literal[1, 2, 3, 4, 5, 6, 7, 8], Literal[1, 2, 3, 4]]
-)
+LevelModes = Literal["sequential", "random"] | Tuple[Literal[1, 2, 3, 4, 5, 6, 7, 8], Literal[1, 2, 3, 4]]
 
 
 @dataclass(frozen=True)
@@ -47,14 +41,14 @@ class Reward:
     finish_reward: int = 0
 
     @staticmethod
-    def calc(c: State, l: State) -> "Reward":
+    def calc(c: State, last: State) -> "Reward":
         return Reward(
-            x_reward=min(100, max(-15, c.x_pos - l.x_pos_max)),
-            time_penalty=min(0, c.time - l.time),
+            x_reward=min(100, max(-15, c.x_pos - last.x_pos_max)),
+            time_penalty=min(0, c.time - last.time),
             death_penalty=(not c.is_alive) * -1000,
-            coin_reward=min(3, max(0, c.coins - l.coins)),
-            score_reward=min(3, max(0, c.score - l.score)),
-            powerup_reward=(c.powerup_state - l.powerup_state) * 100,
+            coin_reward=min(3, max(0, c.coins - last.coins)),
+            score_reward=min(3, max(0, c.score - last.score)),
+            powerup_reward=(c.powerup_state - last.powerup_state) * 100,
             finish_reward=c.got_flag * 1000,
         )
 
@@ -95,9 +89,7 @@ class MarioBrosLevel(SuperMarioBrosEnv):
             score=self._score,
             x_pos=self._x_position,
             x_pos_max=(
-                max(self._x_position, self._last_state.x_pos_max)
-                if self._last_state is not None
-                else self._x_position
+                max(self._x_position, self._last_state.x_pos_max) if self._last_state is not None else self._x_position
             ),
             coins=self._coins,
             powerup_state=self._powerup_state,
@@ -131,9 +123,7 @@ class MarioBrosLevel(SuperMarioBrosEnv):
             "is_dying": self._is_dying,
             "is_dead": self._is_dead,
             "state": dataclasses.asdict(self.state),
-            "last_state": dataclasses.asdict(self._last_state)
-            if self._last_state
-            else None,
+            "last_state": dataclasses.asdict(self._last_state) if self._last_state else None,
         }
 
 
@@ -159,15 +149,10 @@ class SuperMarioBrosMultiLevel(gym.Env):
         if isinstance(level, tuple):
             world, stage = level
             self.envs = [[None] * 4] * 8
-            self.envs[world - 1][stage - 1] = MarioBrosLevel(
-                rom_mode=rom_mode, target=(world, stage)
-            )
+            self.envs[world - 1][stage - 1] = MarioBrosLevel(rom_mode=rom_mode, target=(world, stage))
         else:
             self.envs = [
-                [
-                    MarioBrosLevel(rom_mode=rom_mode, target=(world, stage))
-                    for stage in range(1, 5)
-                ]
+                [MarioBrosLevel(rom_mode=rom_mode, target=(world, stage)) for stage in range(1, 5)]
                 for world in range(1, 9)
             ]
 
@@ -183,8 +168,8 @@ class SuperMarioBrosMultiLevel(gym.Env):
                 return levels[(levels.index(env) + 1) % len(levels)]
 
         elif isinstance(self.level, tuple):
-            w, l = self.level
-            return self.envs[w - 1][l - 1]
+            w, level = self.level
+            return self.envs[w - 1][level - 1]
 
         raise RuntimeError(f"Invalid level_mode: {repr(self.level)}")
 
@@ -195,9 +180,7 @@ class SuperMarioBrosMultiLevel(gym.Env):
         self.rand.seed(seed)
         return [seed]
 
-    def reset(
-        self, *, seed: Optional[int] = None, options: Optional[dict] = None
-    ) -> Tuple[gym.core.ObsType, dict]:
+    def reset(self, *, seed: Optional[int] = None, options: Optional[dict] = None) -> Tuple[gym.core.ObsType, dict]:
         """
         Reset the state of the environment and returns an initial observation.
 
@@ -216,9 +199,7 @@ class SuperMarioBrosMultiLevel(gym.Env):
         # reset the environment
         return env.reset()
 
-    def step(
-        self, action: gym.core.ActType
-    ) -> Tuple[gym.core.ObsType, float, bool, bool, dict]:
+    def step(self, action: gym.core.ActType) -> Tuple[gym.core.ObsType, float, bool, bool, dict]:
         return self.env.step(action)
 
     def close(self):

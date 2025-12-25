@@ -1,14 +1,9 @@
-import time
-
 from typing import Tuple
-from collections import deque
 
 import numpy as np
 import gymnasium as gym
-
 from skimage import transform
 from gymnasium.spaces import Box
-from gym_super_mario_bros import SuperMarioBrosEnv
 
 
 class ResizeObservation(gym.ObservationWrapper):
@@ -31,9 +26,7 @@ class ResizeObservation(gym.ObservationWrapper):
 
 
 class SkipFrame(gym.Wrapper):
-    def __init__(
-        self, env, skip, render_frames: bool = False, playback_speed: float = 1.0
-    ):
+    def __init__(self, env, skip, render_frames: bool = False, playback_speed: float = 1.0):
         """Return only every `skip`-th frame"""
         super().__init__(env)
         self._skip = skip
@@ -45,85 +38,67 @@ class SkipFrame(gym.Wrapper):
         """Repeat action, and sum reward"""
         total_reward = 0.0
         done = False
-        for i in range(self._skip):
+        for _i in range(self._skip):
             # Accumulate reward and repeat the same action
             s_, r, done, truncated, info = self.env.step(action)
             total_reward += r
-            if done or truncated:
-                break
 
             if self.render_frames:
-                self.env.render()
+                import time
 
+                # Calculate when the next frame should be rendered
+                current_time = time.time()
+                if self.next_render_time is None or current_time >= self.next_render_time:
+                    self.env.render()
+                    # Schedule next render time based on playback speed
+                    # At speed 1.0: render every 1/60 sec (60 fps)
+                    frame_time = (1.0 / 60.0) / self.playback_speed
+                    self.next_render_time = current_time + frame_time
+
+            if done or truncated:
+                break
         return s_, total_reward, done, truncated, info
 
-
-class SwapAxes(gym.Wrapper):
-    def __init__(self, env):
-        super().__init__(env)
-
-    @staticmethod
-    def _swap(x):
-        return x.swapaxes(-1, -2).swapaxes(-2, -3)
-
     def reset(self, **kwargs):
-        obs, info = self.env.reset(**kwargs)
-        return SwapAxes._swap(obs), info
-
-    def step(self, action):
-        state, reward, terminated, truncated, info = self.env.step(action)
-        return (SwapAxes._swap(state), reward, terminated, truncated, info)
-
-
-class NESCompatabilityLayer(gym.core.Wrapper):
-    def __init__(self, env: gym.Env):
-        super().__init__(env)
-
-    def _get_info(self):
-        return {
-            **SuperMarioBrosEnv._get_info(self.env.unwrapped),
-            "is_dying": self.env.unwrapped._is_dying,
-            "is_dead": self.env.unwrapped._is_dead,
-        }
-
-    def reset(self, **kwargs) -> Tuple[gym.core.ObsType, dict]:
-        return self.env.reset(**kwargs), self._get_info()
-
-    def step(
-        self, act: gym.core.ActType
-    ) -> Tuple[gym.core.ObsType, float, bool, bool, dict]:
-        return (
-            *self.env.step(act)[:-1],
-            self._get_info(),
-        )
-
-
-class NESRamObservation(gym.core.ObservationWrapper):
-    def __init__(self, env: gym.Env):
-        super().__init__(env)
-        self.observation_space = gym.spaces.Box(
-            low=0, high=255, shape=env.unwrapped.ram.shape, dtype="u1"
-        )
-
-    def observation(self, _) -> np.ndarray:
-        return self.env.unwrapped.ram
-
-
-class NESSaveRestore(gym.core.Wrapper):
-    def __init__(self, env: gym.Env):
-        super().__init__(env)
-        self._stack = list()
-
-    def reset(self, **kwargs) -> Tuple[gym.core.ObsType, dict]:
-        self._stack.clear()
+        self.next_render_time = None  # Reset timing when env resets
         return self.env.reset(**kwargs)
 
-    def push(self):
-        self._stack.append(self.env.unwrapped.env.ram.copy())
 
-    def pop(self):
-        if len(self._stack) == 0:
-            return
+class GrayScaleObservation(gym.ObservationWrapper):
+    """Convert observation to grayscale."""
 
-        state = self._stack.pop()
-        self.env.unwrapped.env.ram[:] = state[:]
+    def __init__(self, env, keep_dim=False):
+        super().__init__(env)
+        self.keep_dim = keep_dim
+
+        # Get the original shape from the observation space
+        original_shape = env.observation_space.shape
+        assert len(original_shape) == 3 and original_shape[2] == 3, "Expected shape (H, W, 3)"
+
+        # New shape either (H, W, 1) or (H, W)
+        if self.keep_dim:
+            new_shape = original_shape[:2] + (1,)
+        else:
+            new_shape = original_shape[:2]
+
+        # Update observation space
+        self.observation_space = Box(low=0, high=255, shape=new_shape, dtype=np.uint8)
+
+    def observation(self, obs):
+        # RGB to grayscale conversion using standard weights
+        obs = np.dot(obs[..., :3], [0.299, 0.587, 0.114]).astype(np.uint8)
+        if self.keep_dim:
+            obs = np.expand_dims(obs, axis=-1)
+        return obs
+
+
+class FrameStack(gym.Wrapper):
+    def __init__(self, env):
+        super().__init__(env)
+        self._stack = []
+
+    def reset(self, **kwargs) -> Tuple[gym.core.ObsType, dict]:
+        return self.env.reset(**kwargs)
+
+    def step(self, action):
+        return self.env.step(action)

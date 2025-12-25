@@ -10,13 +10,12 @@ A modular RL framework featuring:
 
 __version__ = "0.1.0"
 
-from mario_rl.agent.world_model import MarioWorldModel
-from mario_rl.agent.world_model import LatentDDQN
 from mario_rl.agent.neural import DuelingDDQNNet
+from mario_rl.agent.world_model import LatentDDQN
+from mario_rl.agent.world_model import MarioWorldModel
 
 __all__ = [
     "MarioWorldModel",
     "LatentDDQN",
     "DuelingDDQNNet",
 ]
-

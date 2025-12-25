@@ -1,11 +1,9 @@
 # +
 import copy
-
 from typing import Tuple
 from typing import Callable
 
 import torch
-
 from torch import nn
 
 
@@ -192,9 +190,7 @@ class DuelingDQNNet(nn.Module):
         advantages = self.advantage_head(features)  # [batch_size, num_actions]
         values = self.value_head(features)  # [batch_size, 1]
 
-        q_values = values + (
-            advantages - torch.mean(advantages, dim=1, keepdim=True)
-        )  # [batch_size, num_actions]
+        q_values = values + (advantages - torch.mean(advantages, dim=1, keepdim=True))  # [batch_size, num_actions]
 
         return q_values
 

@@ -1,19 +1,17 @@
 import time
-
 from os import PathLike
 from typing import Dict
 from typing import List
+from pathlib import Path
 from typing import Union
 from typing import Callable
-from pathlib import Path
-from operator import itemgetter as get
-from contextlib import contextmanager
 from collections import defaultdict
+from contextlib import contextmanager
+from operator import itemgetter as get
 
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
-
 
 plt.ion()
 plt.style.use("seaborn-v0_8")
@@ -24,7 +22,7 @@ AggFunc = Callable[[Union[List, np.array]], float]
 class MetricLoggerPD:
     def __init__(self, save_dir: PathLike, agg_func: Dict[str, AggFunc]):
         self.path = Path(save_dir)
-        self.episodes = list()
+        self.episodes = []
         self.curr_ep = defaultdict(list)
         self.agg_func = agg_func
 
@@ -64,17 +62,9 @@ class MetricLoggerPD:
 
         mapper = {
             pd.Timestamp: lambda x: x.strftime("%Y-%m-%d %H:%M:%S"),
-            **{
-                t: lambda x: round(x, 2)
-                for t in [float, np.float16, np.float32, np.float64]
-            },
+            **{t: lambda x: round(x, 2) for t in [float, np.float16, np.float32, np.float64]},
         }
-        print(
-            {
-                k: mapper.get(type(v), lambda x: x)(v)
-                for k, v in sorted(self.episodes[-1].items(), key=get(0))
-            }
-        )
+        print({k: mapper.get(type(v), lambda x: x)(v) for k, v in sorted(self.episodes[-1].items(), key=get(0))})
 
         self.curr_ep.clear()
 

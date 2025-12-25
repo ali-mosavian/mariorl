@@ -17,8 +17,8 @@ os.environ["KMP_DUPLICATE_LIB_OK"] = "True"
 
 import signal
 from typing import Any
-from typing import Optional
 from pathlib import Path
+from typing import Optional
 from datetime import datetime
 from multiprocessing import Queue
 from multiprocessing import Process
@@ -41,10 +41,138 @@ def signal_handler(signum, frame):
     sys.exit(0)
 
 
+def logged_worker(log_file: Path, *args, **kwargs):
+    """Wrapper for run_worker that redirects stdout/stderr to a log file."""
+    import traceback
+
+    # Open log file with line buffering
+    try:
+        f = open(log_file, "w", buffering=1)
+    except Exception as e:
+        print(f"Failed to open log file {log_file}: {e}", file=sys.stderr)
+        raise
+
+    # Redirect stdout/stderr
+    original_stdout = sys.stdout
+    original_stderr = sys.stderr
+    sys.stdout = f
+    sys.stderr = f
+
+    try:
+        print(f"=== Worker started at {datetime.now()} ===")
+        print(f"Args: {args}")
+        print(f"Kwargs: {kwargs}")
+        print("=" * 60)
+        sys.stdout.flush()
+
+        run_worker(*args, **kwargs)
+
+        print(f"\n=== Worker exited normally at {datetime.now()} ===")
+    except BaseException as e:
+        # Catch ALL exceptions including KeyboardInterrupt, SystemExit
+        print(f"\n{'='*60}")
+        print(f"FATAL: Worker crashed with {type(e).__name__}: {e}")
+        print(f"Timestamp: {datetime.now()}")
+        print(f"{'='*60}")
+        traceback.print_exc()
+        sys.stdout.flush()
+        sys.stderr.flush()
+        raise
+    finally:
+        # Ensure we close the file and restore streams
+        sys.stdout.flush()
+        sys.stderr.flush()
+        sys.stdout = original_stdout
+        sys.stderr = original_stderr
+        f.close()
+
+
+def logged_learner(log_file: Path, *args, **kwargs):
+    """Wrapper for run_learner that redirects stdout/stderr to a log file."""
+    import traceback
+
+    try:
+        f = open(log_file, "w", buffering=1)
+    except Exception as e:
+        print(f"Failed to open log file {log_file}: {e}", file=sys.stderr)
+        raise
+
+    original_stdout = sys.stdout
+    original_stderr = sys.stderr
+    sys.stdout = f
+    sys.stderr = f
+
+    try:
+        print(f"=== Learner started at {datetime.now()} ===")
+        print(f"Args: {args}")
+        print(f"Kwargs: {kwargs}")
+        print("=" * 60)
+        sys.stdout.flush()
+
+        run_learner(*args, **kwargs)
+
+        print(f"\n=== Learner exited normally at {datetime.now()} ===")
+    except BaseException as e:
+        print(f"\n{'='*60}")
+        print(f"FATAL: Learner crashed with {type(e).__name__}: {e}")
+        print(f"Timestamp: {datetime.now()}")
+        print(f"{'='*60}")
+        traceback.print_exc()
+        sys.stdout.flush()
+        sys.stderr.flush()
+        raise
+    finally:
+        sys.stdout.flush()
+        sys.stderr.flush()
+        sys.stdout = original_stdout
+        sys.stderr = original_stderr
+        f.close()
+
+
+def logged_world_model_learner(log_file: Path, *args, **kwargs):
+    """Wrapper for run_world_model_learner that redirects stdout/stderr to a log file."""
+    import traceback
+
+    try:
+        f = open(log_file, "w", buffering=1)
+    except Exception as e:
+        print(f"Failed to open log file {log_file}: {e}", file=sys.stderr)
+        raise
+
+    original_stdout = sys.stdout
+    original_stderr = sys.stderr
+    sys.stdout = f
+    sys.stderr = f
+
+    try:
+        print(f"=== World Model Learner started at {datetime.now()} ===")
+        print(f"Args: {args}")
+        print(f"Kwargs: {kwargs}")
+        print("=" * 60)
+        sys.stdout.flush()
+
+        run_world_model_learner(*args, **kwargs)
+
+        print(f"\n=== World Model Learner exited normally at {datetime.now()} ===")
+    except BaseException as e:
+        print(f"\n{'='*60}")
+        print(f"FATAL: World Model Learner crashed with {type(e).__name__}: {e}")
+        print(f"Timestamp: {datetime.now()}")
+        print(f"{'='*60}")
+        traceback.print_exc()
+        sys.stdout.flush()
+        sys.stderr.flush()
+        raise
+    finally:
+        sys.stdout.flush()
+        sys.stderr.flush()
+        sys.stdout = original_stdout
+        sys.stderr = original_stderr
+        f.close()
+
+
 @click.command()
-@click.option(
-    "-n", "--num-workers", type=int, default=4, help="Number of worker processes"
-)
+@click.option("-n", "--num-workers", type=int, default=4, help="Number of worker processes")
 @click.option(
     "-l",
     "--level",
@@ -52,20 +180,12 @@ def signal_handler(signum, frame):
     default="1,1",
     help="Level to play (e.g., '1,1' or '1,2')",
 )
-@click.option(
-    "-b", "--buffer-size", type=int, default=250000, help="Replay buffer size"
-)
+@click.option("-b", "--buffer-size", type=int, default=250000, help="Replay buffer size")
 @click.option("--batch-size", type=int, default=64, help="Training batch size")
 @click.option("--render", is_flag=True, help="Render first worker (for visualization)")
-@click.option(
-    "--episodes", type=int, default=-1, help="Episodes per worker (-1 for infinite)"
-)
-@click.option(
-    "--learner-steps", type=int, default=-1, help="Max learner steps (-1 for infinite)"
-)
-@click.option(
-    "--save-dir", type=Path, default=None, help="Directory to save checkpoints"
-)
+@click.option("--episodes", type=int, default=-1, help="Episodes per worker (-1 for infinite)")
+@click.option("--learner-steps", type=int, default=-1, help="Max learner steps (-1 for infinite)")
+@click.option("--save-dir", type=Path, default=None, help="Directory to save checkpoints")
 @click.option("--ui/--no-ui", default=True, help="Use curses UI (default: yes)")
 # World model options
 @click.option(
@@ -73,9 +193,7 @@ def signal_handler(signum, frame):
     default=False,
     help="Use world model learner (default: no)",
 )
-@click.option(
-    "--latent-dim", type=int, default=128, help="World model latent dimension"
-)
+@click.option("--latent-dim", type=int, default=128, help="World model latent dimension")
 @click.option(
     "--wm-steps",
     type=int,
@@ -88,12 +206,8 @@ def signal_handler(signum, frame):
     default=500,
     help="Q-network training steps per cycle",
 )
-@click.option(
-    "--wm-lr", type=float, default=1e-4, help="World model learning rate"
-)
-@click.option(
-    "--q-lr", type=float, default=1e-4, help="Q-network learning rate"
-)
+@click.option("--wm-lr", type=float, default=1e-4, help="World model learning rate")
+@click.option("--q-lr", type=float, default=1e-4, help="Q-network learning rate")
 def main(
     num_workers: int,
     level: str,
@@ -119,12 +233,13 @@ def main(
 
     # Setup save directory
     if save_dir is None:
-        save_dir = (
-            Path("checkpoints")
-            / f"distributed_{datetime.now().strftime('%Y-%m-%dT%H-%M-%S')}"
-        )
+        save_dir = Path("checkpoints") / f"distributed_{datetime.now().strftime('%Y-%m-%dT%H-%M-%S')}"
     save_dir.mkdir(parents=True, exist_ok=True)
     weights_path = save_dir / "weights.pt"
+
+    # Create logs directory
+    logs_dir = save_dir / "logs"
+    logs_dir.mkdir(exist_ok=True)
 
     # Print startup info (before UI takes over)
     print("=" * 60)
@@ -154,8 +269,9 @@ def main(
 
     # Create shared queue BEFORE spawning processes (required for spawn method)
     from multiprocessing import Queue as MPQueue
+
     experience_queue = MPQueue(maxsize=10000)
-    
+
     # Create shared buffer with the queue
     shared_buffer = SharedReplayBuffer(max_len=buffer_size, queue=experience_queue)
 
@@ -167,9 +283,10 @@ def main(
     try:
         # Start learner process (world model or standard)
         if world_model:
+            learner_log = logs_dir / "learner_world_model.log"
             learner_proc = Process(
-                target=run_world_model_learner,
-                args=(shared_buffer, weights_path, save_dir),
+                target=logged_world_model_learner,
+                args=(learner_log, shared_buffer, weights_path, save_dir),
                 kwargs={
                     "batch_size": batch_size,
                     "max_steps": learner_steps,
@@ -184,11 +301,12 @@ def main(
             )
             learner_proc.start()
             processes.append(learner_proc)
-            print(f"Started World Model Learner (PID: {learner_proc.pid})")
+            print(f"Started World Model Learner (PID: {learner_proc.pid}, log: {learner_log})")
         else:
+            learner_log = logs_dir / "learner.log"
             learner_proc = Process(
-                target=run_learner,
-                args=(shared_buffer, weights_path, save_dir),
+                target=logged_learner,
+                args=(learner_log, shared_buffer, weights_path, save_dir),
                 kwargs={
                     "batch_size": batch_size,
                     "max_steps": learner_steps,
@@ -198,16 +316,17 @@ def main(
             )
             learner_proc.start()
             processes.append(learner_proc)
-            print(f"Started Learner (PID: {learner_proc.pid})")
+            print(f"Started Learner (PID: {learner_proc.pid}, log: {learner_log})")
 
         # Start worker processes
         for i in range(num_workers):
             # Only render first worker if requested
             worker_render = render and (i == 0)
+            worker_log = logs_dir / f"worker_{i}.log"
 
             worker_proc = Process(
-                target=run_worker,
-                args=(i, shared_buffer, weights_path),
+                target=logged_worker,
+                args=(worker_log, i, shared_buffer, weights_path),
                 kwargs={
                     "level": level_tuple,
                     "render_frames": worker_render,
@@ -220,7 +339,7 @@ def main(
             )
             worker_proc.start()
             processes.append(worker_proc)
-            print(f"Started Worker {i} (PID: {worker_proc.pid})")
+            print(f"Started Worker {i} (PID: {worker_proc.pid}, log: {worker_log})")
 
         print("\nAll processes started. Press Ctrl+C to stop.\n")
 
@@ -257,4 +376,3 @@ if __name__ == "__main__":
         pass  # Already set
 
     main()
-

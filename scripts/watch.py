@@ -5,42 +5,42 @@ Watch a trained agent play Super Mario Bros.
 Usage:
     # Watch world model agent:
     uv run python watch.py agents/test/agent.pt --world-model
-    
+
     # Watch standard DQN agent:
     uv run python watch.py agents/dueling_ddqn/agent.pt
-    
+
     # Watch on a specific level:
     uv run python watch.py agents/test/agent.pt --world-model --level 1-2
 """
 
 import os
-import sys
 import argparse
 from pathlib import Path
 
 os.environ["KMP_DUPLICATE_LIB_OK"] = "True"
 
+from pyglet.window import key
+
 # Fix missing 'key' import in nes_py._image_viewer
 import nes_py._image_viewer as _iv
-from pyglet.window import key
 
 _iv.key = key
 
-import numpy as np
 import torch
-from nes_py.wrappers import JoypadSpace
+import numpy as np
 from gymnasium.spaces import Box
+from nes_py.wrappers import JoypadSpace
 from gymnasium.wrappers import GrayscaleObservation
 from gymnasium.wrappers import TransformObservation
 from gymnasium.wrappers import FrameStackObservation
 from gym_super_mario_bros import actions as smb_actions
 
 from mario_rl.agent.neural import DuelingDDQNNet
-from mario_rl.environment.mariogym import SuperMarioBrosMultiLevel
-from mario_rl.environment.wrappers import SkipFrame
-from mario_rl.environment.wrappers import ResizeObservation
-from mario_rl.agent.world_model import MarioWorldModel
 from mario_rl.agent.world_model import LatentDDQN
+from mario_rl.environment.wrappers import SkipFrame
+from mario_rl.agent.world_model import MarioWorldModel
+from mario_rl.environment.wrappers import ResizeObservation
+from mario_rl.environment.mariogym import SuperMarioBrosMultiLevel
 
 
 def best_device() -> str:
@@ -128,9 +128,7 @@ def select_action_world_model(
 
 
 @torch.no_grad()
-def select_action_dqn(
-    state: np.ndarray, net: DuelingDDQNNet, device: str
-) -> tuple[int, float, float]:
+def select_action_dqn(state: np.ndarray, net: DuelingDDQNNet, device: str) -> tuple[int, float, float]:
     """Select action using standard DQN."""
     state_tensor = torch.from_numpy(np.expand_dims(state, 0)).to(device)
     q_values = net.online(state_tensor)
@@ -154,11 +152,15 @@ def watch(
     if use_world_model:
         print("Loading world model agent...")
         world_model, q_network = load_world_model_agent(weights_path, device, latent_dim)
-        select_fn = lambda s: select_action_world_model(s, world_model, q_network, device)
+
+        def select_fn(s):
+            return select_action_world_model(s, world_model, q_network, device)
     else:
         print("Loading standard DQN agent...")
         net = load_dqn_agent(weights_path, device)
-        select_fn = lambda s: select_action_dqn(s, net, device)
+
+        def select_fn(s):
+            return select_action_dqn(s, net, device)
 
     # Create environment
     print(f"Creating environment for level {level[0]}-{level[1]}...")
@@ -201,10 +203,7 @@ def watch(
             if done:
                 flag_get = info.get("flag_get", False)
                 status = "🏁 FLAG!" if flag_get else "💀 DIED"
-                print(
-                    f"\n{status} | Steps: {step} | Max X: {max_x} | "
-                    f"Total Reward: {total_reward:.0f}"
-                )
+                print(f"\n{status} | Steps: {step} | Max X: {max_x} | " f"Total Reward: {total_reward:.0f}")
                 break
 
     try:
@@ -217,21 +216,15 @@ def watch(
 def main():
     parser = argparse.ArgumentParser(description="Watch trained Mario agent play")
     parser.add_argument("weights", type=Path, help="Path to weights file (agent.pt)")
-    parser.add_argument(
-        "--world-model", action="store_true", help="Use world model agent"
-    )
+    parser.add_argument("--world-model", action="store_true", help="Use world model agent")
     parser.add_argument(
         "--level",
         type=str,
         default="1-1",
         help="Level to play (e.g., 1-1, 1-2, 2-1)",
     )
-    parser.add_argument(
-        "--latent-dim", type=int, default=128, help="Latent dimension (for world model)"
-    )
-    parser.add_argument(
-        "--episodes", type=int, default=5, help="Number of episodes to watch"
-    )
+    parser.add_argument("--latent-dim", type=int, default=128, help="Latent dimension (for world model)")
+    parser.add_argument("--episodes", type=int, default=5, help="Number of episodes to watch")
 
     args = parser.parse_args()
 
@@ -250,4 +243,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-

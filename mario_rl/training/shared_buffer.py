@@ -5,15 +5,12 @@ Workers push experiences to a queue, learner maintains local buffer for sampling
 """
 
 import sys
-import multiprocessing as mp
-
-from typing import Any
 from typing import List
-from typing import Tuple
-from typing import Optional
 from pathlib import Path
+from typing import Tuple
+import multiprocessing as mp
+from typing import Optional
 from collections import deque
-from dataclasses import field
 from dataclasses import dataclass
 
 import numpy as np
@@ -21,10 +18,9 @@ import numpy as np
 # Add parent directory to path for imports
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from mario_rl.agent.replay import Memory
 from mario_rl.agent.replay import Experience
-from mario_rl.agent.replay import ExperienceBatch
 from mario_rl.agent.replay import prepare_batch
+from mario_rl.agent.replay import ExperienceBatch
 from mario_rl.agent.replay import pack_experience
 from mario_rl.agent.replay import unpack_experience
 
@@ -45,7 +41,7 @@ class SharedReplayBuffer:
 
     Workers push experiences via push() to a shared queue.
     Learner calls pull_all() to get new experiences, then samples locally.
-    
+
     The queue must be created BEFORE spawning processes and passed in.
     """
 
@@ -57,15 +53,15 @@ class SharedReplayBuffer:
                    If None, creates a new queue (only works with fork, not spawn)
         """
         self.max_len = max_len
-        
+
         # Queue for cross-process communication
         # Must be created in parent before spawn and passed to children
         self._queue = queue if queue is not None else mp.Queue(maxsize=10000)
-        
+
         # Local memory (each process has its own copy)
         self._memory: deque = deque(maxlen=max_len)
         self._priorities: Optional[np.ndarray] = None
-        
+
         # Local throughput stats (not shared between processes)
         self._total_messages = 0
         self._total_bytes = 0
@@ -93,18 +89,18 @@ class SharedReplayBuffer:
     def _update_throughput(self):
         """Update throughput statistics (local to this process)."""
         import time
-        
+
         now = time.time()
         elapsed = now - self._last_throughput_time
-        
+
         # Update every second
         if elapsed >= 1.0:
             msg_delta = self._total_messages - self._last_messages
             byte_delta = self._total_bytes - self._last_bytes
-            
+
             self._msgs_per_sec = msg_delta / elapsed
             self._kb_per_sec = (byte_delta / 1024.0) / elapsed
-            
+
             self._last_throughput_time = now
             self._last_messages = self._total_messages
             self._last_bytes = self._total_bytes
@@ -139,14 +135,14 @@ class SharedReplayBuffer:
                 a_=actions,
                 p=priority,
             )
-            
+
             self._queue.put_nowait(packed)
-            
+
             # Track throughput (local stats, not shared)
             self._total_messages += 1
             byte_count = state.nbytes + next_state.nbytes + 100
             self._total_bytes += byte_count
-            
+
             return True
         except Exception:
             # Queue full, drop experience
@@ -168,10 +164,10 @@ class SharedReplayBuffer:
                 count += 1
             except Exception:
                 break
-        
+
         # Update throughput stats after pulling
         self._update_throughput()
-        
+
         return count
 
     def sample(self, batch_size: int) -> Tuple[ExperienceBatch, np.ndarray]:
@@ -180,9 +176,7 @@ class SharedReplayBuffer:
         Called by learner after pull_all().
         """
         if len(self._memory) < batch_size:
-            raise ValueError(
-                f"Not enough experiences: {len(self._memory)} < {batch_size}"
-            )
+            raise ValueError(f"Not enough experiences: {len(self._memory)} < {batch_size}")
 
         p = np.abs(self.priorities) + 1e-36
         p /= p.sum()
@@ -199,12 +193,10 @@ class SharedReplayBuffer:
     def update_priorities(self, indices: np.ndarray, priorities: np.ndarray):
         """Update priorities for sampled experiences."""
         self._clear_caches()
-        for i, p in zip(indices, priorities):
+        for i, p in zip(indices, priorities, strict=False):
             self._memory[i]["p"] = float(p)
 
-    def sample_sequences(
-        self, batch_size: int, seq_len: int = 4
-    ) -> Tuple[SequenceBatch, np.ndarray]:
+    def sample_sequences(self, batch_size: int, seq_len: int = 4) -> Tuple[SequenceBatch, np.ndarray]:
         """
         Sample consecutive frame sequences for dynamics/temporal training.
 
@@ -218,9 +210,7 @@ class SharedReplayBuffer:
             SequenceBatch with consecutive experiences, and starting indices
         """
         if len(self._memory) < batch_size * seq_len:
-            raise ValueError(
-                f"Not enough experiences: {len(self._memory)} < {batch_size * seq_len}"
-            )
+            raise ValueError(f"Not enough experiences: {len(self._memory)} < {batch_size * seq_len}")
 
         # Find valid starting positions (sequences that don't cross episode boundaries)
         valid_starts = []
@@ -241,9 +231,7 @@ class SharedReplayBuffer:
 
         # Sample starting indices
         if len(valid_starts) < batch_size:
-            raise ValueError(
-                f"Not enough valid sequences: {len(valid_starts)} < {batch_size}"
-            )
+            raise ValueError(f"Not enough valid sequences: {len(valid_starts)} < {batch_size}")
 
         indices = np.random.choice(valid_starts, size=batch_size, replace=False)
 

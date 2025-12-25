@@ -12,16 +12,16 @@ import multiprocessing as mp
 os.environ["KMP_DUPLICATE_LIB_OK"] = "True"
 
 from typing import Any
-from typing import Optional
 from pathlib import Path
+from typing import Optional
 from dataclasses import field
 from dataclasses import dataclass
 
 # Add parent directory to path for imports
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-import numpy as np
 import torch
+import numpy as np
 from torch import nn
 
 from mario_rl.agent.neural import DuelingDDQNNet
@@ -141,9 +141,7 @@ class Learner:
         # Create network
         state_dim = (4, 64, 64, 1)
         action_dim = 12  # COMPLEX_MOVEMENT has 12 actions
-        self.net = DuelingDDQNNet(
-            input_shape=state_dim, num_actions=action_dim, hidden_dim=512
-        )
+        self.net = DuelingDDQNNet(input_shape=state_dim, num_actions=action_dim, hidden_dim=512)
         self.net = self.net.to(self.device)
 
         self.optimizer = torch.optim.AdamW(self.net.online.parameters(), lr=self.lr)
@@ -227,9 +225,7 @@ class Learner:
         self.optimizer.step()
 
         # Update priorities
-        self.shared_buffer.update_priorities(
-            indices, td_error.abs().detach().cpu().numpy()
-        )
+        self.shared_buffer.update_priorities(indices, td_error.abs().detach().cpu().numpy())
 
         self.train_step += 1
         loss_val = loss.item()
@@ -259,7 +255,7 @@ class Learner:
     def _log(self, text: str):
         """Log message to UI or stdout."""
         if self.ui_queue is not None:
-            from distributed.training_ui import send_learner_log
+            from mario_rl.training.training_ui import send_learner_log
 
             send_learner_log(self.ui_queue, text)
         else:
@@ -268,12 +264,12 @@ class Learner:
     def _send_status(self, status: str = "training"):
         """Send status update to UI."""
         avg_loss = self.total_loss / max(1, self.train_step)
-        
+
         # Get queue throughput
         msgs_per_sec, kb_per_sec = self.shared_buffer.get_throughput()
 
         if self.ui_queue is not None:
-            from distributed.training_ui import send_learner_status
+            from mario_rl.training.training_ui import send_learner_status
 
             send_learner_status(
                 self.ui_queue,
@@ -319,9 +315,7 @@ class Learner:
 
         # Save initial random weights
         self.save_weights()
-        self._log(
-            f"Initialized on {self.device} | batch={self.batch_size}, γ={self.gamma}"
-        )
+        self._log(f"Initialized on {self.device} | batch={self.batch_size}, γ={self.gamma}")
         self._send_status("initializing")
 
         step = 0
@@ -361,9 +355,7 @@ class Learner:
         # Final save
         self.save_weights()
         self._send_status("finished")
-        self._log(
-            f"✅ Training complete! Final weights saved after {self.train_step} steps"
-        )
+        self._log(f"✅ Training complete! Final weights saved after {self.train_step} steps")
 
 
 def run_learner(
@@ -401,7 +393,7 @@ if __name__ == "__main__":
     )
 
     # Add some fake experiences for testing
-    for i in range(100):
+    for _i in range(100):
         buffer.push(
             state=np.random.rand(4, 64, 64, 1).astype(np.float32),
             action=0,

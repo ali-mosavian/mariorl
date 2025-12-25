@@ -2,16 +2,16 @@
 name = "mario-rl"
 version = "0.1.0"
 description = "Reinforcement Learning for Super Mario Bros with World Models"
-authors = [{ name = "Your Name", email = "your.email@example.com" }]
+authors = [{ name = "Ali Mosavian", email = "mosavian.ali@gmail.com" }]
 readme = "README.md"
-requires-python = ">=3.11"
+requires-python = ">=3.12,<3.13"
 license = { text = "MIT" }
 
 dependencies = [
     "torch>=2.0.0",
-    "numpy>=1.24.0",
+    "numpy>=1.24.0,<2.0.0",
     "gymnasium>=0.29.0",
-    "gym-super-mario-bros>=7.4.0",
+    "gym-super-mario-bros @ git+https://github.com/ali-mosavian/gym-super-mario-bros.git@7.6.3",
     "nes-py>=8.2.1",
     "pyglet>=1.4.0,<=1.5.21",
     "click>=8.1.0",
@@ -24,9 +24,10 @@ dependencies = [
 dev = [
     "pytest>=7.4.0",
     "pytest-cov>=4.1.0",
-    "black>=23.7.0",
     "ruff>=0.0.285",
     "mypy>=1.5.0",
+    "isort>=6.0.0",
+    "pre-commit>=3.5.0",
 ]
 
 [project.scripts]
@@ -37,6 +38,9 @@ mario-watch = "scripts.watch:main"
 requires = ["hatchling"]
 build-backend = "hatchling.build"
 
+[tool.hatch.metadata]
+allow-direct-references = true
+
 [tool.hatch.build.targets.wheel]
 packages = ["mario_rl"]
 
@@ -46,30 +50,36 @@ python_files = ["test_*.py", "*_test.py"]
 python_classes = ["Test*"]
 python_functions = ["test_*"]
 
-[tool.black]
-line-length = 88
-target-version = ['py311']
-include = '\.pyi?$'
-
 [tool.ruff]
-line-length = 88
-target-version = "py311"
+line-length = 120
+target-version = "py312"
+
+[tool.ruff.lint]
 select = [
     "E",  # pycodestyle errors
     "W",  # pycodestyle warnings
     "F",  # pyflakes
-    "I",  # isort
     "B",  # flake8-bugbear
     "C4", # flake8-comprehensions
 ]
 ignore = [
-    "E501",  # line too long (black handles this)
+    "E501",  # line too long (ruff format handles this)
     "B008",  # do not perform function calls in argument defaults
     "C901",  # too complex
 ]
 
-[tool.ruff.per-file-ignores]
+[tool.ruff.lint.per-file-ignores]
 "__init__.py" = ["F401"]  # unused imports in __init__.py
+"mario_rl/training/worker.py" = ["E402"]  # intentional code before imports for multiprocessing
+"scripts/watch.py" = ["E402"]  # intentional code before imports for multiprocessing
+
+[tool.isort]
+profile = "black"
+line_length = 120
+force_single_line = true
+length_sort = true
+length_sort_sections = ["FUTURE", "STDLIB", "THIRDPARTY", "FIRSTPARTY", "LOCALFOLDER"]
+force_sort_within_sections = true
 
 [tool.mypy]
 python_version = "3.11"
@@ -77,3 +87,8 @@ warn_return_any = true
 warn_unused_configs = true
 disallow_untyped_defs = false
 ignore_missing_imports = true
+
+[dependency-groups]
+dev = [
+    "pre-commit>=4.5.1",
+]

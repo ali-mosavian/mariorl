@@ -90,16 +90,13 @@ Components
 - MarioWorldModel: Combined model with imagination capabilities
 """
 
-import math
-
 from typing import Tuple
 from typing import NamedTuple
 
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
-
 from torch import Tensor
+import torch.nn.functional as F
 
 
 class WorldModelOutput(NamedTuple):
@@ -142,9 +139,7 @@ def _gaussian_window(size: int, sigma: float, device: torch.device) -> Tensor:
     return g / g.sum()
 
 
-def _create_ssim_window(
-    window_size: int, channels: int, device: torch.device
-) -> Tensor:
+def _create_ssim_window(window_size: int, channels: int, device: torch.device) -> Tensor:
     """Create a 2D Gaussian window for SSIM."""
     _1d_window = _gaussian_window(window_size, 1.5, device)
     _2d_window = _1d_window.unsqueeze(1) @ _1d_window.unsqueeze(0)
@@ -299,9 +294,9 @@ class FrameDecoder(nn.Module):
         self.deconv = nn.Sequential(
             nn.ConvTranspose2d(256, 128, kernel_size=4, stride=2, padding=1),  # 4 -> 8
             nn.ReLU(),
-            nn.ConvTranspose2d(128, 64, kernel_size=4, stride=2, padding=1),   # 8 -> 16
+            nn.ConvTranspose2d(128, 64, kernel_size=4, stride=2, padding=1),  # 8 -> 16
             nn.ReLU(),
-            nn.ConvTranspose2d(64, 32, kernel_size=4, stride=2, padding=1),    # 16 -> 32
+            nn.ConvTranspose2d(64, 32, kernel_size=4, stride=2, padding=1),  # 16 -> 32
             nn.ReLU(),
             nn.ConvTranspose2d(32, out_channels, kernel_size=4, stride=2, padding=1),  # 32 -> 64
             nn.Sigmoid(),
@@ -320,9 +315,7 @@ class FrameDecoder(nn.Module):
 
         # Resize to exact frame dimensions if needed
         if x.shape[2] != self.height or x.shape[3] != self.width:
-            x = F.interpolate(
-                x, size=(self.height, self.width), mode="bilinear", align_corners=False
-            )
+            x = F.interpolate(x, size=(self.height, self.width), mode="bilinear", align_corners=False)
 
         # Nx(F*C)xHxW -> NxFxCxHxW -> NxFxHxWxC
         x = x.view(-1, self.frames, self.channels, self.height, self.width)
@@ -661,9 +654,7 @@ class WorldModelLoss(nn.Module):
         ssim_val = ssim(pred_for_ssim, target_for_ssim)
 
         # 4. KL divergence for encoder regularization
-        kl_loss = -0.5 * torch.mean(
-            1 + output.z_logvar - output.z_mu.pow(2) - output.z_logvar.exp()
-        )
+        kl_loss = -0.5 * torch.mean(1 + output.z_logvar - output.z_mu.pow(2) - output.z_logvar.exp())
 
         # 5. Dynamics consistency loss
         if z_next_target is not None:
@@ -806,4 +797,3 @@ class LatentDDQN(nn.Module):
     def sync_target(self):
         """Copy online network weights to target network."""
         self.target.load_state_dict(self.online.state_dict())
-

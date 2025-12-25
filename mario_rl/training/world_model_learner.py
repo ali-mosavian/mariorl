@@ -9,31 +9,31 @@ This enables level-agnostic learning through abstract latent representations.
 """
 
 import os
-import sys
 import csv
+import sys
 import time
 import multiprocessing as mp
 
 os.environ["KMP_DUPLICATE_LIB_OK"] = "True"
 
 from typing import Any
-from typing import Optional
 from pathlib import Path
+from typing import Optional
 from dataclasses import field
 from dataclasses import dataclass
 
 # Add parent directory to path for imports
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-import numpy as np
 import torch
+import numpy as np
 from torch import nn
 
-from mario_rl.agent.world_model import LatentDDQN
-from mario_rl.agent.world_model import MarioWorldModel
-from mario_rl.agent.world_model import WorldModelLoss
-from mario_rl.agent.world_model import WorldModelMetrics
 from mario_rl.agent.replay import ExperienceBatch
+from mario_rl.agent.world_model import LatentDDQN
+from mario_rl.agent.world_model import WorldModelLoss
+from mario_rl.agent.world_model import MarioWorldModel
+from mario_rl.agent.world_model import WorldModelMetrics
 from mario_rl.training.shared_buffer import SequenceBatch
 from mario_rl.training.shared_buffer import SharedReplayBuffer
 
@@ -200,12 +200,8 @@ class WorldModelLearner:
         ).to(self.device)
 
         # Optimizers
-        self.wm_optimizer = torch.optim.AdamW(
-            self.world_model.parameters(), lr=self.wm_lr
-        )
-        self.q_optimizer = torch.optim.AdamW(
-            self.q_network.online.parameters(), lr=self.q_lr
-        )
+        self.wm_optimizer = torch.optim.AdamW(self.world_model.parameters(), lr=self.wm_lr)
+        self.q_optimizer = torch.optim.AdamW(self.q_network.online.parameters(), lr=self.q_lr)
 
         # Loss function
         self.wm_loss_fn = WorldModelLoss(
@@ -229,23 +225,25 @@ class WorldModelLearner:
         if not self.log_file.exists():
             with open(self.log_file, "w", newline="") as f:
                 writer = csv.writer(f)
-                writer.writerow([
-                    "step",
-                    "phase",
-                    "wm_step",
-                    "q_step",
-                    "buffer_size",
-                    "wm_recon_mse",
-                    "wm_ssim",
-                    "wm_dynamics_loss",
-                    "wm_reward_loss",
-                    "wm_total_loss",
-                    "q_loss",
-                    "q_mean",
-                    "q_max",
-                    "td_error",
-                    "steps_per_sec",
-                ])
+                writer.writerow(
+                    [
+                        "step",
+                        "phase",
+                        "wm_step",
+                        "q_step",
+                        "buffer_size",
+                        "wm_recon_mse",
+                        "wm_ssim",
+                        "wm_dynamics_loss",
+                        "wm_reward_loss",
+                        "wm_total_loss",
+                        "q_loss",
+                        "q_mean",
+                        "q_max",
+                        "td_error",
+                        "steps_per_sec",
+                    ]
+                )
 
         # Try to resume from checkpoint
         if not self.load_checkpoint():
@@ -316,13 +314,11 @@ class WorldModelLearner:
             return False
 
         try:
-            checkpoint = torch.load(
-                checkpoint_path, map_location=self.device, weights_only=False
-            )
+            checkpoint = torch.load(checkpoint_path, map_location=self.device, weights_only=False)
 
             # Verify architecture matches
             if checkpoint.get("latent_dim") != self.latent_dim:
-                self._log(f"⚠️ Checkpoint latent_dim mismatch, skipping load")
+                self._log("⚠️ Checkpoint latent_dim mismatch, skipping load")
                 return False
 
             # Load model states
@@ -349,9 +345,7 @@ class WorldModelLearner:
             self._log(f"⚠️ Failed to load checkpoint: {e}")
             return False
 
-    def train_world_model_step(
-        self, batch: ExperienceBatchTensor
-    ) -> tuple[float, WorldModelMetrics]:
+    def train_world_model_step(self, batch: ExperienceBatchTensor) -> tuple[float, WorldModelMetrics]:
         """
         Perform one world model training step.
 
@@ -390,9 +384,7 @@ class WorldModelLearner:
 
         return loss.item(), metrics
 
-    def train_world_model_sequence(
-        self, seq_batch: SequenceBatchTensor
-    ) -> tuple[float, WorldModelMetrics]:
+    def train_world_model_sequence(self, seq_batch: SequenceBatchTensor) -> tuple[float, WorldModelMetrics]:
         """
         Train world model on sequences with GRU hidden state propagation.
 
@@ -434,9 +426,7 @@ class WorldModelLearner:
                 z_next_mu_target, z_next_logvar_target = self.world_model.encoder(s_next)
 
             # Predict next latent with dynamics model (propagate hidden state!)
-            z_next_mu_pred, z_next_logvar_pred, z_next_sample, h_next = (
-                self.world_model.dynamics(z_t, a_t, hidden)
-            )
+            z_next_mu_pred, z_next_logvar_pred, z_next_sample, h_next = self.world_model.dynamics(z_t, a_t, hidden)
             # Detach hidden for next step to prevent gradient explosion through time
             hidden = h_next.detach()
 
@@ -465,11 +455,7 @@ class WorldModelLearner:
             reward_loss = nn.functional.mse_loss(reward_pred.squeeze(-1), r_t)
 
             # Combined loss for this timestep
-            step_loss = (
-                recon_loss
-                + self.beta_dynamics * dynamics_kl
-                + 0.1 * reward_loss
-            )
+            step_loss = recon_loss + self.beta_dynamics * dynamics_kl + 0.1 * reward_loss
 
             total_loss += step_loss
             total_recon_loss += recon_mse.item()
@@ -489,14 +475,18 @@ class WorldModelLearner:
         self.wm_train_step += 1
 
         # Create metrics (use averaged values)
-        from world_model import ssim
+        from mario_rl.agent.world_model import ssim
 
         # Compute final SSIM for metrics
         with torch.no_grad():
-            final_ssim = ssim(
-                frame_next_pred.reshape(-1, 1, 64, 64),
-                s_next.reshape(-1, 1, 64, 64),
-            ).mean().item()
+            final_ssim = (
+                ssim(
+                    frame_next_pred.reshape(-1, 1, 64, 64),
+                    s_next.reshape(-1, 1, 64, 64),
+                )
+                .mean()
+                .item()
+            )
 
         metrics = WorldModelMetrics(
             recon_mse=total_recon_loss / num_steps,
@@ -511,9 +501,7 @@ class WorldModelLearner:
 
         return avg_loss.item(), metrics
 
-    def train_q_network_step(
-        self, batch: ExperienceBatchTensor
-    ) -> tuple[float, np.ndarray]:
+    def train_q_network_step(self, batch: ExperienceBatchTensor) -> tuple[float, np.ndarray]:
         """
         Perform one Q-network training step on frozen latent representations.
 
@@ -640,23 +628,25 @@ class WorldModelLearner:
             with open(self.log_file, "a", newline="") as f:
                 writer = csv.writer(f)
                 wm_metrics = self.last_wm_metrics
-                writer.writerow([
-                    self.train_step,
-                    self.current_phase,
-                    self.wm_train_step,
-                    self.q_train_step,
-                    len(self.shared_buffer),
-                    wm_metrics.recon_mse if wm_metrics else 0,
-                    wm_metrics.ssim if wm_metrics else 0,
-                    wm_metrics.dynamics_loss if wm_metrics else 0,
-                    wm_metrics.reward_loss if wm_metrics else 0,
-                    wm_metrics.total_loss if wm_metrics else 0,
-                    self.last_q_loss,
-                    self.last_q_mean,
-                    self.last_q_max,
-                    self.last_td_error,
-                    self.steps_per_sec,
-                ])
+                writer.writerow(
+                    [
+                        self.train_step,
+                        self.current_phase,
+                        self.wm_train_step,
+                        self.q_train_step,
+                        len(self.shared_buffer),
+                        wm_metrics.recon_mse if wm_metrics else 0,
+                        wm_metrics.ssim if wm_metrics else 0,
+                        wm_metrics.dynamics_loss if wm_metrics else 0,
+                        wm_metrics.reward_loss if wm_metrics else 0,
+                        wm_metrics.total_loss if wm_metrics else 0,
+                        self.last_q_loss,
+                        self.last_q_mean,
+                        self.last_q_max,
+                        self.last_td_error,
+                        self.steps_per_sec,
+                    ]
+                )
 
         # Save weights periodically
         if self.train_step % self.save_every == 0:
@@ -670,7 +660,7 @@ class WorldModelLearner:
     def _log(self, text: str):
         """Log message to UI or stdout."""
         if self.ui_queue is not None:
-            from distributed.training_ui import send_learner_log
+            from mario_rl.training.training_ui import send_learner_log
 
             send_learner_log(self.ui_queue, text)
         else:
@@ -683,7 +673,7 @@ class WorldModelLearner:
         phase_step, phase_total = self.phase_progress
 
         if self.ui_queue is not None:
-            from distributed.training_ui import send_world_model_status
+            from mario_rl.training.training_ui import send_world_model_status
 
             send_world_model_status(
                 self.ui_queue,
@@ -798,9 +788,7 @@ class WorldModelLearner:
         # Final save
         self.save_weights()
         self._send_status("finished")
-        self._log(
-            f"✅ Training complete! Final weights saved after {self.train_step} steps"
-        )
+        self._log(f"✅ Training complete! Final weights saved after {self.train_step} steps")
 
 
 def run_world_model_learner(
@@ -841,7 +829,7 @@ if __name__ == "__main__":
     )
 
     # Add some fake experiences for testing
-    for i in range(100):
+    for _i in range(100):
         buffer.push(
             state=np.random.rand(4, 64, 64, 1).astype(np.float32),
             action=0,
@@ -852,4 +840,3 @@ if __name__ == "__main__":
         )
 
     learner.run(max_steps=50)
-

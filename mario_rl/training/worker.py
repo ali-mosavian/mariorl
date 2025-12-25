@@ -15,36 +15,36 @@ os.environ["KMP_DUPLICATE_LIB_OK"] = "True"
 from typing import Any
 from typing import Dict
 from typing import List
+from pathlib import Path
 from typing import Tuple
 from typing import Optional
-from pathlib import Path
 from dataclasses import field
 from dataclasses import dataclass
 
 # Add parent directory to path for imports
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
+from pyglet.window import key
+
 # Fix missing 'key' import in nes_py._image_viewer
 import nes_py._image_viewer as _iv
-from pyglet.window import key
 
 _iv.key = key
 
-import numpy as np
 import torch
-
-from nes_py.wrappers import JoypadSpace
+import numpy as np
 from gymnasium.spaces import Box
+from nes_py.wrappers import JoypadSpace
 from gymnasium.wrappers import GrayscaleObservation
 from gymnasium.wrappers import TransformObservation
 from gymnasium.wrappers import FrameStackObservation
 from gym_super_mario_bros import actions as smb_actions
 
 from mario_rl.agent.neural import DuelingDDQNNet
-from mario_rl.environment.mariogym import SuperMarioBrosMultiLevel
-from mario_rl.training.shared_buffer import SharedReplayBuffer
-from mario_rl.agent.world_model import MarioWorldModel
 from mario_rl.agent.world_model import LatentDDQN
+from mario_rl.agent.world_model import MarioWorldModel
+from mario_rl.training.shared_buffer import SharedReplayBuffer
+from mario_rl.environment.mariogym import SuperMarioBrosMultiLevel
 
 
 def create_env(level=(1, 1), render_frames=False):
@@ -62,8 +62,8 @@ def create_env(level=(1, 1), render_frames=False):
         func=lambda x: x / 255.0,
         observation_space=Box(low=0.0, high=1.0, shape=(64, 64, 1), dtype=np.float32),
     )
-    fstack = FrameStackObservation(env, stack_size=4)
-    return fstack, base_env
+    env = FrameStackObservation(env, stack_size=4)
+    return env, base_env
 
 
 @dataclass
@@ -87,7 +87,7 @@ class Worker:
     weight_sync_interval: int = 1000
     device: Optional[str] = None
     ui_queue: Optional[mp.Queue] = None
-    
+
     # World model configuration
     use_world_model: bool = False
     latent_dim: int = 128
@@ -116,9 +116,7 @@ class Worker:
     def __post_init__(self):
         """Initialize environment and network after dataclass fields are set."""
         # Create environment
-        self.env, self.base_env = create_env(
-            level=self.level, render_frames=self.render_frames
-        )
+        self.env, self.base_env = create_env(level=self.level, render_frames=self.render_frames)
         self.fstack = self.env
         self.action_dim = self.env.action_space.n
 
@@ -128,7 +126,7 @@ class Worker:
 
         # Create network(s) for inference
         state_dim = (4, 64, 64, 1)
-        
+
         if self.use_world_model:
             # World model mode: encoder + latent Q-network
             self.world_model = MarioWorldModel(
@@ -147,9 +145,7 @@ class Worker:
             self.net = None  # Not used in world model mode
         else:
             # Standard DQN mode
-            self.net = DuelingDDQNNet(
-                input_shape=state_dim, num_actions=self.action_dim, hidden_dim=512
-            )
+            self.net = DuelingDDQNNet(input_shape=state_dim, num_actions=self.action_dim, hidden_dim=512)
             self.net = self.net.to(self.device)
             self.net.eval()
             self.world_model = None
@@ -176,7 +172,7 @@ class Worker:
             return False
         try:
             checkpoint = torch.load(self.weights_path, map_location=self.device, weights_only=True)
-            
+
             if self.use_world_model:
                 # World model mode: load encoder and latent Q-network
                 if isinstance(checkpoint, dict) and "world_model" in checkpoint:
@@ -192,7 +188,7 @@ class Worker:
                     return False
                 # Learner saves online network state, load into online network
                 self.net.online.load_state_dict(checkpoint)
-            
+
             self.last_weight_sync = time.time()
             self.weight_sync_count += 1
             return True
@@ -206,7 +202,7 @@ class Worker:
     def act(self, state: np.ndarray) -> int:
         """Select action using epsilon-greedy policy."""
         state_tensor = torch.from_numpy(np.expand_dims(state, 0)).to(self.device)
-        
+
         if self.use_world_model:
             # World model mode: encode state to latent, then get Q-values
             z = self.world_model.encode(state_tensor, deterministic=True)
@@ -246,9 +242,7 @@ class Worker:
 
         return action
 
-    def run_episode(
-        self, episode: int = 0, best_x: int = 0, total_flags: int = 0
-    ) -> dict:
+    def run_episode(self, episode: int = 0, best_x: int = 0, total_flags: int = 0) -> dict:
         """Run one episode, pushing experiences to shared buffer."""
         state, _ = self.env.reset()
 
@@ -370,7 +364,7 @@ class Worker:
     def _log(self, text: str):
         """Log message to UI or stdout."""
         if self.ui_queue is not None:
-            from distributed.training_ui import send_worker_log
+            from mario_rl.training.training_ui import send_worker_log
 
             send_worker_log(self.ui_queue, self.worker_id, text)
         else:
@@ -389,7 +383,7 @@ class Worker:
     ):
         """Send status update to UI."""
         if self.ui_queue is not None:
-            from distributed.training_ui import send_worker_status
+            from mario_rl.training.training_ui import send_worker_status
 
             send_worker_status(
                 self.ui_queue,
@@ -443,14 +437,15 @@ class Worker:
         """
         # Wait for initial weights from learner
         import time as time_module
+
         max_wait = 30  # Wait up to 30 seconds
         wait_start = time_module.time()
         self._log(f"Waiting for weights file: {self.weights_path}")
         while not self.weights_path.exists() and (time_module.time() - wait_start) < max_wait:
             time_module.sleep(0.5)
-        
+
         if self.weights_path.exists():
-            self._log(f"Weights file found, loading...")
+            self._log("Weights file found, loading...")
             # Try to load initial weights
             if self.load_weights():
                 self._log(f"✅ Loaded initial weights (sync count={self.weight_sync_count})")
@@ -481,9 +476,7 @@ class Worker:
 
             if stats["flag_get"]:
                 total_flags += 1
-                self._log(
-                    f"🏁 FLAG GET! Episode {episode}, x={stats['x_pos']}, flags={total_flags}"
-                )
+                self._log(f"🏁 FLAG GET! Episode {episode}, x={stats['x_pos']}, flags={total_flags}")
 
             # Send end-of-episode status update
             self._send_status(
@@ -503,9 +496,7 @@ class Worker:
                     self._log(f"🔄 Synced weights at step {self.curr_step}")
                     last_weight_load = self.curr_step
 
-        self._log(
-            f"✅ Finished {episode} episodes. Best x={best_x_pos}, Flags={total_flags}"
-        )
+        self._log(f"✅ Finished {episode} episodes. Best x={best_x_pos}, Flags={total_flags}")
 
 
 def run_worker(

@@ -5,9 +5,8 @@ from collections import deque
 
 import numpy as np
 import gymnasium as gym
-
-from gymnasium.error import DependencyNotInstalled
 from gymnasium.spaces import Box
+from gymnasium.error import DependencyNotInstalled
 
 
 class LazyFrames:
@@ -38,9 +37,7 @@ class LazyFrames:
             try:
                 from lz4.block import compress
             except ImportError:
-                raise DependencyNotInstalled(
-                    "lz4 is not installed, run `pip install gym[other]`"
-                )
+                raise DependencyNotInstalled("lz4 is not installed, run `pip install gym[other]`") from None
 
             frames = [compress(frame) for frame in frames]
         self._frames = frames
@@ -80,9 +77,7 @@ class LazyFrames:
         """
         if isinstance(int_or_slice, int):
             return self._check_decompress(self._frames[int_or_slice])  # single frame
-        return np.stack(
-            [self._check_decompress(f) for f in self._frames[int_or_slice]], axis=0
-        )
+        return np.stack([self._check_decompress(f) for f in self._frames[int_or_slice]], axis=0)
 
     def __eq__(self, other):
         """Checks that the current frames are equal to the other object."""
@@ -92,9 +87,7 @@ class LazyFrames:
         if self.lz4_compress:
             from lz4.block import decompress
 
-            return np.frombuffer(decompress(frame), dtype=self.dtype).reshape(
-                self.frame_shape
-            )
+            return np.frombuffer(decompress(frame), dtype=self.dtype).reshape(self.frame_shape)
         return frame
 
 
@@ -143,12 +136,8 @@ class FrameStack(gym.ObservationWrapper):
         self.frames = deque(maxlen=num_stack)
 
         low = np.repeat(self.observation_space.low[np.newaxis, ...], num_stack, axis=0)
-        high = np.repeat(
-            self.observation_space.high[np.newaxis, ...], num_stack, axis=0
-        )
-        self.observation_space = Box(
-            low=low, high=high, dtype=self.observation_space.dtype
-        )
+        high = np.repeat(self.observation_space.high[np.newaxis, ...], num_stack, axis=0)
+        self.observation_space = Box(low=low, high=high, dtype=self.observation_space.dtype)
 
     def observation(self, observation):
         """Converts the wrappers current frames to lazy frames.
