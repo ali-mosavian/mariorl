@@ -51,11 +51,11 @@ class FrameNet(nn.Module):
         f, h, w, c = input_shape
 
         self.net = nn.Sequential(
-            # Swap NxFxHxWxC -> NxFxCxHxW
+            # Swap NxFxHxWxC -> NxFxCxHxW and normalize to [0, 1]
             LambdaLayer(lambda t: t.permute(0, 1, 4, 2, 3).float() / 255),
             # NxFxCxHxW -> (N*F)xCxHxW
             LambdaLayer(lambda t: t.view(t.shape[0] * f, c, h, w)),
-            nn.LazyBatchNorm2d(momentum=0.001, affine=True, track_running_stats=True),
+            # NOTE: Removed BatchNorm at input - causes instability in RL
             # Conv layer
             nn.LazyConv2d(out_channels=16, kernel_size=3, stride=2, bias=False),
             # nn.LazyBatchNorm2d(momentum=0.001, affine=True, track_running_stats=True),

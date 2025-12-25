@@ -275,10 +275,8 @@ class Worker:
             next_state, reward, terminated, truncated, info = self.env.step(action)
             done = terminated or truncated
 
-            # Check death
+            # Check death (for snapshot restoration, NOT for reward - env handles death penalty)
             is_dead = info.get("is_dying", False) or info.get("is_dead", False)
-            if is_dead:
-                reward = -100
 
             total_reward += reward
             max_x_pos = max(max_x_pos, info.get("x_pos", 0))
@@ -290,7 +288,6 @@ class Worker:
                 reward=reward,
                 next_state=next_state,
                 done=done,
-                actions=list(range(self.action_dim)),
             )
             if success:
                 self.experiences_pushed += 1

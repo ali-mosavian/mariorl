@@ -669,8 +669,8 @@ class WorldModelLoss(nn.Module):
             # If no target encoding, use MSE between predicted and encoded next
             dynamics_loss = torch.tensor(0.0, device=frames.device)
 
-        # 6. Reward prediction loss
-        reward_loss = F.mse_loss(output.reward_pred, rewards)
+        # 6. Reward prediction loss (Huber loss is more robust to outliers)
+        reward_loss = F.huber_loss(output.reward_pred, rewards.clamp(-15, 15))
 
         # Total loss
         total_loss = (

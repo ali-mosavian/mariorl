@@ -124,7 +124,6 @@ class SharedReplayBuffer:
         reward: float,
         next_state: np.ndarray,
         done: bool,
-        actions: List[int],
         priority: float = 0.1,
     ) -> bool:
         """
@@ -138,7 +137,6 @@ class SharedReplayBuffer:
                 r=reward,
                 s_=next_state,
                 d=done,
-                a_=actions,
                 p=priority,
             )
 

@@ -30,7 +30,6 @@ class Experience(NamedTuple):
     reward: float
     state_next: Union[LazyFrames, np.ndarray]
     done: bool
-    actions: List[int]
 
 
 class ExperienceBatch(NamedTuple):
@@ -39,7 +38,6 @@ class ExperienceBatch(NamedTuple):
     reward: np.array
     state_next: np.array
     done: np.array
-    actions: np.array
 
 
 class PackedFrames(TypedDict):
@@ -68,7 +66,6 @@ def pack_experience(
     r: float,
     s_: Union[np.ndarray, LazyFrames],
     d: bool,
-    a_: List[int],
     p: float,
 ) -> Memory:
     def frames_to_dict(f: Union[np.ndarray, LazyFrames]) -> PackedFrames:
@@ -85,7 +82,6 @@ def pack_experience(
                 "a": int(a),
                 "r": float(r),
                 "d": bool(d),
-                "a_": a_,
             }
         ),
         "p": p,
@@ -108,7 +104,6 @@ def unpack_experience(m: Memory) -> Experience:
         reward=e["r"],
         state_next=unpack_frames(e["s_"]),
         done=e["d"],
-        actions=e["a_"],
     )
 
 
@@ -119,9 +114,9 @@ def batch_sequence(sequence: Sequence[T], batch_size: int) -> Iterable[Iterable[
 
 
 def prepare_batch(batch: Iterable[Experience]) -> ExperienceBatch:
-    state, action, reward, next_state, done, actions = starmap(
+    state, action, reward, next_state, done = starmap(
         np.ndarray.astype,
-        zip(map(np.stack, zip(*batch, strict=False)), ["u1", "i8", "f4", "u1", "?", "i8"], strict=False),
+        zip(map(np.stack, zip(*batch, strict=False)), ["u1", "i8", "f4", "u1", "?"], strict=False),
     )
 
     return ExperienceBatch(
@@ -130,7 +125,6 @@ def prepare_batch(batch: Iterable[Experience]) -> ExperienceBatch:
         reward.squeeze(),
         next_state,
         done.squeeze(),
-        actions,
     )
 
 
@@ -163,9 +157,9 @@ class PriorityReplayBuffer:
             self._priorities = np.array([m["p"] for m in self._memory], "f4")
         return self._priorities
 
-    def add(self, s: LazyFrames, a: int, r: float, s_: LazyFrames, d: bool, a_: List[int]):
+    def add(self, s: LazyFrames, a: int, r: float, s_: LazyFrames, d: bool):
         self._clear_caches()
-        self._memory.append(pack_experience(s=s, a=a, r=r, s_=s_, d=d, a_=a_, p=0.1))
+        self._memory.append(pack_experience(s=s, a=a, r=r, s_=s_, d=d, p=0.1))
 
     def batch(self, batch_size: int) -> Iterable[Tuple[ExperienceBatch, np.ndarray]]:
         indices_list: list[list[int]] = list(map(list, batch_sequence(range(len(self)), batch_size)))

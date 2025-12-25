@@ -46,7 +46,6 @@ class ExperienceBatchTensor:
     reward: torch.Tensor
     state_next: torch.Tensor
     done: torch.Tensor
-    actions: torch.Tensor
 
     def __iter__(self):
         return iter(
@@ -56,7 +55,6 @@ class ExperienceBatchTensor:
                 self.reward,
                 self.state_next,
                 self.done,
-                self.actions,
             ]
         )
 
@@ -68,7 +66,6 @@ def to_tensors(batch: ExperienceBatch, device: str) -> ExperienceBatchTensor:
         reward=torch.from_numpy(batch.reward).to(device),
         state_next=torch.from_numpy(batch.state_next).to(device),
         done=torch.from_numpy(batch.done).to(device),
-        actions=torch.from_numpy(batch.actions).to(device),
     )
 
 
@@ -82,7 +79,7 @@ def calc_dqn_td(
     Calculate Double DQN TD error.
     Uses online network for action selection, target network for value estimation.
     """
-    s, a, r, s_, d, _ = exp
+    s, a, r, s_, d = exp
 
     mask = 1 - d.float()
     idx = torch.arange(0, s.shape[0], device=s.device)
@@ -106,7 +103,7 @@ class Learner:
 
     # Configuration fields with defaults
     batch_size: int = 64
-    gamma: float = 0.9
+    gamma: float = 0.99  # Higher gamma for long-horizon planning (was 0.9)
     lr: float = 1e-5  # Lowered from 1e-4 for stability
     sync_every: int = 1000
     save_every: int = 100
@@ -417,7 +414,6 @@ if __name__ == "__main__":
             reward=1.0,
             next_state=np.random.rand(4, 64, 64, 1).astype(np.float32),
             done=False,
-            actions=list(range(12)),
         )
 
     learner.run(max_steps=50)

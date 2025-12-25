@@ -53,16 +53,14 @@ class Reward:
         )
 
     def total_reward(self) -> float:
+        # Normalize rewards to prevent gradient explosion
+        # Original range: ~-1100 to ~+1200 -> New range: ~-15 to ~+15
         return (
-            self.x_reward
-            + self.powerup_reward
-            +
-            # self.coin_reward +
-            # self.score_reward +
-            # self.time_penalty +
-            self.death_penalty
-            + self.finish_reward
-            + -0.1
+            self.x_reward / 10.0  # -1.5 to +10 (was -15 to +100)
+            + self.powerup_reward / 100.0  # -1 to +1 (was -100 to +100)
+            + self.death_penalty / 100.0  # -10 (was -1000)
+            + self.finish_reward / 100.0  # +10 (was +1000)
+            + -0.01  # Small step penalty
         )
 
 
@@ -70,7 +68,7 @@ class Reward:
 
 
 class MarioBrosLevel(SuperMarioBrosEnv):
-    reward_range = (-25, 25)
+    reward_range = (-15, 15)  # Normalized: death=-10, finish=+10, movement=-1.5 to +10
     _last_state: Optional[State] = None
 
     def __init__(
