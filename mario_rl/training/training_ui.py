@@ -611,7 +611,7 @@ class TrainingUI:
 
             # Main stats line with Q-values and weight sync
             game_time = ws.get("game_time", 0)
-            stats = f"Ep: {episode:4d}  Step: {step:4d}  X: {x_pos:4d}  ⏱{game_time:3d}  Best: {best_x:4d}  Q: {q_mean:.1f}/{q_max:.1f}  {steps_per_sec:.0f} sps  Wgt: {sync_str}"
+            stats = f"Ep: {episode:4d}  Step: {step:4d}  X: {x_pos:4d}  ⏱ {game_time:3d}  Best: {best_x:4d}  Q: {q_mean:.1f}/{q_max:.1f}  {steps_per_sec:.0f} sps  Wgt: {sync_str}"
             stdscr.addstr(y + 1, 4, stats)
 
             # Secondary stats

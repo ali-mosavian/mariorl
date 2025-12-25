@@ -302,11 +302,8 @@ class PPOWorker:
 
             rolling_avg = np.mean(self.reward_history) if self.reward_history else 0.0
 
-            # Get level display string
-            if isinstance(self.level, tuple):
-                level_str = f"{self.level[0]}-{self.level[1]}"
-            else:
-                level_str = str(self.level)
+            # Get actual current level from environment (not the mode)
+            level_str = self.base_env.current_level
 
             msg = UIMessage(
                 msg_type=MessageType.WORKER_STATUS,
