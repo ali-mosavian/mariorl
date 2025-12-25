@@ -54,6 +54,14 @@ class TrainingUI:
     q_loss_history: List[float] = field(init=False, default_factory=list)
     max_history: int = field(init=False, default=100)
 
+    # Global convergence tracking (aggregated from all workers)
+    reward_history: List[float] = field(init=False, default_factory=list)
+    x_pos_history: List[int] = field(init=False, default_factory=list)
+    flag_history: List[int] = field(init=False, default_factory=list)
+    total_episodes: int = field(init=False, default=0)
+    total_flags: int = field(init=False, default=0)
+    first_flag_episode: int = field(init=False, default=0)
+
     def __post_init__(self):
         """Initialize state tracking after dataclass fields are set."""
         self.running = True
@@ -66,6 +74,13 @@ class TrainingUI:
         self.wm_loss_history = []
         self.q_loss_history = []
         self.max_history = 100
+        # Global convergence tracking
+        self.reward_history = []
+        self.x_pos_history = []
+        self.flag_history = []
+        self.total_episodes = 0
+        self.total_flags = 0
+        self.first_flag_episode = 0
 
     def run(self):
         """Main entry point - runs the curses UI."""
@@ -135,7 +150,36 @@ class TrainingUI:
                 elif msg.msg_type == MessageType.LEARNER_LOG:
                     self._add_log(f"[LEARNER] {msg.data.get('text', '')}")
                 elif msg.msg_type == MessageType.WORKER_STATUS:
-                    self.worker_statuses[msg.source_id] = msg.data
+                    old_data = self.worker_statuses.get(msg.source_id, {})
+                    new_data = msg.data
+                    self.worker_statuses[msg.source_id] = new_data
+
+                    # Track global convergence metrics when episode ends
+                    old_episode = old_data.get("episode", 0)
+                    new_episode = new_data.get("episode", 0)
+                    if new_episode > old_episode and new_episode > 0:
+                        # New episode completed - track metrics
+                        self.total_episodes += 1
+                        reward = new_data.get("rolling_avg_reward", 0)
+                        x_pos = new_data.get("x_pos", 0)
+                        flags = new_data.get("flags", 0)
+
+                        self.reward_history.append(reward)
+                        if len(self.reward_history) > self.max_history:
+                            self.reward_history.pop(0)
+
+                        self.x_pos_history.append(x_pos)
+                        if len(self.x_pos_history) > self.max_history:
+                            self.x_pos_history.pop(0)
+
+                        # Track flag progress
+                        if flags > self.total_flags:
+                            if self.total_flags == 0 and flags > 0:
+                                self.first_flag_episode = self.total_episodes
+                            self.total_flags = flags
+                        self.flag_history.append(self.total_flags)
+                        if len(self.flag_history) > self.max_history:
+                            self.flag_history.pop(0)
                 elif msg.msg_type == MessageType.WORKER_LOG:
                     self._add_log(f"[W{msg.source_id}] {msg.data.get('text', '')}")
                 elif msg.msg_type == MessageType.SYSTEM_LOG:
@@ -227,7 +271,10 @@ class TrainingUI:
         learner_height = 7 if not self.use_world_model else 0  # Increased for chart
         worker_height = 4  # Increased for convergence metrics line
         workers_total_height = self.num_workers * worker_height
-        log_height = height - header_height - world_model_height - learner_height - workers_total_height - 2
+        convergence_height = 4  # Global convergence charts
+        log_height = (
+            height - header_height - world_model_height - learner_height - workers_total_height - convergence_height - 3
+        )
 
         current_y = 0
 
@@ -248,6 +295,10 @@ class TrainingUI:
         for i in range(self.num_workers):
             self._draw_worker(stdscr, current_y, width, worker_height, i)
             current_y += worker_height
+
+        # Global convergence section
+        self._draw_convergence(stdscr, current_y, width, convergence_height)
+        current_y += convergence_height
 
         # Separator
         stdscr.addstr(current_y, 0, "─" * (width - 1), curses.A_DIM)
@@ -502,6 +553,60 @@ class TrainingUI:
                 stdscr.addstr("waiting", curses.A_DIM)
         else:
             stdscr.addstr(y + 1, 4, "Starting...", curses.A_DIM)
+
+    def _draw_convergence(self, stdscr, y: int, width: int, height: int):
+        """Draw global convergence metrics with sparklines."""
+        # Title
+        stdscr.addstr(y, 2, "┌─ CONVERGENCE ", curses.A_BOLD)
+        stdscr.addstr(y, 16, "─" * (width - 18))
+
+        # Summary stats
+        avg_reward = sum(self.reward_history) / len(self.reward_history) if self.reward_history else 0.0
+        best_x = max(self.x_pos_history) if self.x_pos_history else 0
+
+        # Color for average reward
+        if avg_reward > 0:
+            reward_color = curses.color_pair(1)  # Green
+        elif avg_reward < -50:
+            reward_color = curses.color_pair(3)  # Red
+        else:
+            reward_color = curses.A_NORMAL
+
+        # First line: Summary stats
+        stdscr.addstr(y + 1, 4, f"Episodes: {self.total_episodes:5d}  ")
+        stdscr.addstr("Avg r̄₁₀₀: ")
+        stdscr.addstr(f"{avg_reward:7.1f}", reward_color)
+        stdscr.addstr(f"  Best X: {best_x:5d}  ")
+        stdscr.addstr("🏁: ")
+        flag_color = curses.color_pair(1) if self.total_flags > 0 else curses.A_DIM
+        stdscr.addstr(f"{self.total_flags:3d}", flag_color)
+
+        if self.first_flag_episode > 0:
+            stdscr.addstr(f"  (1st @ ep {self.first_flag_episode})", curses.color_pair(1))
+
+        # Second line: Reward history sparkline
+        chart_width = (width - 40) // 2
+        if chart_width > 10 and self.reward_history:
+            stdscr.addstr(y + 2, 4, "Reward: ")
+            self._draw_sparkline(stdscr, y + 2, 12, chart_width, self.reward_history)
+
+            # X position history sparkline
+            stdscr.addstr(y + 2, 15 + chart_width, "X-pos: ")
+            if self.x_pos_history:
+                self._draw_sparkline(
+                    stdscr, y + 2, 22 + chart_width, chart_width, [float(x) for x in self.x_pos_history]
+                )
+        elif not self.reward_history:
+            stdscr.addstr(y + 2, 4, "Waiting for episode completions...", curses.A_DIM)
+
+        # Third line: Min/max for the sparklines
+        if self.reward_history and len(self.reward_history) >= 2:
+            r_min, r_max = min(self.reward_history), max(self.reward_history)
+            stdscr.addstr(y + 3, 4, f"r∈[{r_min:.0f},{r_max:.0f}]", curses.A_DIM)
+
+            if self.x_pos_history and len(self.x_pos_history) >= 2:
+                x_min, x_max = min(self.x_pos_history), max(self.x_pos_history)
+                stdscr.addstr(y + 3, 15 + chart_width, f"x∈[{x_min},{x_max}]", curses.A_DIM)
 
     def _draw_logs(self, stdscr, y: int, width: int, height: int):
         """Draw the log section."""
