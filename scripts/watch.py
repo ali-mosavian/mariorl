@@ -115,9 +115,12 @@ def load_dqn_agent(weights_path: Path, device: str) -> DuelingDDQNNet:
 
     checkpoint = torch.load(weights_path, map_location=device, weights_only=True)
     if isinstance(checkpoint, dict) and "model" in checkpoint:
-        net.load_state_dict(checkpoint["model"])
-    else:
-        net.load_state_dict(checkpoint)
+        checkpoint = checkpoint["model"]
+
+    # Checkpoint saves online network state dict (without 'online.' prefix)
+    # Load into both online and target networks
+    net.online.load_state_dict(checkpoint)
+    net.target.load_state_dict(checkpoint)
 
     net.eval()
     return net  # type: ignore[no-any-return]
