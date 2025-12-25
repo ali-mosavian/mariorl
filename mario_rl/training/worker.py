@@ -240,7 +240,7 @@ class Worker:
             avg_step_time = sum(self._step_times) / len(self._step_times)
             self.steps_per_sec = 1.0 / avg_step_time if avg_step_time > 0 else 0
 
-        return action
+        return int(action)
 
     def run_episode(self, episode: int = 0, best_x: int = 0, total_flags: int = 0) -> dict:
         """Run one episode, pushing experiences to shared buffer."""

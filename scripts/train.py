@@ -270,7 +270,7 @@ def main(
     # Create shared queue BEFORE spawning processes (required for spawn method)
     from multiprocessing import Queue as MPQueue
 
-    experience_queue = MPQueue(maxsize=10000)
+    experience_queue: MPQueue = MPQueue(maxsize=10000)  # type: ignore[type-arg]
 
     # Create shared buffer with the queue
     shared_buffer = SharedReplayBuffer(max_len=buffer_size, queue=experience_queue)

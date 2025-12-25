@@ -194,7 +194,7 @@ class Learner:
         self.last_reward_mean = float(batch.reward.mean())
 
         # Convert to tensors
-        exp = to_tensors(batch, self.device)
+        exp = to_tensors(batch, self.device or "cpu")
 
         # Calculate TD error
         self.net.train()
@@ -250,7 +250,7 @@ class Learner:
         if self.train_step % self.save_every == 0:
             self.save_weights()
 
-        return loss_val
+        return float(loss_val)
 
     def _log(self, text: str):
         """Log message to UI or stdout."""

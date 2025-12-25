@@ -98,7 +98,7 @@ class FrameStack(gym.Wrapper):
         self._stack = []
 
     def reset(self, **kwargs) -> Tuple[gym.core.ObsType, dict]:
-        return self.env.reset(**kwargs)
+        return self.env.reset(**kwargs)  # type: ignore[no-any-return]
 
-    def step(self, action):
-        return self.env.step(action)
+    def step(self, action) -> Tuple[gym.core.ObsType, float, bool, bool, dict]:
+        return self.env.step(action)  # type: ignore[no-any-return]

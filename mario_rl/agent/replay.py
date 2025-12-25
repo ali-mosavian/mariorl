@@ -110,7 +110,7 @@ def unpack_experience(m: Memory) -> Experience:
     )
 
 
-def batch_sequence(sequence: Sequence[T], batch_size: int) -> Iterable[T]:
+def batch_sequence(sequence: Sequence[T], batch_size: int) -> Iterable[Iterable[T]]:
     it, N = iter(sequence), len(sequence)
     for i in range(0, N, batch_size):
         yield (next(it) for _ in range(min(N - i, batch_size)))
@@ -137,8 +137,8 @@ class PriorityReplayBuffer:
     _memory: Deque[Memory]
     _priorities: Optional[np.ndarray] = None
 
-    def __init__(self, max_len: int, memory: List[Memory] = ()):
-        self._memory = deque(memory, maxlen=max_len)
+    def __init__(self, max_len: int, memory: List[Memory] | None = None):
+        self._memory = deque(memory or [], maxlen=max_len)
 
     def __len__(self):
         return len(self._memory)
@@ -166,7 +166,8 @@ class PriorityReplayBuffer:
         self._memory.append(pack_experience(s=s, a=a, r=r, s_=s_, d=d, a_=a_, p=0.1))
 
     def batch(self, batch_size: int) -> Iterable[Tuple[ExperienceBatch, np.ndarray]]:
-        for indices in map(list, batch_sequence(range(len(self)), batch_size)):
+        indices_list: list[list[int]] = list(map(list, batch_sequence(range(len(self)), batch_size)))
+        for indices in indices_list:
             yield (
                 prepare_batch((self[i] for i in indices)),
                 np.array(indices, dtype="u4"),

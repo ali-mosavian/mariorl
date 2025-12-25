@@ -23,14 +23,14 @@ class MetricLoggerPD:
     def __init__(self, save_dir: PathLike, agg_func: Dict[str, AggFunc]):
         self.path = Path(save_dir)
         self.episodes = []
-        self.curr_ep = defaultdict(list)
+        self.curr_ep: defaultdict[str, list[float]] = defaultdict(list)
         self.agg_func = agg_func
 
         log = self.path / "log.csv"
         if log.exists():
             self.episodes = pd.read_csv(log).to_dict("records")
 
-    def log_step(self, **kwargs: Dict[str, float]):
+    def log_step(self, **kwargs: float):
         for k, v in kwargs.items():
             if v is None or v is float("nan"):
                 continue
@@ -40,7 +40,7 @@ class MetricLoggerPD:
         return max(map(get("steps"), self.episodes)) if len(self.episodes) else 0
 
     @contextmanager
-    def episode(self, epsilon: float) -> "MetricLoggerPD":
+    def episode(self, epsilon: float):  # type: ignore[misc]
         start_time = time.time()
         try:
             yield self

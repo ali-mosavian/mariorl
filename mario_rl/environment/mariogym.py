@@ -77,7 +77,7 @@ class MarioBrosLevel(SuperMarioBrosEnv):
         self,
         rom_mode: RomModes = "vanilla",
         lost_levels: bool = False,
-        target: Tuple[int, int] = None,
+        target: Tuple[int, int] | None = None,
     ):
         super(MarioBrosLevel, self).__init__(rom_mode, lost_levels, target)
         self.render_mode = "rgb_array"
@@ -128,9 +128,9 @@ class MarioBrosLevel(SuperMarioBrosEnv):
 
 
 class SuperMarioBrosMultiLevel(gym.Env):
-    rand: np.random
+    rand: np.random.RandomState
     level: LevelModes
-    envs: List[List[MarioBrosLevel]]
+    envs: List[List[Optional[MarioBrosLevel]]]
     env: Optional[MarioBrosLevel] = None
     viewer: Optional[ImageViewer] = None
 
@@ -148,7 +148,7 @@ class SuperMarioBrosMultiLevel(gym.Env):
 
         if isinstance(level, tuple):
             world, stage = level
-            self.envs = [[None] * 4] * 8
+            self.envs = [[None for _ in range(4)] for _ in range(8)]
             self.envs[world - 1][stage - 1] = MarioBrosLevel(rom_mode=rom_mode, target=(world, stage))
         else:
             self.envs = [
@@ -160,16 +160,19 @@ class SuperMarioBrosMultiLevel(gym.Env):
 
     def _next_level(self) -> MarioBrosLevel:
         if isinstance(self.level, str):
-            levels = sum(self.envs, [])
+            levels: list[MarioBrosLevel] = [e for row in self.envs for e in row if e is not None]
             if self.level == "random":
-                return self.rand.choice(levels, 1)[0]
+                return self.rand.choice(levels, 1)[0]  # type: ignore[no-any-return]
             elif self.level == "sequential":
                 env = self.env or levels[-1]
                 return levels[(levels.index(env) + 1) % len(levels)]
 
         elif isinstance(self.level, tuple):
             w, level = self.level
-            return self.envs[w - 1][level - 1]
+            result = self.envs[w - 1][level - 1]
+            if result is None:
+                raise RuntimeError(f"Level {w}-{level} not initialized")
+            return result
 
         raise RuntimeError(f"Invalid level_mode: {repr(self.level)}")
 
@@ -197,10 +200,12 @@ class SuperMarioBrosMultiLevel(gym.Env):
         self.get_action_meanings = env.get_action_meanings
 
         # reset the environment
-        return env.reset()
+        return env.reset()  # type: ignore[no-any-return]
 
     def step(self, action: gym.core.ActType) -> Tuple[gym.core.ObsType, float, bool, bool, dict]:
-        return self.env.step(action)
+        if self.env is None:
+            raise RuntimeError("Environment not initialized. Call reset() first.")
+        return self.env.step(action)  # type: ignore[no-any-return]
 
     def close(self):
         if self.env is None:

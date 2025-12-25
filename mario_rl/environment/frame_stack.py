@@ -133,11 +133,11 @@ class FrameStack(gym.ObservationWrapper):
         self.num_stack = num_stack
         self.lz4_compress = lz4_compress
 
-        self.frames = deque(maxlen=num_stack)
+        self.frames: deque = deque(maxlen=num_stack)
 
-        low = np.repeat(self.observation_space.low[np.newaxis, ...], num_stack, axis=0)
-        high = np.repeat(self.observation_space.high[np.newaxis, ...], num_stack, axis=0)
-        self.observation_space = Box(low=low, high=high, dtype=self.observation_space.dtype)
+        low = np.repeat(self.observation_space.low[np.newaxis, ...], num_stack, axis=0)  # type: ignore[has-type]
+        high = np.repeat(self.observation_space.high[np.newaxis, ...], num_stack, axis=0)  # type: ignore[has-type]
+        self.observation_space = Box(low=low, high=high, dtype=self.observation_space.dtype)  # type: ignore[has-type]
 
     def observation(self, observation):
         """Converts the wrappers current frames to lazy frames.

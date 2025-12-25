@@ -53,7 +53,7 @@ def best_device() -> str:
 
 def create_env(level: tuple[int, int] = (1, 1), render: bool = True):
     """Create wrapped Mario environment."""
-    base_env = SuperMarioBrosMultiLevel(level=level)
+    base_env = SuperMarioBrosMultiLevel(level=level)  # type: ignore[arg-type]
     env = JoypadSpace(base_env, actions=smb_actions.COMPLEX_MOVEMENT)
     env = SkipFrame(env, skip=4, render_frames=render)
     env = GrayscaleObservation(env, keep_dim=True)
@@ -99,8 +99,9 @@ def load_dqn_agent(weights_path: Path, device: str) -> DuelingDDQNNet:
     """Load standard DQN agent from checkpoint."""
     state_dim = (4, 64, 64, 1)
     action_dim = 12
+    hidden_dim = 512
 
-    net = DuelingDDQNNet(state_dim, action_dim).to(device)
+    net = DuelingDDQNNet(state_dim, action_dim, hidden_dim).to(device)
 
     checkpoint = torch.load(weights_path, map_location=device, weights_only=True)
     if isinstance(checkpoint, dict) and "model" in checkpoint:
@@ -109,7 +110,7 @@ def load_dqn_agent(weights_path: Path, device: str) -> DuelingDDQNNet:
         net.load_state_dict(checkpoint)
 
     net.eval()
-    return net
+    return net  # type: ignore[no-any-return]
 
 
 @torch.no_grad()
