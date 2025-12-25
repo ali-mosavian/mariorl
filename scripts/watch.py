@@ -19,12 +19,22 @@ from pathlib import Path
 
 os.environ["KMP_DUPLICATE_LIB_OK"] = "True"
 
-from pyglet.window import key
+# Fix missing 'key' import in nes_py._image_viewer (needs display)
+try:
+    from pyglet.window import key
+    import nes_py._image_viewer as _iv
 
-# Fix missing 'key' import in nes_py._image_viewer
-import nes_py._image_viewer as _iv
+    _iv.key = key
+except Exception as e:
+    print("ERROR: Cannot initialize display for rendering.")
+    print("This script requires a display (X server) to show the game.")
+    print(f"Error: {e}")
+    print("\nIf running on a headless server:")
+    print("  - Use Xvfb: xvfb-run -a uv run mario-watch <args>")
+    print("  - Or set up VNC/X11 forwarding")
+    import sys
 
-_iv.key = key
+    sys.exit(1)
 
 import torch
 import numpy as np

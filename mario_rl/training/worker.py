@@ -25,13 +25,6 @@ from dataclasses import dataclass
 # Add parent directory to path for imports
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from pyglet.window import key
-
-# Fix missing 'key' import in nes_py._image_viewer
-import nes_py._image_viewer as _iv
-
-_iv.key = key
-
 import torch
 import numpy as np
 from gymnasium.spaces import Box
@@ -55,6 +48,17 @@ def create_env(
     """Create wrapped Mario environment."""
     from mario_rl.environment.wrappers import SkipFrame
     from mario_rl.environment.wrappers import ResizeObservation
+
+    # Fix pyglet key import for nes_py viewer (only needed when rendering)
+    if render_frames:
+        try:
+            from pyglet.window import key
+            import nes_py._image_viewer as _iv
+
+            _iv.key = key
+        except Exception:
+            # Headless environment, rendering won't work but don't crash
+            pass
 
     base_env = SuperMarioBrosMultiLevel(level=level)
     env = JoypadSpace(base_env, actions=smb_actions.COMPLEX_MOVEMENT)
