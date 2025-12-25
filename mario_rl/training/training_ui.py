@@ -48,6 +48,12 @@ class TrainingUI:
     logs: List[str] = field(init=False, default_factory=list)
     max_logs: int = field(init=False, default=100)
 
+    # Loss history for charts
+    loss_history: List[float] = field(init=False, default_factory=list)
+    wm_loss_history: List[float] = field(init=False, default_factory=list)
+    q_loss_history: List[float] = field(init=False, default_factory=list)
+    max_history: int = field(init=False, default=100)
+
     def __post_init__(self):
         """Initialize state tracking after dataclass fields are set."""
         self.running = True
@@ -56,6 +62,10 @@ class TrainingUI:
         self.worker_statuses = {i: {} for i in range(self.num_workers)}
         self.logs = []
         self.max_logs = 100
+        self.loss_history = []
+        self.wm_loss_history = []
+        self.q_loss_history = []
+        self.max_history = 100
 
     def run(self):
         """Main entry point - runs the curses UI."""
@@ -117,6 +127,11 @@ class TrainingUI:
 
                 if msg.msg_type == MessageType.LEARNER_STATUS:
                     self.learner_status = msg.data
+                    # Track loss history for standard learner
+                    if "loss" in msg.data:
+                        self.loss_history.append(msg.data["loss"])
+                        if len(self.loss_history) > self.max_history:
+                            self.loss_history.pop(0)
                 elif msg.msg_type == MessageType.LEARNER_LOG:
                     self._add_log(f"[LEARNER] {msg.data.get('text', '')}")
                 elif msg.msg_type == MessageType.WORKER_STATUS:
@@ -128,6 +143,19 @@ class TrainingUI:
                 elif msg.msg_type == MessageType.WORLD_MODEL_STATUS:
                     self.world_model_status = msg.data
                     self.use_world_model = True  # Auto-detect world model mode
+                    # Track loss history for world model
+                    wm_metrics = msg.data.get("wm_metrics")
+                    if wm_metrics:
+                        recon_mse = (
+                            wm_metrics.get("recon_mse", 0) if isinstance(wm_metrics, dict) else wm_metrics.recon_mse
+                        )
+                        self.wm_loss_history.append(float(recon_mse))
+                        if len(self.wm_loss_history) > self.max_history:
+                            self.wm_loss_history.pop(0)
+                    if "q_loss" in msg.data:
+                        self.q_loss_history.append(msg.data["q_loss"])
+                        if len(self.q_loss_history) > self.max_history:
+                            self.q_loss_history.pop(0)
 
             except Exception:
                 break  # Queue empty
@@ -138,6 +166,45 @@ class TrainingUI:
         self.logs.append(f"{timestamp} {text}")
         if len(self.logs) > self.max_logs:
             self.logs.pop(0)
+
+    def _draw_sparkline(self, stdscr, y: int, x: int, width: int, data: List[float], label: str = ""):
+        """Draw a simple ASCII sparkline chart."""
+        if not data or width < 10:
+            return
+
+        # Downsample data to fit width if needed
+        if len(data) > width:
+            # Take evenly spaced samples
+            step = len(data) / width
+            sampled = [data[int(i * step)] for i in range(width)]
+        else:
+            sampled = data
+
+        # Normalize data to fit in 8 height levels
+        if len(sampled) > 0:
+            min_val = min(sampled)
+            max_val = max(sampled)
+            range_val = max_val - min_val
+
+            if range_val > 0:
+                # Map to spark characters (8 levels)
+                spark_chars = " ▁▂▃▄▅▆▇█"
+                spark_str = ""
+                for val in sampled:
+                    normalized = (val - min_val) / range_val
+                    idx = min(int(normalized * 8), 8)
+                    spark_str += spark_chars[idx]
+
+                # Draw the sparkline
+                try:
+                    if label:
+                        stdscr.addstr(y, x, f"{label}: ")
+                        x += len(label) + 2
+                    stdscr.addstr(y, x, spark_str, curses.A_DIM)
+                    # Add min/max values
+                    stdscr.addstr(f" {min_val:.3f}→{max_val:.3f}")
+                except curses.error:
+                    pass  # Ignore if we run out of space
 
     def _draw(self, stdscr):
         """Draw the entire UI."""
@@ -156,8 +223,8 @@ class TrainingUI:
 
         # Calculate layout
         header_height = 3
-        world_model_height = 5 if self.use_world_model else 0
-        learner_height = 6 if not self.use_world_model else 0  # Hide standard learner if using world model
+        world_model_height = 7 if self.use_world_model else 0  # Increased for charts
+        learner_height = 7 if not self.use_world_model else 0  # Increased for chart
         worker_height = 3
         workers_total_height = self.num_workers * worker_height
         log_height = height - header_height - world_model_height - learner_height - workers_total_height - 2
@@ -266,6 +333,10 @@ class TrainingUI:
             # Status indicator
             status_color = curses.color_pair(1) if status == "training" else curses.color_pair(2)
             stdscr.addstr(y + 4, 4, f"Status: {status}", status_color)
+
+            # Loss chart
+            if self.loss_history:
+                self._draw_sparkline(stdscr, y + 5, 4, width - 8, self.loss_history, "Loss")
         else:
             stdscr.addstr(y + 1, 4, "Initializing...", curses.A_DIM)
 
@@ -345,6 +416,13 @@ class TrainingUI:
             # Status indicator
             status_color = curses.color_pair(1) if status == "training" else curses.color_pair(2)
             stdscr.addstr(y + 4, 4, f"Status: {status}", status_color)
+
+            # Loss charts
+            chart_width = (width - 12) // 2
+            if self.wm_loss_history:
+                self._draw_sparkline(stdscr, y + 5, 4, chart_width, self.wm_loss_history, "WM Loss")
+            if self.q_loss_history:
+                self._draw_sparkline(stdscr, y + 6, 4, chart_width, self.q_loss_history, "Q Loss")
         else:
             stdscr.addstr(y + 1, 4, "Initializing world model...", curses.A_DIM)
 

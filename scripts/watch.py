@@ -184,6 +184,10 @@ def watch(
             # Select action
             action, q_mean, q_max = select_fn(state)
 
+            # Debug: print first few actions
+            if step < 10:
+                print(f"  [DEBUG] Step {step}: action={action}, Q_mean={q_mean:.3f}, Q_max={q_max:.3f}")
+
             # Step
             next_state, reward, terminated, truncated, info = env.step(action)
             done = terminated or truncated
