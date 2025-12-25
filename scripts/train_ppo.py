@@ -47,14 +47,15 @@ def run_training_ui(num_workers: int, ui_queue: Queue) -> None:
 
 class ProgressMonitorCallback(BaseCallback):
     """
-    Monitor X-position progress and recover from best checkpoint when stuck.
+    Monitor game progress and recover from stagnation.
 
     Detects stagnation by tracking:
     - Best X position ever achieved
-    - Episodes since X improvement
-    - Rolling average X position
+    - Time remaining at episode end (higher = faster completion)
+    - Flag captures (level completions)
+    - Episodes since meaningful improvement
 
-    When stuck for too long, reloads the best performing checkpoint.
+    When stuck for too long, increases exploration to escape local minima.
     """
 
     def __init__(
@@ -62,21 +63,26 @@ class ProgressMonitorCallback(BaseCallback):
         save_path: Path,
         patience_episodes: int = 2000,
         check_freq: int = 100,
-        min_improvement: int = 50,
+        min_x_improvement: int = 50,
+        min_time_improvement: int = 20,
         verbose: int = 1,
     ):
         super().__init__(verbose)
         self.save_path = Path(save_path)
         self.patience_episodes = patience_episodes
         self.check_freq = check_freq
-        self.min_improvement = min_improvement
+        self.min_x_improvement = min_x_improvement
+        self.min_time_improvement = min_time_improvement
 
         # Tracking state
         self.best_x_ever = 0
         self.best_x_checkpoint = 0
+        self.best_time_at_x: Dict[int, int] = {}  # x_bucket -> best time remaining
         self.episode_count = 0
         self.episodes_since_improvement = 0
         self.x_history: List[int] = []
+        self.time_history: List[int] = []  # Time remaining at episode end
+        self.flag_count = 0
         self.recovery_count = 0
         self.last_check_episode = 0
 
@@ -87,21 +93,41 @@ class ProgressMonitorCallback(BaseCallback):
 
         for info, done in zip(infos, dones, strict=False):
             x_pos = info.get("x_pos", 0)
+            time_left = info.get("time", 0)  # Mario's in-game time (counts down from 400)
+            flag_get = info.get("flag_get", False)
 
-            # Track best X position this step
+            # Track best X position
             if x_pos > self.best_x_ever:
                 improvement = x_pos - self.best_x_ever
                 self.best_x_ever = x_pos
-                if improvement >= self.min_improvement:
+                if improvement >= self.min_x_improvement:
                     self.episodes_since_improvement = 0
                     if self.verbose:
-                        print(f"📈 New best X: {self.best_x_ever} (+{improvement})")
+                        print(f"📈 New best X: {self.best_x_ever} (+{improvement}) | Time: {time_left}")
+
+            # Track best time at X position buckets (every 100 pixels)
+            x_bucket = (x_pos // 100) * 100
+            if x_bucket not in self.best_time_at_x or time_left > self.best_time_at_x[x_bucket]:
+                old_time = self.best_time_at_x.get(x_bucket, 0)
+                self.best_time_at_x[x_bucket] = time_left
+                if time_left - old_time >= self.min_time_improvement and x_bucket >= 200:
+                    self.episodes_since_improvement = 0
+                    if self.verbose and old_time > 0:
+                        print(f"⏱️  Faster at X={x_bucket}: {time_left}s (+{time_left - old_time}s)")
 
             if done:
                 self.episode_count += 1
                 self.x_history.append(x_pos)
+                self.time_history.append(time_left)
                 if len(self.x_history) > 100:
                     self.x_history.pop(0)
+                    self.time_history.pop(0)
+
+                if flag_get:
+                    self.flag_count += 1
+                    self.episodes_since_improvement = 0
+                    if self.verbose:
+                        print(f"🏁 FLAG #{self.flag_count}! X={x_pos}, Time={time_left}s")
 
         # Periodic check
         if self.episode_count - self.last_check_episode >= self.check_freq:
@@ -117,10 +143,11 @@ class ProgressMonitorCallback(BaseCallback):
             return
 
         avg_x = sum(self.x_history) / len(self.x_history)
+        avg_time = sum(self.time_history) / len(self.time_history) if self.time_history else 0
         best_model_path = self.save_path / "best_progress_model.zip"
 
         # Save checkpoint if we've improved
-        if self.best_x_ever > self.best_x_checkpoint + self.min_improvement:
+        if self.best_x_ever > self.best_x_checkpoint + self.min_x_improvement:
             self.best_x_checkpoint = self.best_x_ever
             if self.model is not None:
                 self.model.save(best_model_path)
@@ -132,10 +159,18 @@ class ProgressMonitorCallback(BaseCallback):
             print("\n⚠️  STAGNATION DETECTED!")
             print(f"    Best X ever: {self.best_x_ever}")
             print(f"    Avg X (last 100): {avg_x:.0f}")
+            print(f"    Avg Time remaining: {avg_time:.0f}s")
+            print(f"    Flags captured: {self.flag_count}")
             print(f"    Episodes without improvement: {self.episodes_since_improvement}")
 
+            # Show time efficiency at different distances
+            if self.best_time_at_x:
+                print("    Best times at positions:")
+                for x_bucket in sorted(self.best_time_at_x.keys())[-5:]:
+                    print(f"      X={x_bucket}: {self.best_time_at_x[x_bucket]}s remaining")
+
             # Try to recover by increasing exploration
-            if best_model_path.exists() and self.model is not None:
+            if self.model is not None:
                 self.recovery_count += 1
                 print(f"    🔄 Recovery #{self.recovery_count}: Increasing exploration...")
                 try:
@@ -155,8 +190,12 @@ class ProgressMonitorCallback(BaseCallback):
         if self.verbose:
             print("\n📊 Progress Monitor Summary:")
             print(f"    Best X ever: {self.best_x_ever}")
+            print(f"    Flags captured: {self.flag_count}")
             print(f"    Total episodes: {self.episode_count}")
             print(f"    Recovery attempts: {self.recovery_count}")
+            if self.best_time_at_x:
+                max_x = max(self.best_time_at_x.keys())
+                print(f"    Best time at X={max_x}: {self.best_time_at_x[max_x]}s")
 
 
 class UICallback(BaseCallback):
@@ -400,9 +439,10 @@ def main(
         ),
         ProgressMonitorCallback(
             save_path=run_dir,
-            patience_episodes=2000,  # Episodes without X improvement before intervention
+            patience_episodes=2000,  # Episodes without improvement before intervention
             check_freq=100,  # Check every N episodes
-            min_improvement=50,  # Min X improvement to count as progress
+            min_x_improvement=50,  # Min X improvement to count as progress
+            min_time_improvement=20,  # Min time improvement at same X to count as progress
             verbose=1,
         ),
     ]
