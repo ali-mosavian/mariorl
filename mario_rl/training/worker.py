@@ -91,8 +91,8 @@ class Worker:
     level: Literal["sequential", "random"] | tuple[Literal[1, 2, 3, 4, 5, 6, 7, 8], Literal[1, 2, 3, 4]] = (1, 1)
     render_frames: bool = False
     exploration_rate: float = 0.25
-    exploration_rate_min: float = 0.1
-    exploration_rate_decay: float = 0.99999
+    exploration_rate_min: float = 0.05  # Lower minimum for more exploitation
+    exploration_rate_decay: float = 0.9999  # Faster decay to reach useful policy sooner
     weight_sync_interval: int = 1000
     device: Optional[str] = None
     ui_queue: Optional[mp.Queue] = None

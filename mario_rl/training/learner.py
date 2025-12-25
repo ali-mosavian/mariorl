@@ -103,10 +103,10 @@ class Learner:
     save_dir: Path
 
     # Configuration fields with defaults
-    batch_size: int = 64
+    batch_size: int = 256  # Larger batches for stable gradients + GPU utilization
     gamma: float = 0.99  # Higher gamma for long-horizon planning (was 0.9)
-    lr: float = 1e-5  # Lowered from 1e-4 for stability
-    sync_every: int = 1000
+    lr: float = 3e-4  # Higher LR works with normalized rewards
+    sync_every: int = 500  # Faster target sync for quicker adaptation
     save_every: int = 100
     burnin: int = 1000
     max_grad_norm: float = 1.0  # More aggressive clipping
