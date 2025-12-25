@@ -17,6 +17,7 @@ from typing import Dict
 from typing import List
 from pathlib import Path
 from typing import Tuple
+from typing import Literal
 from typing import Optional
 from dataclasses import field
 from dataclasses import dataclass
@@ -47,7 +48,10 @@ from mario_rl.training.shared_buffer import SharedReplayBuffer
 from mario_rl.environment.mariogym import SuperMarioBrosMultiLevel
 
 
-def create_env(level=(1, 1), render_frames=False):
+def create_env(
+    level: Literal["sequential", "random"] | tuple[Literal[1, 2, 3, 4, 5, 6, 7, 8], Literal[1, 2, 3, 4]] = (1, 1),
+    render_frames=False,
+):
     """Create wrapped Mario environment."""
     from mario_rl.environment.wrappers import SkipFrame
     from mario_rl.environment.wrappers import ResizeObservation
@@ -79,7 +83,7 @@ class Worker:
     weights_path: Path
 
     # Configuration fields with defaults
-    level: tuple = (1, 1)
+    level: Literal["sequential", "random"] | tuple[Literal[1, 2, 3, 4, 5, 6, 7, 8], Literal[1, 2, 3, 4]] = (1, 1)
     render_frames: bool = False
     exploration_rate: float = 0.25
     exploration_rate_min: float = 0.1

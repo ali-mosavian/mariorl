@@ -178,7 +178,7 @@ def logged_world_model_learner(log_file: Path, *args, **kwargs):
     "--level",
     type=str,
     default="1,1",
-    help="Level to play (e.g., '1,1' or '1,2')",
+    help="Level to play: '1,1' for specific level, 'random' for random levels, 'sequential' for all levels in order",
 )
 @click.option("-b", "--buffer-size", type=int, default=250000, help="Replay buffer size")
 @click.option("--batch-size", type=int, default=64, help="Training batch size")
@@ -228,8 +228,14 @@ def main(
 ):
     """Launch distributed Mario training with multiple workers."""
 
-    # Parse level
-    level_tuple = tuple(map(int, level.split(",")))
+    # Parse level: can be "random", "sequential", or "world,stage"
+    level_mode: str | tuple[int, int]
+    if level in ("random", "sequential"):
+        level_mode = level
+    else:
+        parts = tuple(map(int, level.split(",")))
+        assert len(parts) == 2, "Level must be 'world,stage' with 2 integers"
+        level_mode = (parts[0], parts[1])
 
     # Setup save directory
     if save_dir is None:
@@ -249,7 +255,7 @@ def main(
         print("Distributed Mario Training")
     print("=" * 60)
     print(f"  Workers:      {num_workers}")
-    print(f"  Level:        {level_tuple}")
+    print(f"  Level:        {level_mode}")
     print(f"  Buffer size:  {buffer_size:,}")
     print(f"  Batch size:   {batch_size}")
     print(f"  Save dir:     {save_dir}")
@@ -328,7 +334,7 @@ def main(
                 target=logged_worker,
                 args=(worker_log, i, shared_buffer, weights_path),
                 kwargs={
-                    "level": level_tuple,
+                    "level": level_mode,
                     "render_frames": worker_render,
                     "num_episodes": episodes,
                     "ui_queue": ui_queue,
