@@ -54,11 +54,13 @@ class UICallback(BaseCallback):
         self,
         ui_queue: Queue,
         num_envs: int,
+        level_str: str = "random",
         verbose: int = 0,
     ):
         super().__init__(verbose)
         self.ui_queue = ui_queue
         self.num_envs = num_envs
+        self.level_str = level_str
         self.episode_rewards: Dict[int, float] = dict.fromkeys(range(num_envs), 0.0)
         self.episode_lengths: Dict[int, int] = dict.fromkeys(range(num_envs), 0)
         self.episode_counts: Dict[int, int] = dict.fromkeys(range(num_envs), 0)
@@ -131,7 +133,7 @@ class UICallback(BaseCallback):
                 "weight_sync_count": 0,
                 "steps_per_sec": self.num_timesteps / max(1, time.time() - self.start_time),
                 "snapshot_restores": 0,
-                "current_level": "random",
+                "current_level": self.level_str,
                 "rolling_avg_reward": rolling_avg,
                 "first_flag_time": 0.0,
             },
@@ -289,8 +291,12 @@ def main(
     ui_process = None
 
     if not no_ui:
-        # Add UI callback
-        callbacks.append(UICallback(ui_queue, num_envs))
+        # Add UI callback - format level for display
+        if isinstance(level_type, tuple):
+            level_display = f"{level_type[0]}-{level_type[1]}"
+        else:
+            level_display = str(level_type)
+        callbacks.append(UICallback(ui_queue, num_envs, level_str=level_display))
 
         # Start UI in separate process (must use module-level function for pickling)
         from multiprocessing import Process
