@@ -148,7 +148,7 @@ class APPOWorker:
     render_frames: bool = False
     weight_sync_interval: float = 5.0  # Seconds between weight syncs
     reward_scale: float = 0.1  # Scale rewards for stable training
-    device: str = "cpu"  # Workers always run on CPU
+    device: Optional[str] = None  # Auto-detect: MPS on Mac, CUDA on NVIDIA, else CPU
     ui_queue: Optional[mp.Queue] = None
 
     # PPO hyperparameters
@@ -182,6 +182,15 @@ class APPOWorker:
 
     def __post_init__(self):
         """Initialize environment and network."""
+        # Auto-detect best device (MPS on Mac, CUDA on NVIDIA, else CPU)
+        if self.device is None:
+            if torch.cuda.is_available():
+                self.device = "cuda"
+            elif torch.backends.mps.is_available():
+                self.device = "mps"
+            else:
+                self.device = "cpu"
+
         # Create environment
         self.env, self.base_env = create_env(
             level=self.level,
@@ -189,7 +198,7 @@ class APPOWorker:
         )
         self.action_dim = self.env.action_space.n
 
-        # Create network on CPU (workers always use CPU)
+        # Create network on detected device
         state_dim = (4, 64, 64)
         self.net = ActorCritic(
             input_shape=state_dim,
@@ -590,7 +599,7 @@ class APPOWorker:
         """Main worker loop."""
         import sys
 
-        print(f"Worker {self.worker_id} started (level={self.level})")
+        print(f"Worker {self.worker_id} started (level={self.level}, device={self.device})")
         sys.stdout.flush()
 
         while True:
