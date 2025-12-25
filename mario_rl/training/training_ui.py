@@ -608,7 +608,8 @@ class TrainingUI:
                 sync_str = "never"
 
             # Main stats line with Q-values and weight sync
-            stats = f"Ep: {episode:4d}  Step: {step:4d}  X: {x_pos:4d}  Best: {best_x:4d}  Q: {q_mean:.1f}/{q_max:.1f}  {steps_per_sec:.0f} sps  Wgt: {sync_str}"
+            game_time = ws.get("game_time", 0)
+            stats = f"Ep: {episode:4d}  Step: {step:4d}  X: {x_pos:4d}  Best: {best_x:4d}  ⏱{game_time:3d}  Q: {q_mean:.1f}/{q_max:.1f}  {steps_per_sec:.0f} sps  Wgt: {sync_str}"
             stdscr.addstr(y + 1, 4, stats)
 
             # Secondary stats
@@ -802,6 +803,7 @@ def send_worker_status(
     weight_sync_count: int = 0,
     snapshot_restores: int = 0,
     current_level: str = "?",
+    game_time: int = 0,
     # Convergence metrics
     rolling_avg_reward: float = 0.0,
     first_flag_time: float = 0.0,
@@ -831,6 +833,7 @@ def send_worker_status(
                     "weight_sync_count": weight_sync_count,
                     "snapshot_restores": snapshot_restores,
                     "current_level": current_level,
+                    "game_time": game_time,
                     # Convergence metrics
                     "rolling_avg_reward": rolling_avg_reward,
                     "first_flag_time": first_flag_time,

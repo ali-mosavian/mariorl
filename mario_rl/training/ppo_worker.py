@@ -316,6 +316,7 @@ class PPOWorker:
                     "step": self.episode_length,
                     "reward": self.episode_reward,
                     "x_pos": info.get("x_pos", 0),
+                    "game_time": info.get("time", 0),
                     "best_x": self.best_x,
                     "best_x_ever": self.best_x_ever,
                     "deaths": self.deaths,

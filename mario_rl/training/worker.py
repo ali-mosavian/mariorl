@@ -301,6 +301,7 @@ class Worker:
                 self.experiences_pushed += 1
 
             # Send real-time status every 50 steps
+            game_time = info.get("time", 0)
             if step % 50 == 0:
                 self._send_status(
                     episode=episode,
@@ -310,6 +311,7 @@ class Worker:
                     deaths=num_deaths,
                     flags=total_flags,
                     step=step,
+                    game_time=game_time,
                 )
 
             # Snapshot logic
@@ -393,6 +395,7 @@ class Worker:
         flags: int,
         step: int = 0,
         is_end: bool = False,
+        game_time: int = 0,
     ):
         """Send status update to UI."""
         if self.ui_queue is not None:
@@ -418,6 +421,7 @@ class Worker:
                 weight_sync_count=self.weight_sync_count,
                 snapshot_restores=self.snapshot_restores,
                 current_level=self.base_env.current_level,
+                game_time=game_time,
                 # Convergence metrics
                 rolling_avg_reward=self.rolling_avg_reward,
                 first_flag_time=self.first_flag_time,
