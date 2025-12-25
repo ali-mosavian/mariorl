@@ -62,6 +62,11 @@ class SharedReplayBuffer:
         self._memory: deque = deque(maxlen=max_len)
         self._priorities: Optional[np.ndarray] = None
 
+        # Sequence sampling cache for performance
+        self._valid_seq_starts: List[int] = []
+        self._seq_cache_dirty: bool = True
+        self._cached_seq_len: int = 0
+
         # Local throughput stats (not shared between processes)
         self._total_messages = 0
         self._total_bytes = 0
@@ -79,6 +84,7 @@ class SharedReplayBuffer:
 
     def _clear_caches(self):
         self._priorities = None
+        self._seq_cache_dirty = True
 
     @property
     def priorities(self) -> np.ndarray:
@@ -192,15 +198,44 @@ class SharedReplayBuffer:
 
     def update_priorities(self, indices: np.ndarray, priorities: np.ndarray):
         """Update priorities for sampled experiences."""
-        self._clear_caches()
+        # Only clear priority cache, not sequence cache (priorities don't affect sequences)
+        self._priorities = None
         for i, p in zip(indices, priorities, strict=False):
             self._memory[i]["p"] = float(p)
+
+    def _update_sequence_cache(self, seq_len: int):
+        """
+        Build cache of valid sequence starting positions.
+        Only scans buffer when cache is dirty (after new experiences added).
+        """
+        if not self._seq_cache_dirty and self._cached_seq_len == seq_len:
+            return  # Cache is still valid
+
+        self._valid_seq_starts = []
+        buffer_len = len(self._memory)
+
+        # Scan buffer for valid sequence starts
+        # Check 'done' flag directly without unpacking for massive speedup
+        for i in range(buffer_len - seq_len + 1):
+            valid = True
+            for j in range(seq_len - 1):
+                # Access 'done' flag directly from packed memory (much faster!)
+                if self._memory[i + j]["d"]:
+                    valid = False
+                    break
+            if valid:
+                self._valid_seq_starts.append(i)
+
+        self._seq_cache_dirty = False
+        self._cached_seq_len = seq_len
 
     def sample_sequences(self, batch_size: int, seq_len: int = 4) -> Tuple[SequenceBatch, np.ndarray]:
         """
         Sample consecutive frame sequences for dynamics/temporal training.
 
         Each sequence contains seq_len consecutive experiences from the same episode.
+
+        Uses caching to avoid O(n) scan on every call - massive speedup as buffer grows!
 
         Args:
             batch_size: Number of sequences to sample
@@ -212,21 +247,13 @@ class SharedReplayBuffer:
         if len(self._memory) < batch_size * seq_len:
             raise ValueError(f"Not enough experiences: {len(self._memory)} < {batch_size * seq_len}")
 
-        # Find valid starting positions (sequences that don't cross episode boundaries)
-        valid_starts = []
-        for i in range(len(self._memory) - seq_len + 1):
-            # Check that no experience in the sequence is terminal (except possibly the last)
-            valid = True
-            for j in range(seq_len - 1):
-                exp = unpack_experience(self._memory[i + j])
-                if exp.done:
-                    valid = False
-                    break
-            if valid:
-                valid_starts.append(i)
+        # Update cache only when buffer changes (amortized O(1) instead of O(n) every call!)
+        self._update_sequence_cache(seq_len)
+
+        valid_starts = self._valid_seq_starts
 
         if len(valid_starts) < batch_size:
-            # Fall back to random sampling if not enough valid sequences
+            # Fall back to all positions if not enough valid sequences
             valid_starts = list(range(len(self._memory) - seq_len + 1))
 
         # Sample starting indices
