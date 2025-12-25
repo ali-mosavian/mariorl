@@ -38,6 +38,7 @@ plot = [
 [project.scripts]
 mario-train = "scripts.train:main"
 mario-train-ppo = "scripts.train_ppo:main"
+mario-train-ppo-custom = "scripts.train_ppo_custom:main"
 mario-watch = "scripts.watch:main"
 
 [build-system]
