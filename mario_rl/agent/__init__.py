@@ -8,7 +8,6 @@ from mario_rl.agent.world_model import DynamicsModel
 from mario_rl.agent.world_model import RewardPredictor
 from mario_rl.agent.neural import DuelingDDQNNet
 from mario_rl.agent.replay import ExperienceBatch
-from mario_rl.agent.replay import SharedReplayBuffer
 
 __all__ = [
     "MarioWorldModel",
@@ -19,6 +18,5 @@ __all__ = [
     "RewardPredictor",
     "DuelingDDQNNet",
     "ExperienceBatch",
-    "SharedReplayBuffer",
 ]
 

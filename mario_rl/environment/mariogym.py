@@ -9,7 +9,7 @@ from dataclasses import dataclass
 import numpy as np
 import gymnasium as gym
 
-from nes_py.nes_env import NESEmulatorWrapper
+from nes_py import NESEnv
 from gym_super_mario_bros import SuperMarioBrosEnv
 from nes_py._image_viewer import ImageViewer
 
@@ -239,8 +239,8 @@ class SuperMarioBrosMultiLevel(gym.Env):
             if self.viewer is None:
                 self.viewer = ImageViewer(
                     caption=self.__class__.__name__,
-                    height=NESEmulatorWrapper.height * 3,
-                    width=NESEmulatorWrapper.width * 3,
+                    height=NESEnv.height * 3,
+                    width=NESEnv.width * 3,
                     monitor_keyboard=True,
                 )
 

@@ -21,7 +21,7 @@ import numpy as np
 import lz4.block
 import lz4.frame
 
-from frame_stack import LazyFrames
+from mario_rl.environment.frame_stack import LazyFrames
 
 
 T = TypeVar("T")
