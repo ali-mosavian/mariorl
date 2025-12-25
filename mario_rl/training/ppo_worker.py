@@ -79,6 +79,7 @@ class PPOWorker:
     n_steps: int = 128  # Steps per rollout
     render_frames: bool = False
     weight_sync_interval: float = 5.0  # Seconds between weight syncs
+    reward_scale: float = 0.1  # Scale rewards to keep value predictions stable
     device: Optional[str] = None
     ui_queue: Optional[mp.Queue] = None
 
@@ -223,10 +224,14 @@ class PPOWorker:
             next_state, reward, terminated, truncated, info = self.env.step(action)
             done = terminated or truncated
 
-            rewards.append(reward)
+            # Scale reward to keep value predictions manageable
+            # Environment gives ~(-60, 60) with SkipFrame, scale to ~(-6, 6)
+            scaled_reward = reward * self.reward_scale
+
+            rewards.append(scaled_reward)
             dones.append(done)
 
-            # Update tracking
+            # Update tracking (use original reward for logging)
             self.episode_reward += reward
             self.episode_length += 1
             self.total_steps += 1
