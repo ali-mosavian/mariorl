@@ -291,14 +291,14 @@ class TrainingUI:
             self._draw_learner(stdscr, current_y, width, learner_height)
             current_y += learner_height
 
+        # Global convergence section (right under learner)
+        self._draw_convergence(stdscr, current_y, width, convergence_height)
+        current_y += convergence_height
+
         # Worker sections
         for i in range(self.num_workers):
             self._draw_worker(stdscr, current_y, width, worker_height, i)
             current_y += worker_height
-
-        # Global convergence section
-        self._draw_convergence(stdscr, current_y, width, convergence_height)
-        current_y += convergence_height
 
         # Separator
         stdscr.addstr(current_y, 0, "─" * (width - 1), curses.A_DIM)
