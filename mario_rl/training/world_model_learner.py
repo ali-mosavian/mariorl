@@ -123,16 +123,17 @@ class WorldModelLearner:
     # World model configuration
     latent_dim: int = 128
     wm_hidden_dim: int = 256
-    wm_lr: float = 1e-4
+    wm_lr: float = 1e-5  # Lowered from 1e-4 for stability
     wm_steps: int = 500  # Steps per world model phase
     seq_len: int = 8  # Sequence length for dynamics training
     beta_kl: float = 0.1
     beta_dynamics: float = 0.1  # Lower to prevent dynamics loss explosion early
     beta_ssim: float = 0.1
+    max_grad_norm: float = 1.0  # Gradient clipping threshold
 
     # Q-network configuration
     q_hidden_dim: int = 256
-    q_lr: float = 1e-4
+    q_lr: float = 1e-5  # Lowered from 1e-4 for stability
     q_steps: int = 500  # Steps per Q-network phase
     gamma: float = 0.9
     sync_every: int = 1000
@@ -375,7 +376,7 @@ class WorldModelLearner:
         loss.backward()
 
         # Gradient clipping
-        torch.nn.utils.clip_grad_norm_(self.world_model.parameters(), max_norm=10.0)
+        torch.nn.utils.clip_grad_norm_(self.world_model.parameters(), max_norm=self.max_grad_norm)
 
         self.wm_optimizer.step()
 
@@ -469,7 +470,7 @@ class WorldModelLearner:
         # Backward pass
         self.wm_optimizer.zero_grad()
         avg_loss.backward()
-        torch.nn.utils.clip_grad_norm_(self.world_model.parameters(), max_norm=10.0)
+        torch.nn.utils.clip_grad_norm_(self.world_model.parameters(), max_norm=self.max_grad_norm)
         self.wm_optimizer.step()
 
         self.wm_train_step += 1
@@ -550,7 +551,7 @@ class WorldModelLearner:
         self.last_grad_norm = total_norm**0.5
 
         # Gradient clipping
-        torch.nn.utils.clip_grad_norm_(self.q_network.online.parameters(), max_norm=10.0)
+        torch.nn.utils.clip_grad_norm_(self.q_network.online.parameters(), max_norm=self.max_grad_norm)
 
         self.q_optimizer.step()
 

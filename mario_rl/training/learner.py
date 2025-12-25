@@ -107,10 +107,11 @@ class Learner:
     # Configuration fields with defaults
     batch_size: int = 64
     gamma: float = 0.9
-    lr: float = 1e-4
+    lr: float = 1e-5  # Lowered from 1e-4 for stability
     sync_every: int = 1000
     save_every: int = 100
     burnin: int = 1000
+    max_grad_norm: float = 1.0  # More aggressive clipping
     device: Optional[str] = None
     ui_queue: Optional[mp.Queue] = None
     max_steps: int = -1
@@ -231,8 +232,12 @@ class Learner:
                 total_norm += p.grad.data.norm(2).item() ** 2
         self.last_grad_norm = total_norm**0.5
 
-        # Optional: gradient clipping
-        torch.nn.utils.clip_grad_norm_(self.net.online.parameters(), max_norm=10.0)
+        # Gradient clipping (critical for stability!)
+        torch.nn.utils.clip_grad_norm_(self.net.online.parameters(), max_norm=self.max_grad_norm)
+
+        # Warn if gradients are exploding before clip
+        if self.last_grad_norm > 100.0:
+            self._log(f"⚠️ WARNING: Large gradient norm {self.last_grad_norm:.1f} before clipping!")
 
         self.optimizer.step()
 

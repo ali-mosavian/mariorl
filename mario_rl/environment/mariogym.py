@@ -185,10 +185,22 @@ class SuperMarioBrosMultiLevel(gym.Env):
             else:
                 return f"{self.level[0]}-{self.level[1]}"
 
-        # Get the target from the current env
-        if hasattr(self.env, "_target"):
-            world, stage = self.env._target
-            return f"{world}-{stage}"
+        # Get the target from the current env (check all possible attributes)
+        for attr in ("_target", "target", "_world_number", "_stage_number"):
+            if hasattr(self.env, attr):
+                if attr in ("_target", "target"):
+                    world, stage = getattr(self.env, attr)
+                    return f"{world}-{stage}"
+
+        # Try reading from ROM state
+        if hasattr(self.env, "ram") and len(self.env.ram) > 0:
+            # These are memory addresses in Super Mario Bros NES ROM
+            try:
+                world = self.env.ram[0x075F] + 1  # World number (0-indexed in RAM)
+                stage = self.env.ram[0x075C] + 1  # Stage number (0-indexed in RAM)
+                return f"{world}-{stage}"
+            except Exception:
+                pass
 
         # Fallback to level mode
         if isinstance(self.level, str):
