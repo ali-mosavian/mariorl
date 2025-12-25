@@ -51,6 +51,7 @@ class PackedFrames(TypedDict):
 class Memory(TypedDict):
     data: bytes
     p: float
+    d: bool  # Done flag stored at top level for fast sequence sampling
 
 
 def _pack(x):
@@ -88,6 +89,7 @@ def pack_experience(
             }
         ),
         "p": p,
+        "d": bool(d),  # Store done flag at top level for fast sequence sampling
     }
 
 
