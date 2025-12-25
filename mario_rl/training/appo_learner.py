@@ -159,6 +159,7 @@ class APPOLearner:
     last_kl: float = field(init=False, default=0.0)
     last_clip_fraction: float = field(init=False, default=0.0)
     grads_per_sec: float = field(init=False, default=0.0)
+    gradients_received: int = field(init=False, default=0)
     _last_time: float = field(init=False, default=0.0)
 
     def __post_init__(self):
@@ -292,6 +293,7 @@ class APPOLearner:
 
         # Update counts
         self.update_count += 1
+        self.gradients_received += num_packets
         for packet in gradient_packets:
             self.total_timesteps_collected += packet["timesteps"]
 
@@ -377,6 +379,8 @@ class APPOLearner:
                     "lr": lr,
                     "ent_coef": 0.01,  # Fixed for now
                     "steps_per_sec": self.grads_per_sec,
+                    "gradients_received": self.gradients_received,
+                    "weight_version": self.weight_version,
                     "elapsed_time": time.time() - self._last_time,
                 },
             )

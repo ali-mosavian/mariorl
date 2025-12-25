@@ -177,6 +177,8 @@ class APPOWorker:
     reward_history: List[float] = field(init=False, default_factory=list)
     last_weight_sync: float = field(init=False, default=0.0)
     weight_version: int = field(init=False, default=0)
+    weight_sync_count: int = field(init=False, default=0)
+    gradients_sent: int = field(init=False, default=0)
     steps_per_sec: float = field(init=False, default=0.0)
     _last_time: float = field(init=False, default=0.0)
 
@@ -218,6 +220,8 @@ class APPOWorker:
         self.reward_history = []
         self.last_weight_sync = 0.0
         self.weight_version = 0
+        self.weight_sync_count = 0
+        self.gradients_sent = 0
         self._last_time = time.time()
 
         # Load initial weights
@@ -246,6 +250,7 @@ class APPOWorker:
             else:
                 self.net.load_state_dict(checkpoint)
             self.last_weight_sync = time.time()
+            self.weight_sync_count += 1
             return True
         except Exception as e:
             print(f"Worker {self.worker_id}: Failed to load weights: {e}")
@@ -551,6 +556,7 @@ class APPOWorker:
 
         try:
             self.gradient_queue.put(gradient_packet, timeout=5.0)
+            self.gradients_sent += 1
         except Exception as e:
             print(f"Worker {self.worker_id}: Failed to send gradients: {e}")
 
@@ -588,7 +594,8 @@ class APPOWorker:
                     "experiences": self.total_steps,
                     "q_mean": 0.0,
                     "q_max": 0.0,
-                    "weight_sync_count": 0,
+                    "weight_sync_count": self.weight_sync_count,
+                    "gradients_sent": self.gradients_sent,
                     "steps_per_sec": self.steps_per_sec,
                     "snapshot_restores": 0,
                     "current_level": level_str,

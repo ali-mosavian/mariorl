@@ -459,8 +459,10 @@ class TrainingUI:
             value_color = curses.color_pair(1) if value_loss < 1.0 else curses.color_pair(3)
             stdscr.addstr(f"{value_loss:.4f}", value_color)
 
-            # Entropy and clip fraction
-            stdscr.addstr(y + 3, 4, f"Entropy: {entropy:.4f}  Clip: {clip_fraction:.3f}")
+            # Entropy and clip fraction + gradient counts
+            grads_recv = ppo.get("gradients_received", 0)
+            weight_ver = ppo.get("weight_version", 0)
+            stdscr.addstr(y + 3, 4, f"Entropy: {entropy:.4f}  Clip: {clip_fraction:.3f}  ↓{grads_recv} v{weight_ver}")
 
             # Status indicator
             stdscr.addstr(y + 4, 4, "Status: ", curses.A_DIM)
@@ -609,7 +611,7 @@ class TrainingUI:
 
             # Main stats line with Q-values and weight sync
             game_time = ws.get("game_time", 0)
-            stats = f"Ep: {episode:4d}  Step: {step:4d}  X: {x_pos:4d}  Best: {best_x:4d}  ⏱{game_time:3d}  Q: {q_mean:.1f}/{q_max:.1f}  {steps_per_sec:.0f} sps  Wgt: {sync_str}"
+            stats = f"Ep: {episode:4d}  Step: {step:4d}  X: {x_pos:4d}  ⏱{game_time:3d}  Best: {best_x:4d}  Q: {q_mean:.1f}/{q_max:.1f}  {steps_per_sec:.0f} sps  Wgt: {sync_str}"
             stdscr.addstr(y + 1, 4, stats)
 
             # Secondary stats
@@ -621,7 +623,8 @@ class TrainingUI:
             stdscr.addstr(f"  ⏮={snapshot_restores:2d}")
             stdscr.addstr("  🏁=")
             stdscr.addstr(f"{flags:2d}", flag_color)
-            stdscr.addstr(f"  ε={epsilon:.3f}  Exp={exp:,}  Syncs={weight_sync_count}")
+            grads_sent = ws.get("gradients_sent", 0)
+            stdscr.addstr(f"  ε={epsilon:.3f}  Exp={exp:,}  ↑{grads_sent} ↓{weight_sync_count}")
 
             # Convergence metrics line (rolling avg + first flag time)
             avg_color = curses.color_pair(1) if rolling_avg_reward > 0 else curses.color_pair(3)
