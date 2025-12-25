@@ -328,6 +328,10 @@ class APPOWorker:
             if info.get("flag_get", False):
                 self.flags += 1
 
+            # Send real-time UI status every 50 steps
+            if self.total_steps % 50 == 0:
+                self._send_ui_status(info)
+
             if done:
                 # Episode ended
                 self.episode_count += 1
