@@ -173,16 +173,47 @@ def main(
     print("Started learner")
 
     # Handle Ctrl+C
+    shutdown_initiated = False
+
     def signal_handler(signum, frame):
+        nonlocal shutdown_initiated
+        if shutdown_initiated:
+            return  # Prevent double-shutdown
+        shutdown_initiated = True
+
         print("\nShutting down...")
+
+        # Cancel queue join threads to prevent blocking on shutdown
+        # This must be done BEFORE terminating processes
+        rollout_queue.cancel_join_thread()
+        if ui_queue is not None:
+            ui_queue.cancel_join_thread()
+
+        # Terminate all processes
         for p in worker_processes:
-            p.terminate()
-        learner_process.terminate()
-        if ui_process:
+            if p.is_alive():
+                p.terminate()
+        if learner_process.is_alive():
+            learner_process.terminate()
+        if ui_process and ui_process.is_alive():
             ui_process.terminate()
+
+        # Wait for processes to finish (with timeout)
+        for p in worker_processes:
+            p.join(timeout=1.0)
+        learner_process.join(timeout=1.0)
+        if ui_process:
+            ui_process.join(timeout=1.0)
+
+        # Close queues
+        rollout_queue.close()
+        if ui_queue is not None:
+            ui_queue.close()
+
         sys.exit(0)
 
     signal.signal(signal.SIGINT, signal_handler)
+    signal.signal(signal.SIGTERM, signal_handler)
 
     # Wait for processes
     try:
