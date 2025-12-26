@@ -504,7 +504,7 @@ class APPOWorker:
         # NOTE: We need a local optimizer to update the worker's policy during epochs
         # so that ratio != 1.0 and PPO clipping actually works
         # Use lower LR than learner to prevent aggressive local updates
-        local_optimizer = torch.optim.Adam(self.net.parameters(), lr=1e-4)
+        local_optimizer = torch.optim.AdamW(self.net.parameters(), lr=1e-4, weight_decay=0.01)
         all_metrics: List[Dict[str, float]] = []
         early_stop = False
 

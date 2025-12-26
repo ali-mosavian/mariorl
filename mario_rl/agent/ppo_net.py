@@ -2,13 +2,28 @@
 Actor-Critic network for PPO.
 
 Shared CNN backbone with separate actor (policy) and critic (value) heads.
+
+Includes:
+- GELU activation (smoother than ReLU)
+- LayerNorm for stability
+- Orthogonal initialization (standard for PPO)
 """
 
 from typing import Tuple
 
 import torch
+import numpy as np
 from torch import nn
 from torch.distributions import Categorical
+
+
+def layer_init(layer: nn.Module, std: float = np.sqrt(2), bias_const: float = 0.0) -> nn.Module:
+    """Initialize layer with orthogonal weights and constant bias."""
+    if isinstance(layer, (nn.Linear, nn.Conv2d)):
+        nn.init.orthogonal_(layer.weight, std)
+        if layer.bias is not None:
+            nn.init.constant_(layer.bias, bias_const)
+    return layer
 
 
 class PPOBackbone(nn.Module):
@@ -17,36 +32,51 @@ class PPOBackbone(nn.Module):
 
     Takes frame-stacked observations (N, C, H, W) where C is the frame stack.
     Input should already be normalized to [0, 1] and in channels-first format.
+
+    Improvements over vanilla:
+    - GELU activation (smoother gradients)
+    - LayerNorm after flatten (stabilizes training)
+    - Orthogonal initialization (standard for PPO)
     """
 
-    def __init__(self, input_shape: Tuple[int, ...], feature_dim: int = 512):
+    def __init__(self, input_shape: Tuple[int, ...], feature_dim: int = 512, dropout: float = 0.1):
         super().__init__()
         # input_shape: (C, H, W) where C = num stacked frames
         c, h, w = input_shape
 
-        self.net = nn.Sequential(
-            # Conv layers (Nature DQN architecture)
-            nn.Conv2d(in_channels=c, out_channels=32, kernel_size=8, stride=4),
-            nn.ReLU(),
-            nn.Conv2d(in_channels=32, out_channels=64, kernel_size=4, stride=2),
-            nn.ReLU(),
-            nn.Conv2d(in_channels=64, out_channels=64, kernel_size=3, stride=1),
-            nn.ReLU(),
-            nn.Flatten(),
-        )
+        # Conv layers with orthogonal init
+        self.conv1 = layer_init(nn.Conv2d(c, 32, kernel_size=8, stride=4))
+        self.conv2 = layer_init(nn.Conv2d(32, 64, kernel_size=4, stride=2))
+        self.conv3 = layer_init(nn.Conv2d(64, 64, kernel_size=3, stride=1))
 
         # Calculate flattened size
         with torch.no_grad():
             dummy = torch.zeros(1, c, h, w)
-            flat_size = self.net(dummy).shape[1]
+            dummy = torch.nn.functional.gelu(self.conv1(dummy))
+            dummy = torch.nn.functional.gelu(self.conv2(dummy))
+            dummy = torch.nn.functional.gelu(self.conv3(dummy))
+            flat_size = dummy.flatten(1).shape[1]
 
-        # Feature projection
-        self.fc = nn.Linear(flat_size, feature_dim)
+        # LayerNorm for stability
+        self.layer_norm = nn.LayerNorm(flat_size)
+
+        # Feature projection with orthogonal init
+        self.fc = layer_init(nn.Linear(flat_size, feature_dim))
         self.feature_dim = feature_dim
 
+        # Dropout for regularization (only on FC, not conv)
+        # Small value (0.1) to avoid destabilizing policy
+        self.dropout = nn.Dropout(dropout) if dropout > 0 else nn.Identity()
+
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        features = self.net(x)
-        return torch.relu(self.fc(features))
+        x = torch.nn.functional.gelu(self.conv1(x))
+        x = torch.nn.functional.gelu(self.conv2(x))
+        x = torch.nn.functional.gelu(self.conv3(x))
+        x = x.flatten(1)
+        x = self.layer_norm(x)
+        x = self.dropout(x)  # Dropout before FC
+        x = torch.nn.functional.gelu(self.fc(x))
+        return x
 
 
 class ActorHead(nn.Module):
@@ -54,7 +84,8 @@ class ActorHead(nn.Module):
 
     def __init__(self, feature_dim: int, num_actions: int):
         super().__init__()
-        self.fc = nn.Linear(feature_dim, num_actions)
+        # Small std (0.01) for near-uniform initial policy
+        self.fc = layer_init(nn.Linear(feature_dim, num_actions), std=0.01)
 
     def forward(self, features: torch.Tensor) -> torch.Tensor:
         return self.fc(features)
@@ -65,7 +96,8 @@ class CriticHead(nn.Module):
 
     def __init__(self, feature_dim: int):
         super().__init__()
-        self.fc = nn.Linear(feature_dim, 1)
+        # std=1.0 for value head
+        self.fc = layer_init(nn.Linear(feature_dim, 1), std=1.0)
 
     def forward(self, features: torch.Tensor) -> torch.Tensor:
         return self.fc(features).squeeze(-1)
@@ -76,6 +108,12 @@ class ActorCritic(nn.Module):
     Actor-Critic network for PPO.
 
     Shared backbone with separate heads for policy and value.
+
+    Features:
+    - GELU activation
+    - LayerNorm for stability
+    - Orthogonal initialization
+    - Optional dropout (default 0.1)
     """
 
     def __init__(
@@ -83,9 +121,10 @@ class ActorCritic(nn.Module):
         input_shape: Tuple[int, ...],
         num_actions: int,
         feature_dim: int = 512,
+        dropout: float = 0.1,
     ):
         super().__init__()
-        self.backbone = PPOBackbone(input_shape, feature_dim)
+        self.backbone = PPOBackbone(input_shape, feature_dim, dropout=dropout)
         self.actor = ActorHead(feature_dim, num_actions)
         self.critic = CriticHead(feature_dim)
         self.num_actions = num_actions

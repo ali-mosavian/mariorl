@@ -181,6 +181,7 @@ class APPOLearner:
             self.net.parameters(),
             lr=self.learning_rate,
             eps=1e-5,
+            weight_decay=0.01,  # L2 regularization
         )
 
         # Initialize tracking
