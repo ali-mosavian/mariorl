@@ -155,6 +155,8 @@ class ActorCritic(nn.Module):
         self,
         x: torch.Tensor,
         action: torch.Tensor | None = None,
+        temperature: float = 1.0,
+        logit_clip: float = 20.0,
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         """
         Get action, log probability, entropy, and value.
@@ -164,6 +166,8 @@ class ActorCritic(nn.Module):
         Args:
             x: Observation tensor (N, C, H, W) where C is frame stack
             action: Optional action to evaluate (N,). If None, samples new action.
+            temperature: Softmax temperature (>1 = more exploration, <1 = more greedy)
+            logit_clip: Clip logits to [-clip, +clip] to prevent saturation
 
         Returns:
             action: Selected action (N,)
@@ -172,7 +176,14 @@ class ActorCritic(nn.Module):
             value: State value (N,)
         """
         logits, value = self.forward(x)
-        probs = Categorical(logits=logits)
+
+        # Clip logits to prevent softmax saturation (entropy collapse prevention)
+        logits = torch.clamp(logits, -logit_clip, logit_clip)
+
+        # Apply temperature scaling (higher temp = more uniform distribution)
+        scaled_logits = logits / temperature
+
+        probs = Categorical(logits=scaled_logits)
 
         if action is None:
             action = probs.sample()
