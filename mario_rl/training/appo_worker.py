@@ -500,6 +500,9 @@ class APPOWorker:
         returns = torch.from_numpy(returns_np).to(self.device)
 
         # Training loop - multiple epochs over the rollout
+        # NOTE: We need a local optimizer to update the worker's policy during epochs
+        # so that ratio != 1.0 and PPO clipping actually works
+        local_optimizer = torch.optim.Adam(self.net.parameters(), lr=2.5e-4)
         all_metrics: List[Dict[str, float]] = []
 
         for _epoch in range(self.n_epochs):
@@ -529,11 +532,14 @@ class APPOWorker:
                 )
 
                 # Backward pass
-                self.net.zero_grad()
+                local_optimizer.zero_grad()
                 loss.backward()
 
                 # Clip gradients locally
                 nn.utils.clip_grad_norm_(self.net.parameters(), self.max_grad_norm)
+
+                # Update local network so ratio != 1.0 in next minibatch
+                local_optimizer.step()
 
                 all_metrics.append(metrics)
 
