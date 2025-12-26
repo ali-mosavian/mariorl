@@ -873,13 +873,21 @@ class DDQNWorker:
             if param.grad is not None
         }
 
-        # Metrics
+        # Metrics (include aggregated worker stats for learner)
+        rolling_avg_reward = np.mean(self.reward_history) if self.reward_history else 0.0
+        avg_speed = np.mean(self.speed_history) if self.speed_history else 0.0
         metrics = {
             "loss": loss.item(),
             "q_mean": current_q_selected.mean().item(),
             "q_max": current_q_selected.max().item(),
             "td_error": td_errors.abs().mean().item(),
             "per_beta": self.buffer.current_beta,
+            # Aggregated worker stats for learner graphs
+            "avg_reward": rolling_avg_reward,
+            "avg_speed": avg_speed,
+            "total_deaths": self.deaths,
+            "total_flags": self.flags,
+            "best_x_ever": self.best_x_ever,
         }
 
         # Send gradients to learner

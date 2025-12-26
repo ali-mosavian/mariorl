@@ -175,6 +175,13 @@ class DDQNLearner:
     _last_time: float = field(init=False, default=0.0)
     _resumed_from_checkpoint: bool = field(init=False, default=False)
 
+    # Aggregated worker metrics
+    _worker_avg_rewards: Dict[int, float] = field(init=False, default_factory=dict)
+    _worker_avg_speeds: Dict[int, float] = field(init=False, default_factory=dict)
+    _worker_deaths: Dict[int, int] = field(init=False, default_factory=dict)
+    _worker_flags: Dict[int, int] = field(init=False, default_factory=dict)
+    _worker_best_x: Dict[int, int] = field(init=False, default_factory=dict)
+
     def __post_init__(self):
         """Initialize network and optimizer."""
         if self.device is None:
@@ -309,6 +316,19 @@ class DDQNLearner:
             episodes = packet.get("episodes", 0)
             self.worker_episodes[worker_id] = episodes
 
+            # Extract worker metrics for aggregation
+            metrics = packet.get("metrics", {})
+            if "avg_reward" in metrics:
+                self._worker_avg_rewards[worker_id] = metrics["avg_reward"]
+            if "avg_speed" in metrics:
+                self._worker_avg_speeds[worker_id] = metrics["avg_speed"]
+            if "total_deaths" in metrics:
+                self._worker_deaths[worker_id] = metrics["total_deaths"]
+            if "total_flags" in metrics:
+                self._worker_flags[worker_id] = metrics["total_flags"]
+            if "best_x_ever" in metrics:
+                self._worker_best_x[worker_id] = metrics["best_x_ever"]
+
         # Average metrics from workers
         avg_metrics = {}
         for key in ["loss", "q_mean", "td_error"]:
@@ -372,6 +392,14 @@ class DDQNLearner:
             from mario_rl.training.training_ui import MessageType
 
             total_episodes = sum(self.worker_episodes.values())
+
+            # Compute aggregated metrics from all workers
+            avg_reward = np.mean(list(self._worker_avg_rewards.values())) if self._worker_avg_rewards else 0.0
+            avg_speed = np.mean(list(self._worker_avg_speeds.values())) if self._worker_avg_speeds else 0.0
+            total_deaths = sum(self._worker_deaths.values())
+            total_flags = sum(self._worker_flags.values())
+            global_best_x = max(self._worker_best_x.values()) if self._worker_best_x else 0
+
             msg = UIMessage(
                 msg_type=MessageType.LEARNER_STATUS,
                 source_id=0,
@@ -386,6 +414,12 @@ class DDQNLearner:
                     "grads_per_sec": self.grads_per_sec,
                     "gradients_received": self.gradients_received,
                     "weight_version": self.weight_version,
+                    # Aggregated worker metrics for graphs
+                    "avg_reward": avg_reward,
+                    "avg_speed": avg_speed,
+                    "total_deaths": total_deaths,
+                    "total_flags": total_flags,
+                    "global_best_x": global_best_x,
                 },
             )
             self.ui_queue.put_nowait(msg)
