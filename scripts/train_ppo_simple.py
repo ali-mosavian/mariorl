@@ -101,7 +101,9 @@ def main() -> None:
     parser.add_argument("--gamma", type=float, default=0.99, help="Discount factor")
     parser.add_argument("--gae-lambda", type=float, default=0.95, help="GAE lambda")
     parser.add_argument("--clip-range", type=float, default=0.2, help="PPO clip range")
-    parser.add_argument("--ent-coef", type=float, default=0.01, help="Entropy coefficient")
+    parser.add_argument(
+        "--ent-coef", type=float, default=0.05, help="Entropy coefficient (try 0.1 if entropy collapses)"
+    )
     parser.add_argument("--vf-coef", type=float, default=0.5, help="Value function coefficient")
     parser.add_argument("--max-grad-norm", type=float, default=0.5, help="Max gradient norm")
     parser.add_argument("--dropout", type=float, default=0.0, help="Dropout rate (0 to disable)")
@@ -164,6 +166,21 @@ def main() -> None:
     print(f"  Level: {args.level}")
     print(f"  Device: {device}")
     print(f"  LR: {args.lr}, Entropy: {args.ent_coef}, Clip: {args.clip_range}")
+    print("=" * 70)
+
+    # Debug: test reward function with a few random actions
+    print("Testing reward function (10 random steps):")
+    test_obs, _ = env.reset()
+    for i in range(10):
+        action = env.action_space.sample()
+        _, reward, terminated, truncated, info = env.step(action)
+        x_pos = info.get("x_pos", 0)
+        print(f"  Step {i}: action={action}, reward={reward:.4f}, x_pos={x_pos}")
+        if terminated or truncated:
+            test_obs, _ = env.reset()
+    # Reset for real training
+    obs, _ = env.reset()
+    obs = np.array(obs, dtype=np.float32)
     print("=" * 70)
 
     while total_steps < args.total_steps:
@@ -284,14 +301,19 @@ def main() -> None:
                 pg_loss2 = -mb_advantages * torch.clamp(ratio, 1 - args.clip_range, 1 + args.clip_range)
                 pg_loss = torch.max(pg_loss1, pg_loss2).mean()
 
-                # Value loss
-                v_loss = 0.5 * ((new_values - mb_returns) ** 2).mean()
+                # Value loss (clipped to prevent explosion)
+                v_loss_unclipped = (new_values - mb_returns) ** 2
+                v_loss = 0.5 * torch.clamp(v_loss_unclipped, max=100.0).mean()
 
-                # Entropy loss
+                # Entropy loss (negative because we want to maximize entropy)
                 entropy_loss = -entropy.mean()
 
                 # Total loss
                 loss = pg_loss + args.vf_coef * v_loss + args.ent_coef * entropy_loss
+
+                # Early stop this epoch if entropy is too low (prevents collapse)
+                if entropy.mean().item() < 0.01:
+                    break
 
                 optimizer.zero_grad()
                 loss.backward()
