@@ -426,7 +426,7 @@ class TrainingUI:
         except curses.error:
             pass
 
-        # Plot the data using block characters
+        # Plot the data using dots
         for col, val in enumerate(sampled):
             try:
                 # Normalize value to row position
@@ -438,31 +438,7 @@ class TrainingUI:
                 plot_x = x + y_axis_width + col
                 plot_y = y + title_height + row
 
-                stdscr.addstr(plot_y, plot_x, "█", curses.color_pair(color))
-            except curses.error:
-                pass
-
-        # Connect points with line if adjacent rows are different
-        for col in range(1, len(sampled)):
-            try:
-                val_prev = sampled[col - 1]
-                val_curr = sampled[col]
-
-                norm_prev = (val_prev - min_val) / range_val if range_val > 0 else 0.5
-                norm_curr = (val_curr - min_val) / range_val if range_val > 0 else 0.5
-                norm_prev = max(0, min(1, norm_prev))
-                norm_curr = max(0, min(1, norm_curr))
-
-                row_prev = int((1 - norm_prev) * (plot_height - 1))
-                row_curr = int((1 - norm_curr) * (plot_height - 1))
-
-                # Fill in vertical gaps
-                if abs(row_curr - row_prev) > 1:
-                    step = 1 if row_curr > row_prev else -1
-                    for fill_row in range(row_prev + step, row_curr, step):
-                        plot_x = x + y_axis_width + col - 1
-                        plot_y = y + title_height + fill_row
-                        stdscr.addstr(plot_y, plot_x, "│", curses.color_pair(color) | curses.A_DIM)
+                stdscr.addstr(plot_y, plot_x, "•", curses.color_pair(color))
             except curses.error:
                 pass
 
