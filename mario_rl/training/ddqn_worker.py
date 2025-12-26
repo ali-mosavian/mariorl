@@ -4,6 +4,13 @@ Distributed DDQN Worker with local gradient computation.
 Workers collect experiences in a local replay buffer, compute DQN loss locally,
 and send only gradients to the learner. This is similar to Gorila DQN.
 
+Features
+========
+- Prioritized Experience Replay (PER) with SumTree
+- N-step returns for better credit assignment
+- Double DQN for reduced overestimation
+- Importance sampling weights for unbiased gradients
+
 Architecture
 ============
 
@@ -31,19 +38,22 @@ Architecture
     │ ┌─────────┐ │      │ ┌─────────┐ │      │ ┌─────────┐ │
     │ │  Local  │ │      │ │  Local  │ │      │ │  Local  │ │
     │ │ Network │ │      │ │ Network │ │      │ │ Network │ │
-    │ │ + Buffer│ │      │ │ + Buffer│ │      │ │ + Buffer│ │
+    │ │ + PER   │ │      │ │ + PER   │ │      │ │ + PER   │ │
     │ └────┬────┘ │      │ └────┬────┘ │      │ └────┬────┘ │
     │      │      │      │      │      │      │      │      │
     │ 1.Collect   │      │ 1.Collect   │      │ 1.Collect   │
     │   N steps   │      │   N steps   │      │   N steps   │
     │      │      │      │      │      │      │      │      │
-    │ 2.Sample    │      │ 2.Sample    │      │ 2.Sample    │
-    │   batch     │      │   batch     │      │   batch     │
+    │ 2.PER sample│      │ 2.PER sample│      │ 2.PER sample│
+    │   (priority)│      │   (priority)│      │   (priority)│
     │      │      │      │      │      │      │      │      │
     │ 3.Compute   │      │ 3.Compute   │      │ 3.Compute   │
     │   DQN loss  │      │   DQN loss  │      │   DQN loss  │
     │      │      │      │      │      │      │      │      │
-    │ 4.Backward  │      │ 4.Backward  │      │ 4.Backward  │
+    │ 4.Update    │      │ 4.Update    │      │ 4.Update    │
+    │  priorities │      │  priorities │      │  priorities │
+    │      │      │      │      │      │      │      │      │
+    │ 5.Backward  │      │ 5.Backward  │      │ 5.Backward  │
     │   (grads)   │      │   (grads)   │      │   (grads)   │
     │      │      │      │      │      │      │      │      │
     └──────┼──────┘      └──────┼──────┘      └──────┼──────┘
@@ -68,7 +78,7 @@ Benefits:
 - ~4x less data through IPC
 - Distributed computation across worker CPUs/GPUs
 - Reduced learner bottleneck
-- Each worker maintains diverse local buffer
+- Each worker maintains diverse local buffer with PER
 """
 
 import os
@@ -130,26 +140,144 @@ def create_env(level: LevelType = (1, 1), render_frames: bool = False):
     return env, base_env
 
 
-class LocalReplayBuffer:
+@dataclass
+class SumTree:
     """
-    Small local replay buffer for each worker.
+    Sum Tree data structure for O(log n) priority sampling.
 
-    Workers store experiences locally and sample for gradient computation.
-    This enables diverse experiences across workers.
+    A binary tree where each parent is the sum of its children.
+    Leaf nodes store priorities, internal nodes store sums.
+
+    Structure (capacity=4):
+                    [sum]
+                   /     \\
+              [sum]       [sum]
+             /    \\      /    \\
+           [p0]  [p1]  [p2]  [p3]  <- priorities (leaves)
     """
 
-    def __init__(self, capacity: int, obs_shape: Tuple[int, ...]):
-        self.capacity = capacity
-        self.obs_shape = obs_shape
-        self.pos = 0
+    capacity: int
+    tree: np.ndarray = field(init=False, repr=False)
+    data_pointer: int = field(init=False, default=0)
+
+    def __post_init__(self) -> None:
+        """Initialize tree array with zeros."""
+        # Tree has 2*capacity - 1 nodes (capacity leaves + capacity-1 internal)
+        self.tree = np.zeros(2 * self.capacity - 1, dtype=np.float64)
+        self.data_pointer = 0
+
+    @property
+    def total(self) -> float:
+        """Return the root node (sum of all priorities)."""
+        return float(self.tree[0])
+
+    def add(self, priority: float) -> int:
+        """
+        Add a new priority and return the leaf index.
+
+        Args:
+            priority: Priority value for the new sample
+
+        Returns:
+            Leaf index where priority was stored
+        """
+        leaf_idx = self.data_pointer + self.capacity - 1
+        self.update(leaf_idx, priority)
+
+        self.data_pointer = (self.data_pointer + 1) % self.capacity
+        return leaf_idx
+
+    def update(self, leaf_idx: int, priority: float) -> None:
+        """
+        Update priority at leaf_idx and propagate change up the tree.
+
+        Args:
+            leaf_idx: Index in the tree array (not data index)
+            priority: New priority value
+        """
+        change = priority - self.tree[leaf_idx]
+        self.tree[leaf_idx] = priority
+
+        # Propagate change up to root
+        parent = leaf_idx
+        while parent != 0:
+            parent = (parent - 1) // 2
+            self.tree[parent] += change
+
+    def get(self, value: float) -> Tuple[int, float, int]:
+        """
+        Find leaf node for a given cumulative value.
+
+        Args:
+            value: Cumulative priority value to search for
+
+        Returns:
+            Tuple of (leaf_idx, priority, data_idx)
+        """
+        parent = 0
+
+        while True:
+            left = 2 * parent + 1
+            right = left + 1
+
+            # Reached leaf
+            if left >= len(self.tree):
+                leaf_idx = parent
+                break
+
+            # Go left or right based on value
+            if value <= self.tree[left]:
+                parent = left
+            else:
+                value -= self.tree[left]
+                parent = right
+
+        data_idx = leaf_idx - self.capacity + 1
+        return leaf_idx, self.tree[leaf_idx], data_idx
+
+
+@dataclass
+class PrioritizedReplayBuffer:
+    """
+    Prioritized Experience Replay buffer using SumTree.
+
+    Samples experiences proportional to their TD-error priority.
+    Uses importance sampling weights to correct for bias.
+
+    Reference: Schaul et al. "Prioritized Experience Replay" (2015)
+    """
+
+    capacity: int
+    obs_shape: Tuple[int, ...]
+    alpha: float = 0.6  # Priority exponent (0 = uniform, 1 = full prioritization)
+    beta_start: float = 0.4  # Initial importance sampling exponent
+    beta_end: float = 1.0  # Final importance sampling exponent
+    epsilon: float = 1e-6  # Small constant to ensure non-zero priorities
+
+    # Storage arrays (initialized in __post_init__)
+    tree: SumTree = field(init=False, repr=False)
+    states: np.ndarray = field(init=False, repr=False)
+    actions: np.ndarray = field(init=False, repr=False)
+    rewards: np.ndarray = field(init=False, repr=False)
+    next_states: np.ndarray = field(init=False, repr=False)
+    dones: np.ndarray = field(init=False, repr=False)
+
+    # Tracking
+    size: int = field(init=False, default=0)
+    max_priority: float = field(init=False, default=1.0)
+    current_beta: float = field(init=False, default=0.4)
+
+    def __post_init__(self) -> None:
+        """Initialize tree and storage arrays."""
+        self.tree = SumTree(capacity=self.capacity)
+        self.states = np.zeros((self.capacity, *self.obs_shape), dtype=np.float32)
+        self.actions = np.zeros(self.capacity, dtype=np.int64)
+        self.rewards = np.zeros(self.capacity, dtype=np.float32)
+        self.next_states = np.zeros((self.capacity, *self.obs_shape), dtype=np.float32)
+        self.dones = np.zeros(self.capacity, dtype=np.float32)
         self.size = 0
-
-        # Pre-allocate storage
-        self.states = np.zeros((capacity, *obs_shape), dtype=np.float32)
-        self.actions = np.zeros(capacity, dtype=np.int64)
-        self.rewards = np.zeros(capacity, dtype=np.float32)
-        self.next_states = np.zeros((capacity, *obs_shape), dtype=np.float32)
-        self.dones = np.zeros(capacity, dtype=np.float32)
+        self.max_priority = 1.0
+        self.current_beta = self.beta_start
 
     def add(
         self,
@@ -159,32 +287,222 @@ class LocalReplayBuffer:
         next_state: np.ndarray,
         done: bool,
     ) -> None:
-        """Add a transition to the buffer."""
-        self.states[self.pos] = state
-        self.actions[self.pos] = action
-        self.rewards[self.pos] = reward
-        self.next_states[self.pos] = next_state
-        self.dones[self.pos] = float(done)
+        """
+        Add a transition with max priority (will be updated after first sample).
 
-        self.pos = (self.pos + 1) % self.capacity
+        Args:
+            state: Current observation
+            action: Action taken
+            reward: Reward received
+            next_state: Next observation
+            done: Whether episode ended
+        """
+        # Get data index from tree pointer
+        data_idx = self.tree.data_pointer
+
+        # Store transition
+        self.states[data_idx] = state
+        self.actions[data_idx] = action
+        self.rewards[data_idx] = reward
+        self.next_states[data_idx] = next_state
+        self.dones[data_idx] = float(done)
+
+        # Add with max priority (ensures new samples are seen at least once)
+        priority = self.max_priority**self.alpha
+        self.tree.add(priority)
+
         self.size = min(self.size + 1, self.capacity)
 
     def sample(
         self,
         batch_size: int,
-    ) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
-        """Sample a random batch of transitions."""
-        indices = np.random.randint(0, self.size, size=batch_size)
+        beta: float | None = None,
+    ) -> Tuple[
+        np.ndarray,
+        np.ndarray,
+        np.ndarray,
+        np.ndarray,
+        np.ndarray,
+        np.ndarray,
+        np.ndarray,
+    ]:
+        """
+        Sample a batch of transitions proportional to their priorities.
+
+        Args:
+            batch_size: Number of transitions to sample
+            beta: Importance sampling exponent (uses current_beta if None)
+
+        Returns:
+            Tuple of (states, actions, rewards, next_states, dones, indices, weights)
+        """
+        if beta is None:
+            beta = self.current_beta
+
+        indices = np.zeros(batch_size, dtype=np.int64)
+        priorities = np.zeros(batch_size, dtype=np.float64)
+        data_indices = np.zeros(batch_size, dtype=np.int64)
+
+        # Divide priority range into segments for stratified sampling
+        total_priority = self.tree.total
+        segment_size = total_priority / batch_size
+
+        for i in range(batch_size):
+            # Sample uniformly within segment
+            low = segment_size * i
+            high = segment_size * (i + 1)
+            value = np.random.uniform(low, high)
+
+            leaf_idx, priority, data_idx = self.tree.get(value)
+            indices[i] = leaf_idx
+            priorities[i] = priority
+            data_indices[i] = data_idx
+
+        # Compute importance sampling weights
+        # w_i = (N * P(i))^(-beta) / max_w
+        probabilities = priorities / total_priority
+        weights = (self.size * probabilities) ** (-beta)
+        weights = weights / weights.max()  # Normalize
+
         return (
-            self.states[indices],
-            self.actions[indices],
-            self.rewards[indices],
-            self.next_states[indices],
-            self.dones[indices],
+            self.states[data_indices],
+            self.actions[data_indices],
+            self.rewards[data_indices],
+            self.next_states[data_indices],
+            self.dones[data_indices],
+            indices,
+            weights.astype(np.float32),
         )
+
+    def update_priorities(
+        self,
+        indices: np.ndarray,
+        td_errors: np.ndarray,
+    ) -> None:
+        """
+        Update priorities based on TD errors.
+
+        Args:
+            indices: Leaf indices from sampling
+            td_errors: Absolute TD errors for each transition
+        """
+        for idx, td_error in zip(indices, td_errors, strict=False):
+            priority = (abs(td_error) + self.epsilon) ** self.alpha
+            self.tree.update(idx, priority)
+            self.max_priority = max(self.max_priority, abs(td_error) + self.epsilon)
+
+    def update_beta(self, progress: float) -> None:
+        """
+        Update beta based on training progress.
+
+        Args:
+            progress: Training progress from 0 to 1
+        """
+        self.current_beta = self.beta_start + progress * (self.beta_end - self.beta_start)
 
     def __len__(self) -> int:
         return self.size
+
+
+@dataclass
+class NStepBuffer:
+    """
+    Buffer for computing N-step returns.
+
+    Accumulates transitions and computes discounted N-step rewards.
+    """
+
+    n_step: int
+    gamma: float
+    buffer: List[Tuple[np.ndarray, int, float, np.ndarray, bool]] = field(init=False, default_factory=list)
+
+    def add(
+        self,
+        state: np.ndarray,
+        action: int,
+        reward: float,
+        next_state: np.ndarray,
+        done: bool,
+    ) -> Tuple[np.ndarray, int, float, np.ndarray, bool] | None:
+        """
+        Add transition and return N-step transition if ready.
+
+        Args:
+            state: Current observation
+            action: Action taken
+            reward: Reward received
+            next_state: Next observation
+            done: Whether episode ended
+
+        Returns:
+            N-step transition tuple or None if not enough steps yet
+        """
+        self.buffer.append((state.copy(), action, reward, next_state.copy(), done))
+
+        if len(self.buffer) < self.n_step:
+            return None
+
+        # Compute N-step return
+        n_step_reward = 0.0
+        for i, (_, _, r, _, d) in enumerate(self.buffer):
+            n_step_reward += (self.gamma**i) * r
+            if d:
+                # Episode ended early - use actual final state
+                result = (
+                    self.buffer[0][0],
+                    self.buffer[0][1],
+                    n_step_reward,
+                    self.buffer[i][3],
+                    True,
+                )
+                self.buffer.pop(0)
+                return result
+
+        # Full N-step - use state from N steps ahead
+        result = (
+            self.buffer[0][0],
+            self.buffer[0][1],
+            n_step_reward,
+            self.buffer[-1][3],
+            self.buffer[-1][4],
+        )
+        self.buffer.pop(0)
+        return result
+
+    def flush(self) -> List[Tuple[np.ndarray, int, float, np.ndarray, bool]]:
+        """
+        Flush remaining transitions at episode end.
+
+        Returns:
+            List of remaining N-step transitions
+        """
+        transitions = []
+        while len(self.buffer) > 0:
+            n_step_reward = 0.0
+            last_idx = len(self.buffer) - 1
+
+            for i, (_, _, r, _, d) in enumerate(self.buffer):
+                n_step_reward += (self.gamma**i) * r
+                if d:
+                    last_idx = i
+                    break
+
+            transitions.append(
+                (
+                    self.buffer[0][0],
+                    self.buffer[0][1],
+                    n_step_reward,
+                    self.buffer[last_idx][3],
+                    self.buffer[last_idx][4],
+                )
+            )
+            self.buffer.pop(0)
+
+        return transitions
+
+    def reset(self) -> None:
+        """Clear the buffer."""
+        self.buffer.clear()
 
 
 @dataclass
@@ -194,10 +512,12 @@ class DDQNWorker:
 
     Each worker:
     1. Collects experiences using epsilon-greedy
-    2. Stores in local replay buffer
-    3. Samples batch and computes Double DQN loss
-    4. Sends gradients to learner
-    5. Periodically syncs weights from learner
+    2. Stores in local PER buffer
+    3. Samples batch with priority weighting
+    4. Computes Double DQN loss with importance sampling
+    5. Updates priorities based on TD errors
+    6. Sends gradients to learner
+    7. Periodically syncs weights from learner
     """
 
     # Required fields
@@ -212,11 +532,16 @@ class DDQNWorker:
     render_frames: bool = False
     weight_sync_interval: float = 5.0  # Seconds between weight syncs
 
-    # Local buffer settings
-    local_buffer_size: int = 10_000  # Each worker has smaller buffer
+    # Local buffer settings (PER)
+    local_buffer_size: int = 10_000
     batch_size: int = 32
-    steps_per_collection: int = 64  # Steps to collect before training
-    train_steps: int = 4  # Training steps per collection
+    steps_per_collection: int = 64
+    train_steps: int = 4
+
+    # PER hyperparameters
+    per_alpha: float = 0.6  # Priority exponent
+    per_beta_start: float = 0.4  # Initial IS exponent
+    per_beta_end: float = 1.0  # Final IS exponent
 
     # Exploration (different per worker)
     eps_start: float = 1.0
@@ -236,11 +561,9 @@ class DDQNWorker:
     env: Any = field(init=False, repr=False)
     base_env: Any = field(init=False, repr=False)
     net: Any = field(init=False, repr=False)
-    buffer: Any = field(init=False, repr=False)
+    buffer: PrioritizedReplayBuffer = field(init=False, repr=False)
+    n_step_buffer: NStepBuffer = field(init=False, repr=False)
     action_dim: int = field(init=False)
-
-    # N-step buffer
-    n_step_buffer: List = field(init=False, default_factory=list)
 
     # Tracking
     episode_count: int = field(init=False, default=0)
@@ -260,7 +583,7 @@ class DDQNWorker:
     _last_time: float = field(init=False, default=0.0)
     current_epsilon: float = field(init=False, default=1.0)
 
-    def __post_init__(self):
+    def __post_init__(self) -> None:
         """Initialize environment, network, and buffer."""
         # Auto-detect best device
         if self.device is None:
@@ -288,13 +611,19 @@ class DDQNWorker:
             dropout=0.1,
         ).to(self.device)
 
-        # Create local replay buffer
-        self.buffer = LocalReplayBuffer(
+        # Create local PER buffer
+        self.buffer = PrioritizedReplayBuffer(
             capacity=self.local_buffer_size,
             obs_shape=state_dim,
+            alpha=self.per_alpha,
+            beta_start=self.per_beta_start,
+            beta_end=self.per_beta_end,
         )
 
-        # Compute n-step gamma
+        # Create N-step buffer
+        self.n_step_buffer = NStepBuffer(n_step=self.n_step, gamma=self.gamma)
+
+        # Compute n-step gamma for TD target
         self.n_step_gamma = self.gamma**self.n_step
 
         # Initialize tracking
@@ -312,7 +641,6 @@ class DDQNWorker:
         self.weight_sync_count = 0
         self.gradients_sent = 0
         self._last_time = time.time()
-        self.n_step_buffer = []
         self.current_epsilon = self.eps_start
 
         # Load initial weights
@@ -376,60 +704,9 @@ class DDQNWorker:
         q_values = self.net.online(state_tensor)
         return int(q_values.argmax(dim=1).item())
 
-    def _compute_n_step_return(self) -> tuple | None:
-        """Compute n-step return from buffer."""
-        if len(self.n_step_buffer) < self.n_step:
-            return None
-
-        n_step_reward = 0.0
-        for i, (_, _, r, _, d) in enumerate(self.n_step_buffer):
-            n_step_reward += (self.gamma**i) * r
-            if d:
-                return (
-                    self.n_step_buffer[0][0],
-                    self.n_step_buffer[0][1],
-                    n_step_reward,
-                    self.n_step_buffer[i][3],
-                    True,
-                )
-
-        return (
-            self.n_step_buffer[0][0],
-            self.n_step_buffer[0][1],
-            n_step_reward,
-            self.n_step_buffer[-1][3],
-            self.n_step_buffer[-1][4],
-        )
-
-    def _flush_n_step_buffer(self) -> List[tuple]:
-        """Flush remaining transitions at episode end."""
-        transitions = []
-        while len(self.n_step_buffer) > 0:
-            n_step_reward = 0.0
-            last_idx = len(self.n_step_buffer) - 1
-
-            for i, (_, _, r, _, d) in enumerate(self.n_step_buffer):
-                n_step_reward += (self.gamma**i) * r
-                if d:
-                    last_idx = i
-                    break
-
-            transitions.append(
-                (
-                    self.n_step_buffer[0][0],
-                    self.n_step_buffer[0][1],
-                    n_step_reward,
-                    self.n_step_buffer[last_idx][3],
-                    self.n_step_buffer[last_idx][4],
-                )
-            )
-            self.n_step_buffer.pop(0)
-
-        return transitions
-
     def collect_steps(self, num_steps: int) -> int:
         """
-        Collect experiences for num_steps and store in local buffer.
+        Collect experiences for num_steps and store in local PER buffer.
 
         Returns number of episodes completed.
         """
@@ -448,14 +725,10 @@ class DDQNWorker:
             state_processed = self._preprocess_state(state)
             next_state_processed = self._preprocess_state(next_state)
 
-            # Add to n-step buffer
-            self.n_step_buffer.append((state_processed.copy(), action, reward, next_state_processed.copy(), done))
-
-            # Compute and store n-step transition
-            n_step_transition = self._compute_n_step_return()
+            # Add to N-step buffer and get N-step transition
+            n_step_transition = self.n_step_buffer.add(state_processed, action, reward, next_state_processed, done)
             if n_step_transition is not None:
                 self.buffer.add(*n_step_transition)
-                self.n_step_buffer.pop(0)
 
             # Update tracking
             self.episode_reward += reward
@@ -471,13 +744,17 @@ class DDQNWorker:
             if info.get("flag_get", False):
                 self.flags += 1
 
+            # Update PER beta based on progress
+            progress = min(1.0, self.total_steps / self.eps_decay_steps)
+            self.buffer.update_beta(progress)
+
             # Send UI status periodically
             if self.total_steps % 50 == 0:
                 self._send_ui_status(info)
 
             if done:
-                # Flush remaining n-step transitions
-                for transition in self._flush_n_step_buffer():
+                # Flush remaining N-step transitions
+                for transition in self.n_step_buffer.flush():
                     self.buffer.add(*transition)
 
                 # Track episode stats
@@ -504,15 +781,24 @@ class DDQNWorker:
 
     def compute_and_send_gradients(self) -> Dict[str, float]:
         """
-        Sample from local buffer, compute DQN loss, and send gradients to learner.
+        Sample from local PER buffer, compute DQN loss, update priorities,
+        and send gradients to learner.
 
         Returns metrics dictionary.
         """
         if len(self.buffer) < self.batch_size:
             return {}
 
-        # Sample batch from local buffer
-        states, actions, rewards, next_states, dones = self.buffer.sample(self.batch_size)
+        # Sample batch from PER buffer
+        (
+            states,
+            actions,
+            rewards,
+            next_states,
+            dones,
+            indices,
+            weights,
+        ) = self.buffer.sample(self.batch_size)
 
         # Convert to tensors
         states_t = torch.from_numpy(states).to(self.device)
@@ -520,6 +806,7 @@ class DDQNWorker:
         rewards_t = torch.from_numpy(rewards).to(self.device)
         next_states_t = torch.from_numpy(next_states).to(self.device)
         dones_t = torch.from_numpy(dones).to(self.device)
+        weights_t = torch.from_numpy(weights).to(self.device)
 
         # Compute Double DQN loss
         self.net.train()
@@ -536,8 +823,12 @@ class DDQNWorker:
             next_q_selected = next_q_target.gather(1, best_actions.unsqueeze(1)).squeeze(1)
             target_q = rewards_t + self.n_step_gamma * next_q_selected * (1.0 - dones_t)
 
-        # Huber loss
-        loss = torch.nn.functional.huber_loss(current_q_selected, target_q, delta=1.0)
+        # Compute TD errors for priority update
+        td_errors = (current_q_selected - target_q).detach()
+
+        # Weighted Huber loss (importance sampling)
+        element_wise_loss = torch.nn.functional.huber_loss(current_q_selected, target_q, reduction="none", delta=1.0)
+        loss = (weights_t * element_wise_loss).mean()
 
         # Backward
         self.net.online.zero_grad()
@@ -545,6 +836,9 @@ class DDQNWorker:
 
         # Clip gradients
         nn.utils.clip_grad_norm_(self.net.online.parameters(), self.max_grad_norm)
+
+        # Update priorities in PER buffer
+        self.buffer.update_priorities(indices, td_errors.abs().cpu().numpy())
 
         # Extract gradients (move to CPU for IPC)
         grads = {
@@ -558,7 +852,8 @@ class DDQNWorker:
             "loss": loss.item(),
             "q_mean": current_q_selected.mean().item(),
             "q_max": current_q_selected.max().item(),
-            "td_error": (current_q_selected - target_q).abs().mean().item(),
+            "td_error": td_errors.abs().mean().item(),
+            "per_beta": self.buffer.current_beta,
         }
 
         # Send gradients to learner
@@ -616,6 +911,7 @@ class DDQNWorker:
                     "last_weight_sync": self.last_weight_sync,
                     "rolling_avg_reward": rolling_avg,
                     "first_flag_time": 0.0,
+                    "per_beta": self.buffer.current_beta,
                 },
             )
             self.ui_queue.put_nowait(msg)
@@ -626,7 +922,10 @@ class DDQNWorker:
         """Main worker loop."""
         import sys
 
-        print(f"Worker {self.worker_id} started (level={self.level}, device={self.device}, ε_end={self.eps_end:.4f})")
+        print(
+            f"Worker {self.worker_id} started "
+            f"(level={self.level}, device={self.device}, ε_end={self.eps_end:.4f}, PER)"
+        )
         sys.stdout.flush()
 
         while True:
@@ -657,6 +956,7 @@ class DDQNWorker:
                     f"Best X: {self.best_x_ever} | "
                     f"Avg R: {avg_reward:.1f} | "
                     f"ε: {self.current_epsilon:.3f} | "
+                    f"β: {self.buffer.current_beta:.3f} | "
                     f"Grads: {self.gradients_sent} | "
                     f"Flags: {self.flags}"
                 )
@@ -668,7 +968,7 @@ def run_ddqn_worker(
     gradient_queue: mp.Queue,
     level: LevelType = (1, 1),
     ui_queue: Optional[mp.Queue] = None,
-    **kwargs,
+    **kwargs: Any,
 ) -> None:
     """Entry point for worker process."""
     worker = DDQNWorker(
