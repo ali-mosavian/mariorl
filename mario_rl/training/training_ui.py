@@ -338,13 +338,21 @@ class TrainingUI:
         if plot_width < 10 or plot_height < 3:
             return
 
-        # Limit data to most recent plot_width points (each point gets 1 column minimum)
-        display_data = data[-plot_width:] if len(data) > plot_width else data
-        display_x = x_data[-plot_width:] if x_data and len(x_data) > plot_width else x_data
+        # Downsample ALL data to fit in plot_width (show full history from step 0)
+        if len(data) > plot_width:
+            step = len(data) / plot_width
+            display_data = [data[int(i * step)] for i in range(plot_width)]
+            if x_data:
+                display_x: List[int] | None = [x_data[int(i * step)] for i in range(plot_width)]
+            else:
+                display_x = None
+        else:
+            display_data = data
+            display_x = x_data
 
         # Calculate data range - always include 0 in Y-axis for context
-        data_min = min(display_data)
-        data_max = max(display_data)
+        data_min = min(data)  # Use full data range for Y-axis
+        data_max = max(data)
 
         # Y-axis always includes 0 for proper scale context
         if data_min >= 0:
@@ -393,18 +401,17 @@ class TrainingUI:
         except curses.error:
             pass
 
-        # Draw X-axis labels (show range of displayed data)
+        # Draw X-axis labels (show full range: 0 to current max)
         try:
             label_y = axis_y + 1
 
-            # Use displayed data range for labels
-            if display_x:
-                start_val = display_x[0]
-                end_val = display_x[-1]
+            # X-axis always starts at 0, ends at current max step
+            start_val = 0
+            if x_data:
+                end_val = x_data[-1]  # Use original x_data for full range
             else:
-                start_val = 0
-                end_val = len(display_data)
-            mid_val = (start_val + end_val) // 2
+                end_val = len(data)
+            mid_val = end_val // 2
 
             # Format function based on magnitude
             def fmt_steps(v: int) -> str:
@@ -427,7 +434,8 @@ class TrainingUI:
         except curses.error:
             pass
 
-        # Plot the data using dots - spread evenly across width
+        # Plot the data using dots - position at actual X value (relative to 0)
+        max_step = x_data[-1] if x_data else len(data)
         for i, val in enumerate(display_data):
             try:
                 # Normalize value to row position (Y)
@@ -435,11 +443,13 @@ class TrainingUI:
                 normalized_y = max(0, min(1, normalized_y))  # Clamp to [0, 1]
                 row = int((1 - normalized_y) * (plot_height - 1))
 
-                # Spread points evenly across plot width
-                if len(display_data) > 1:
-                    col = int(i * (plot_width - 1) / (len(display_data) - 1))
+                # Position X based on actual step value (relative to 0 to max_step)
+                if display_x and max_step > 0:
+                    step_val = display_x[i]
+                    col = int((step_val / max_step) * (plot_width - 1))
                 else:
-                    col = plot_width // 2
+                    # Fallback: spread evenly
+                    col = int(i * (plot_width - 1) / max(len(display_data) - 1, 1))
 
                 # Draw the point
                 plot_x = x + y_axis_width + col
