@@ -77,6 +77,7 @@ Comparison with Standard DDQN
 Usage:
     uv run mario-train-ddqn-dist --workers 4 --level random
     uv run mario-train-ddqn-dist --workers 8 --level 1,1 --accumulate-grads 4
+    uv run mario-train-ddqn-dist --workers 4 --no-ui  # Disable ncurses UI
 """
 
 import os
@@ -96,6 +97,7 @@ import click
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
+from mario_rl.training.training_ui import TrainingUI
 from mario_rl.training.ddqn_worker import run_ddqn_worker
 from mario_rl.training.ddqn_learner import run_ddqn_learner
 
@@ -113,6 +115,12 @@ def parse_level(level_str: str) -> LevelType:
         if len(parts) == 2:
             return (int(parts[0]), int(parts[1]))
         raise ValueError(f"Invalid level format: {level_str}")
+
+
+def run_training_ui(num_workers: int, ui_queue: Queue) -> None:
+    """Run the training UI in a separate process."""
+    ui = TrainingUI(num_workers=num_workers, ui_queue=ui_queue, use_ppo=False)
+    ui.run()
 
 
 @click.command()
@@ -139,6 +147,7 @@ def parse_level(level_str: str) -> LevelType:
 @click.option("--total-steps", default=2_000_000, help="Total training steps (for LR schedule)")
 @click.option("--max-grad-norm", default=10.0, help="Maximum gradient norm")
 @click.option("--weight-decay", default=1e-4, help="L2 regularization")
+@click.option("--no-ui", is_flag=True, help="Disable ncurses UI")
 @click.option("--resume", is_flag=True, help="Resume from latest checkpoint")
 def main(
     workers: int,
@@ -159,6 +168,7 @@ def main(
     total_steps: int,
     max_grad_norm: float,
     weight_decay: float,
+    no_ui: bool,
     resume: bool,
 ) -> None:
     """Train Mario using Distributed DDQN with async gradient updates."""
@@ -182,25 +192,37 @@ def main(
     logs_dir = run_dir / "logs"
     logs_dir.mkdir(exist_ok=True)
 
-    print("=" * 70)
-    print("Distributed DDQN Training (Async Gradients)")
-    print("=" * 70)
-    print(f"  Workers: {workers}")
-    print(f"  Level: {level}")
-    print(f"  Save dir: {run_dir}")
-    print(f"  LR: {lr} → {lr_end} (cosine)")
-    print(f"  Gamma: {gamma}, N-step: {n_step}")
-    print(f"  Tau: {tau}")
-    print(f"  Local buffer: {local_buffer_size:,}, Batch: {batch_size}")
-    print(f"  Collect steps: {collect_steps}, Train steps: {train_steps}")
-    print(f"  Accumulate grads: {accumulate_grads}")
-    print(f"  Per-worker epsilon: {eps_base}^(1+i/N)")
-    print(f"  Total steps: {total_steps:,}")
-    print("=" * 70)
+    # Print config (will be hidden by UI if enabled)
+    if no_ui:
+        print("=" * 70)
+        print("Distributed DDQN Training (Async Gradients)")
+        print("=" * 70)
+        print(f"  Workers: {workers}")
+        print(f"  Level: {level}")
+        print(f"  Save dir: {run_dir}")
+        print(f"  LR: {lr} → {lr_end} (cosine)")
+        print(f"  Gamma: {gamma}, N-step: {n_step}")
+        print(f"  Tau: {tau}")
+        print(f"  Local buffer: {local_buffer_size:,}, Batch: {batch_size}")
+        print(f"  Collect steps: {collect_steps}, Train steps: {train_steps}")
+        print(f"  Accumulate grads: {accumulate_grads}")
+        print(f"  Per-worker epsilon: {eps_base}^(1+i/N)")
+        print(f"  Total steps: {total_steps:,}")
+        print("=" * 70)
 
-    # Create gradient queue (like APPO)
+    # Create queues
     gradient_queue: Queue = Queue(maxsize=workers * 2)
-    ui_queue: Queue | None = None  # UI not implemented for DDQN yet
+    ui_queue: Queue | None = Queue() if not no_ui else None
+
+    # Start UI process
+    ui_process = None
+    if not no_ui:
+        ui_process = Process(
+            target=run_training_ui,
+            args=(workers, ui_queue),
+            daemon=True,
+        )
+        ui_process.start()
 
     # Start worker processes with different epsilons
     worker_processes = []
@@ -230,7 +252,8 @@ def main(
         )
         p.start()
         worker_processes.append(p)
-        print(f"Started worker {i} (ε_end = {worker_eps_end:.4f})")
+        if no_ui:
+            print(f"Started worker {i} (ε_end = {worker_eps_end:.4f})")
 
     # Start learner process
     learner_process = Process(
@@ -249,7 +272,8 @@ def main(
         daemon=True,
     )
     learner_process.start()
-    print("Started learner")
+    if no_ui:
+        print("Started learner")
 
     # Handle Ctrl+C
     shutdown_initiated = False
@@ -260,10 +284,13 @@ def main(
             return
         shutdown_initiated = True
 
-        print("\nShutting down...")
+        if no_ui:
+            print("\nShutting down...")
 
-        # Cancel queue join thread
+        # Cancel queue join threads
         gradient_queue.cancel_join_thread()
+        if ui_queue is not None:
+            ui_queue.cancel_join_thread()
 
         # Terminate all processes
         for p in worker_processes:
@@ -271,14 +298,20 @@ def main(
                 p.terminate()
         if learner_process.is_alive():
             learner_process.terminate()
+        if ui_process is not None and ui_process.is_alive():
+            ui_process.terminate()
 
         # Wait for processes to finish
         for p in worker_processes:
             p.join(timeout=1.0)
         learner_process.join(timeout=1.0)
+        if ui_process is not None:
+            ui_process.join(timeout=1.0)
 
-        # Close queue
+        # Close queues
         gradient_queue.close()
+        if ui_queue is not None:
+            ui_queue.close()
 
         sys.exit(0)
 
@@ -287,11 +320,15 @@ def main(
 
     # Wait for processes
     try:
-        learner_process.join()
+        if ui_process is not None:
+            ui_process.join()  # Wait for UI to exit
+        else:
+            learner_process.join()
     except KeyboardInterrupt:
         signal_handler(None, None)
 
-    print("Training complete!")
+    if no_ui:
+        print("Training complete!")
 
 
 if __name__ == "__main__":
