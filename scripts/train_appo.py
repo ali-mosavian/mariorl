@@ -124,7 +124,7 @@ def run_training_ui(num_workers: int, ui_queue: Queue) -> None:
 @click.option("--gamma", default=0.99, help="Discount factor")
 @click.option("--gae-lambda", default=0.95, help="GAE lambda")
 @click.option("--clip-range", default=0.2, help="PPO clip range")
-@click.option("--ent-coef", default=0.01, help="Entropy coefficient")
+@click.option("--ent-coef", default=0.05, help="Entropy coefficient (higher = more exploration)")
 @click.option("--vf-coef", default=0.5, help="Value function coefficient")
 @click.option("--max-grad-norm", default=0.5, help="Maximum gradient norm")
 @click.option("--accumulate-grads", default=1, help="Number of gradients to accumulate before update")

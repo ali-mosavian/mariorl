@@ -156,8 +156,9 @@ class APPOWorker:
     gae_lambda: float = 0.95
     clip_range: float = 0.2
     vf_coef: float = 0.5
-    ent_coef: float = 0.01
+    ent_coef: float = 0.05  # Increased from 0.01 to prevent entropy collapse
     max_grad_norm: float = 0.5
+    min_entropy: float = 0.5  # Stop epoch if entropy drops below this
 
     # Private fields
     env: Any = field(init=False, repr=False)
@@ -502,10 +503,15 @@ class APPOWorker:
         # Training loop - multiple epochs over the rollout
         # NOTE: We need a local optimizer to update the worker's policy during epochs
         # so that ratio != 1.0 and PPO clipping actually works
-        local_optimizer = torch.optim.Adam(self.net.parameters(), lr=2.5e-4)
+        # Use lower LR than learner to prevent aggressive local updates
+        local_optimizer = torch.optim.Adam(self.net.parameters(), lr=1e-4)
         all_metrics: List[Dict[str, float]] = []
+        early_stop = False
 
         for _epoch in range(self.n_epochs):
+            if early_stop:
+                break
+
             # Shuffle indices for minibatches
             indices = np.random.permutation(len(states))
 
@@ -531,6 +537,11 @@ class APPOWorker:
                     mb_old_values,
                 )
 
+                # Early stop if entropy collapses
+                if metrics["entropy"] < self.min_entropy:
+                    early_stop = True
+                    break
+
                 # Backward pass
                 local_optimizer.zero_grad()
                 loss.backward()
@@ -544,7 +555,11 @@ class APPOWorker:
                 all_metrics.append(metrics)
 
         # Average metrics across all minibatches
-        avg_metrics = {key: np.mean([m[key] for m in all_metrics]) for key in all_metrics[0].keys()}
+        if all_metrics:
+            avg_metrics = {key: np.mean([m[key] for m in all_metrics]) for key in all_metrics[0].keys()}
+        else:
+            # No updates happened (entropy already collapsed)
+            avg_metrics = {"policy_loss": 0.0, "value_loss": 0.0, "entropy": 0.0, "kl": 0.0, "clip_fraction": 0.0}
 
         # Extract gradients (move to CPU for IPC)
         grads = {
