@@ -389,6 +389,24 @@ class DDQNLearner:
         except Exception:
             pass
 
+    def _log(self, text: str) -> None:
+        """Log message to UI queue or stdout."""
+        if self.ui_queue is not None:
+            try:
+                from mario_rl.training.training_ui import UIMessage
+                from mario_rl.training.training_ui import MessageType
+
+                msg = UIMessage(
+                    msg_type=MessageType.LEARNER_LOG,
+                    source_id=-1,
+                    data={"text": text},
+                )
+                self.ui_queue.put_nowait(msg)
+            except Exception:
+                pass
+        else:
+            print(text)
+
     def run(self, max_updates: int = -1) -> None:
         """
         Main learner loop.
@@ -396,11 +414,8 @@ class DDQNLearner:
         Args:
             max_updates: Maximum number of updates (-1 for unlimited)
         """
-        print(f"DDQN Learner started on {self.device}")
-        print(f"  Learning rate: {self.learning_rate} → {self.lr_end}")
-        print(f"  Tau: {self.tau}")
-        print(f"  Accumulate grads: {self.accumulate_grads}")
-        print(f"  Max grad norm: {self.max_grad_norm}")
+        self._log(f"DDQN Learner started on {self.device}")
+        self._log(f"  LR: {self.learning_rate} → {self.lr_end}, Tau: {self.tau}")
 
         while max_updates < 0 or self.update_count < max_updates:
             # Collect gradients from workers
@@ -422,27 +437,14 @@ class DDQNLearner:
                 # Apply gradients
                 self.apply_gradients(gradient_packets)
 
-                # Log progress
-                if self.update_count % self.log_every == 0:
-                    total_eps = sum(self.worker_episodes.values())
-                    print(
-                        f"Update {self.update_count:>6} | "
-                        f"Steps: {self.total_timesteps_collected:>8,} | "
-                        f"Eps: {total_eps:>5} | "
-                        f"Loss: {self.last_loss:>6.3f} | "
-                        f"Q: {self.last_q_mean:>6.2f} | "
-                        f"TD: {self.last_td_error:>5.2f} | "
-                        f"v{self.weight_version}"
-                    )
-
             except Exception as e:
                 if "Empty" not in str(type(e).__name__):
-                    print(f"Learner error: {e}")
+                    self._log(f"Learner error: {e}")
                 continue
 
         # Final save
         self.save_weights()
-        print(f"Training complete. Total updates: {self.update_count}")
+        self._log(f"Training complete. Total updates: {self.update_count}")
 
 
 def run_ddqn_learner(

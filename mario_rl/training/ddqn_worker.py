@@ -918,15 +918,30 @@ class DDQNWorker:
         except Exception:
             pass
 
+    def _log(self, text: str) -> None:
+        """Log message to UI queue or stdout."""
+        if self.ui_queue is not None:
+            try:
+                from mario_rl.training.training_ui import UIMessage
+                from mario_rl.training.training_ui import MessageType
+
+                msg = UIMessage(
+                    msg_type=MessageType.WORKER_LOG,
+                    source_id=self.worker_id,
+                    data={"text": text},
+                )
+                self.ui_queue.put_nowait(msg)
+            except Exception:
+                pass
+        else:
+            print(text)
+
     def run(self) -> None:
         """Main worker loop."""
-        import sys
-
-        print(
+        self._log(
             f"Worker {self.worker_id} started "
             f"(level={self.level}, device={self.device}, ε_end={self.eps_end:.4f}, PER)"
         )
-        sys.stdout.flush()
 
         while True:
             # Maybe sync weights from learner
@@ -945,21 +960,6 @@ class DDQNWorker:
             if len(self.buffer) >= self.batch_size:
                 for _ in range(self.train_steps):
                     self.compute_and_send_gradients()
-
-            # Log progress occasionally
-            if self.episode_count % 10 == 0 and self.episode_count > 0:
-                avg_reward = np.mean(self.reward_history[-10:]) if self.reward_history else 0
-                print(
-                    f"W{self.worker_id} | "
-                    f"Ep: {self.episode_count} | "
-                    f"Steps: {self.total_steps:,} | "
-                    f"Best X: {self.best_x_ever} | "
-                    f"Avg R: {avg_reward:.1f} | "
-                    f"ε: {self.current_epsilon:.3f} | "
-                    f"β: {self.buffer.current_beta:.3f} | "
-                    f"Grads: {self.gradients_sent} | "
-                    f"Flags: {self.flags}"
-                )
 
 
 def run_ddqn_worker(
