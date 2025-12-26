@@ -338,29 +338,27 @@ class TrainingUI:
         if plot_width < 10 or plot_height < 3:
             return
 
-        # Calculate data range
-        min_val = min(data)
-        max_val = max(data)
-        range_val = max_val - min_val if max_val != min_val else 1.0
+        # Limit data to most recent plot_width points (each point gets 1 column minimum)
+        display_data = data[-plot_width:] if len(data) > plot_width else data
+        display_x = x_data[-plot_width:] if x_data and len(x_data) > plot_width else x_data
 
-        # Add padding to range
-        if range_val > 0:
-            padding = range_val * 0.05
-            min_val -= padding
-            max_val += padding
-            range_val = max_val - min_val
+        # Calculate data range - always include 0 in Y-axis for context
+        data_min = min(display_data)
+        data_max = max(display_data)
 
-        # Downsample data to fit plot width
-        if len(data) > plot_width:
-            step = len(data) / plot_width
-            sampled = [data[int(i * step)] for i in range(plot_width)]
-            if x_data:
-                x_sampled = [x_data[int(i * step)] for i in range(plot_width)]
-            else:
-                x_sampled = None
+        # Y-axis always includes 0 for proper scale context
+        if data_min >= 0:
+            min_val = 0.0
+            max_val = data_max * 1.1  # 10% padding above
+        elif data_max <= 0:
+            min_val = data_min * 1.1  # 10% padding below
+            max_val = 0.0
         else:
-            sampled = data
-            x_sampled = x_data
+            # Data spans across 0
+            min_val = data_min * 1.1
+            max_val = data_max * 1.1
+
+        range_val = max_val - min_val if max_val != min_val else 1.0
 
         # Draw title
         try:
@@ -395,16 +393,18 @@ class TrainingUI:
         except curses.error:
             pass
 
-        # Draw X-axis labels (always start from 0)
+        # Draw X-axis labels (show range of displayed data)
         try:
             label_y = axis_y + 1
-            # X-axis always starts at 0, ends at current max
-            start_val = 0
-            if x_sampled:
-                end_val = x_sampled[-1]
+
+            # Use displayed data range for labels
+            if display_x:
+                start_val = display_x[0]
+                end_val = display_x[-1]
             else:
-                end_val = len(data)
-            mid_val = end_val // 2
+                start_val = 0
+                end_val = len(display_data)
+            mid_val = (start_val + end_val) // 2
 
             # Format function based on magnitude
             def fmt_steps(v: int) -> str:
@@ -427,21 +427,19 @@ class TrainingUI:
         except curses.error:
             pass
 
-        # Plot the data using dots - position X based on actual step values from 0
-        max_step = x_sampled[-1] if x_sampled else len(sampled)
-        for i, val in enumerate(sampled):
+        # Plot the data using dots - spread evenly across width
+        for i, val in enumerate(display_data):
             try:
                 # Normalize value to row position (Y)
                 normalized_y = (val - min_val) / range_val if range_val > 0 else 0.5
                 normalized_y = max(0, min(1, normalized_y))  # Clamp to [0, 1]
                 row = int((1 - normalized_y) * (plot_height - 1))
 
-                # Position X based on actual step value (relative to 0)
-                if x_sampled and max_step > 0:
-                    step_val = x_sampled[i]
-                    col = int((step_val / max_step) * (plot_width - 1))
+                # Spread points evenly across plot width
+                if len(display_data) > 1:
+                    col = int(i * (plot_width - 1) / (len(display_data) - 1))
                 else:
-                    col = i
+                    col = plot_width // 2
 
                 # Draw the point
                 plot_x = x + y_axis_width + col
