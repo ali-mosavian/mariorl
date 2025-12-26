@@ -596,6 +596,7 @@ class APPOWorker:
                     "steps_per_sec": self.steps_per_sec,
                     "snapshot_restores": 0,
                     "current_level": level_str,
+                    "last_weight_sync": self.last_weight_sync,
                     "rolling_avg_reward": rolling_avg,
                     "first_flag_time": 0.0,
                 },
