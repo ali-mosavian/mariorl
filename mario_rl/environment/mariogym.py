@@ -55,13 +55,23 @@ class Reward:
     def total_reward(self) -> float:
         # Normalize rewards to prevent gradient explosion
         # Original range: ~-1100 to ~+1200 -> New range: ~-15 to ~+15
-        return (
+
+        # Base rewards
+        base = (
             self.x_reward / 10.0  # -1.5 to +10 (was -15 to +100)
             + self.powerup_reward / 100.0  # -1 to +1 (was -100 to +100)
             + self.death_penalty / 100.0  # -10 (was -1000)
             + self.finish_reward / 100.0  # +10 (was +1000)
-            + -0.01  # Small step penalty
         )
+
+        # Speed bonus: reward moving forward quickly
+        # More forward progress = more bonus (max ~0.5 per step)
+        speed_bonus = self.x_reward / 200.0 if self.x_reward > 0 else 0.0
+
+        # Standing still penalty: punish wasting time without progress
+        standing_penalty = -0.1 if self.x_reward <= 0 and self.time_penalty < 0 else 0.0
+
+        return base + speed_bonus + standing_penalty
 
 
 # -
