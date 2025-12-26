@@ -67,6 +67,12 @@ class TrainingUI:
     total_flags: int = field(init=False, default=0)
     first_flag_episode: int = field(init=False, default=0)
 
+    # Graph history (from learner aggregated stats)
+    graph_reward_history: List[float] = field(init=False, default_factory=list)
+    graph_speed_history: List[float] = field(init=False, default_factory=list)
+    graph_steps_history: List[int] = field(init=False, default_factory=list)
+    max_graph_history: int = field(init=False, default=500)
+
     def __post_init__(self):
         """Initialize state tracking after dataclass fields are set."""
         self.running = True
@@ -89,6 +95,11 @@ class TrainingUI:
         self.total_episodes = 0
         self.total_flags = 0
         self.first_flag_episode = 0
+        # Graph history
+        self.graph_reward_history = []
+        self.graph_speed_history = []
+        self.graph_steps_history = []
+        self.max_graph_history = 500
 
     def run(self):
         """Main entry point - runs the curses UI."""
@@ -155,6 +166,19 @@ class TrainingUI:
                         self.loss_history.append(msg.data["loss"])
                         if len(self.loss_history) > self.max_history:
                             self.loss_history.pop(0)
+                    # Track graph history for distributed DDQN
+                    if "avg_reward" in msg.data and "timesteps" in msg.data:
+                        timesteps = msg.data.get("timesteps", 0)
+                        # Only add new data points (avoid duplicates)
+                        if not self.graph_steps_history or timesteps > self.graph_steps_history[-1]:
+                            self.graph_reward_history.append(msg.data.get("avg_reward", 0))
+                            self.graph_speed_history.append(msg.data.get("avg_speed", 0))
+                            self.graph_steps_history.append(timesteps)
+                            # Trim to max history
+                            if len(self.graph_reward_history) > self.max_graph_history:
+                                self.graph_reward_history.pop(0)
+                                self.graph_speed_history.pop(0)
+                                self.graph_steps_history.pop(0)
                 elif msg.msg_type == MessageType.LEARNER_LOG:
                     self._add_log(f"[LEARNER] {msg.data.get('text', '')}")
                 elif msg.msg_type == MessageType.WORKER_STATUS:
@@ -272,6 +296,218 @@ class TrainingUI:
                 except curses.error:
                     pass  # Ignore if we run out of space
 
+    def _draw_graph_with_axes(
+        self,
+        stdscr,
+        y: int,
+        x: int,
+        width: int,
+        height: int,
+        data: List[float],
+        x_data: List[int] | None,
+        title: str,
+        x_label: str = "steps",
+        color: int = 1,
+    ) -> None:
+        """
+        Draw an ASCII graph with proper X and Y axes.
+
+        Args:
+            stdscr: Curses screen
+            y: Top row of graph area
+            x: Left column of graph area
+            width: Total width including axes
+            height: Total height including axes
+            data: Y values to plot
+            x_data: X values (e.g., step numbers), or None for auto
+            title: Graph title
+            x_label: X-axis label
+            color: Color pair for plot line
+        """
+        if not data or width < 25 or height < 6:
+            return
+
+        # Reserve space for axes labels
+        y_axis_width = 7  # "12345 │"
+        x_axis_height = 2  # X-axis line + labels
+        title_height = 1
+
+        plot_width = width - y_axis_width - 2
+        plot_height = height - x_axis_height - title_height
+
+        if plot_width < 10 or plot_height < 3:
+            return
+
+        # Calculate data range
+        min_val = min(data)
+        max_val = max(data)
+        range_val = max_val - min_val if max_val != min_val else 1.0
+
+        # Add padding to range
+        if range_val > 0:
+            padding = range_val * 0.05
+            min_val -= padding
+            max_val += padding
+            range_val = max_val - min_val
+
+        # Downsample data to fit plot width
+        if len(data) > plot_width:
+            step = len(data) / plot_width
+            sampled = [data[int(i * step)] for i in range(plot_width)]
+            if x_data:
+                x_sampled = [x_data[int(i * step)] for i in range(plot_width)]
+            else:
+                x_sampled = None
+        else:
+            sampled = data
+            x_sampled = x_data
+
+        # Draw title
+        try:
+            title_x = x + y_axis_width + (plot_width - len(title)) // 2
+            stdscr.addstr(y, title_x, title, curses.A_BOLD | curses.color_pair(color))
+        except curses.error:
+            pass
+
+        # Draw Y-axis with labels and ticks
+        for row in range(plot_height):
+            try:
+                # Calculate Y value for this row
+                val = max_val - (row / max(plot_height - 1, 1)) * range_val
+
+                # Format label based on magnitude
+                if abs(val) >= 1000:
+                    label = f"{val/1000:5.1f}k"
+                elif abs(val) >= 1:
+                    label = f"{val:6.1f}"
+                else:
+                    label = f"{val:6.2f}"
+
+                stdscr.addstr(y + title_height + row, x, label)
+                stdscr.addstr(y + title_height + row, x + y_axis_width - 1, "│")
+            except curses.error:
+                pass
+
+        # Draw X-axis
+        try:
+            axis_y = y + title_height + plot_height
+            stdscr.addstr(axis_y, x + y_axis_width - 1, "└" + "─" * plot_width)
+        except curses.error:
+            pass
+
+        # Draw X-axis labels
+        try:
+            label_y = axis_y + 1
+            # Start label
+            if x_sampled:
+                start_val = x_sampled[0]
+                end_val = x_sampled[-1]
+            else:
+                start_val = 0
+                end_val = len(data)
+
+            # Format based on magnitude
+            if end_val >= 1_000_000:
+                start_str = f"{start_val/1_000_000:.1f}M"
+                end_str = f"{end_val/1_000_000:.1f}M"
+            elif end_val >= 1000:
+                start_str = f"{start_val/1000:.0f}k"
+                end_str = f"{end_val/1000:.0f}k"
+            else:
+                start_str = f"{start_val:.0f}"
+                end_str = f"{end_val:.0f}"
+
+            stdscr.addstr(label_y, x + y_axis_width, start_str)
+            stdscr.addstr(label_y, x + y_axis_width + plot_width - len(end_str), end_str)
+
+            # Center x_label
+            label_x = x + y_axis_width + (plot_width - len(x_label)) // 2
+            stdscr.addstr(label_y, label_x, x_label, curses.A_DIM)
+        except curses.error:
+            pass
+
+        # Plot the data using block characters
+        for col, val in enumerate(sampled):
+            try:
+                # Normalize value to row position
+                normalized = (val - min_val) / range_val if range_val > 0 else 0.5
+                normalized = max(0, min(1, normalized))  # Clamp to [0, 1]
+                row = int((1 - normalized) * (plot_height - 1))
+
+                # Draw the point
+                plot_x = x + y_axis_width + col
+                plot_y = y + title_height + row
+
+                stdscr.addstr(plot_y, plot_x, "█", curses.color_pair(color))
+            except curses.error:
+                pass
+
+        # Connect points with line if adjacent rows are different
+        for col in range(1, len(sampled)):
+            try:
+                val_prev = sampled[col - 1]
+                val_curr = sampled[col]
+
+                norm_prev = (val_prev - min_val) / range_val if range_val > 0 else 0.5
+                norm_curr = (val_curr - min_val) / range_val if range_val > 0 else 0.5
+                norm_prev = max(0, min(1, norm_prev))
+                norm_curr = max(0, min(1, norm_curr))
+
+                row_prev = int((1 - norm_prev) * (plot_height - 1))
+                row_curr = int((1 - norm_curr) * (plot_height - 1))
+
+                # Fill in vertical gaps
+                if abs(row_curr - row_prev) > 1:
+                    step = 1 if row_curr > row_prev else -1
+                    for fill_row in range(row_prev + step, row_curr, step):
+                        plot_x = x + y_axis_width + col - 1
+                        plot_y = y + title_height + fill_row
+                        stdscr.addstr(plot_y, plot_x, "│", curses.color_pair(color) | curses.A_DIM)
+            except curses.error:
+                pass
+
+    def _draw_graphs_section(self, stdscr, y: int, width: int, height: int) -> None:
+        """Draw the graphs section with reward and speed plots."""
+        # Header
+        stdscr.addstr(y, 2, "┌─ GRAPHS ", curses.A_BOLD | curses.color_pair(4))
+        stdscr.addstr(y, 12, "─" * (width - 14))
+
+        if not self.graph_reward_history:
+            stdscr.addstr(y + 1, 4, "Waiting for data...", curses.A_DIM)
+            return
+
+        # Calculate graph dimensions
+        graph_height = height - 2  # Leave room for header
+        half_width = (width - 6) // 2
+
+        # Draw reward graph on the left
+        self._draw_graph_with_axes(
+            stdscr,
+            y=y + 1,
+            x=2,
+            width=half_width,
+            height=graph_height,
+            data=self.graph_reward_history,
+            x_data=self.graph_steps_history,
+            title="Average Reward",
+            x_label="steps",
+            color=1,  # Green
+        )
+
+        # Draw speed graph on the right
+        self._draw_graph_with_axes(
+            stdscr,
+            y=y + 1,
+            x=2 + half_width + 2,
+            width=half_width,
+            height=graph_height,
+            data=self.graph_speed_history,
+            x_data=self.graph_steps_history,
+            title="Average Speed (x/t)",
+            x_label="steps",
+            color=4,  # Blue/Cyan
+        )
+
     def _draw(self, stdscr):
         """Draw the entire UI."""
         stdscr.clear()
@@ -295,6 +531,11 @@ class TrainingUI:
         worker_height = 4  # Increased for convergence metrics line
         workers_total_height = self.num_workers * worker_height
         convergence_height = 4  # Global convergence charts
+
+        # Graphs section - show if we have distributed DDQN data and enough height
+        has_graph_data = len(self.graph_reward_history) > 2
+        graphs_height = 12 if has_graph_data and height > 50 else 0
+
         log_height = (
             height
             - header_height
@@ -303,6 +544,7 @@ class TrainingUI:
             - learner_height
             - workers_total_height
             - convergence_height
+            - graphs_height
             - 3
         )
 
@@ -327,6 +569,11 @@ class TrainingUI:
         # Global convergence section (right under learner)
         self._draw_convergence(stdscr, current_y, width, convergence_height)
         current_y += convergence_height
+
+        # Graphs section (if we have data and enough height)
+        if graphs_height > 0:
+            self._draw_graphs_section(stdscr, current_y, width, graphs_height)
+            current_y += graphs_height
 
         # Worker sections
         for i in range(self.num_workers):
