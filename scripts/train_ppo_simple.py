@@ -106,6 +106,7 @@ def main() -> None:
     )
     parser.add_argument("--vf-coef", type=float, default=0.5, help="Value function coefficient")
     parser.add_argument("--max-grad-norm", type=float, default=0.5, help="Max gradient norm")
+    parser.add_argument("--target-kl", type=float, default=0.03, help="Target KL for early stopping (0 to disable)")
     parser.add_argument("--dropout", type=float, default=0.0, help="Dropout rate (0 to disable)")
     args = parser.parse_args()
 
@@ -282,8 +283,11 @@ def main() -> None:
         # PPO update
         model.train()
         indices = np.arange(args.n_steps)
+        early_stop_epoch = False
+        stopped_at_epoch = 0
 
-        for _ in range(args.n_epochs):
+        for epoch_idx in range(args.n_epochs):
+            stopped_at_epoch = epoch_idx
             np.random.shuffle(indices)
 
             for start in range(0, args.n_steps, args.minibatch_size):
@@ -299,9 +303,15 @@ def main() -> None:
                 # Get current policy outputs
                 _, new_log_probs, entropy, new_values = model.get_action_and_value(mb_obs, mb_actions)
 
-                # Compute ratio
+                # Compute ratio and approximate KL
                 log_ratio = new_log_probs - mb_old_log_probs
                 ratio = torch.exp(log_ratio)
+                approx_kl = ((ratio - 1) - log_ratio).mean().item()
+
+                # KL early stopping - stop if policy changed too much
+                if args.target_kl > 0 and approx_kl > args.target_kl:
+                    early_stop_epoch = True
+                    break
 
                 # Clipped surrogate loss
                 pg_loss1 = -mb_advantages * ratio
@@ -326,6 +336,9 @@ def main() -> None:
                 loss.backward()
                 torch.nn.utils.clip_grad_norm_(model.parameters(), args.max_grad_norm)
                 optimizer.step()
+
+            if early_stop_epoch:
+                break  # Stop all epochs if KL exceeded
 
         # Logging
         elapsed = time.time() - start_time
@@ -363,6 +376,9 @@ def main() -> None:
         elif avg_entropy < entropy_warning_threshold:
             entropy_status = " [LOW ENTROPY WARNING]"
 
+        # Add KL early stop indicator
+        kl_status = f" [KL stop @ep{stopped_at_epoch+1}]" if early_stop_epoch else ""
+
         # Two-line output for readability
         print(
             f"Step {total_steps:>7,} | "
@@ -372,7 +388,7 @@ def main() -> None:
             f"H: {current_entropy:>5.3f} | "
             f"KL: {kl:>6.4f} | "
             f"Clip: {clip_frac:>4.2f}"
-            f"{entropy_status}"
+            f"{entropy_status}{kl_status}"
         )
         print(
             f"         Avg R: {avg_reward:>6.1f} | "
