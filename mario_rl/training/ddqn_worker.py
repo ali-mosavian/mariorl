@@ -583,6 +583,12 @@ class DDQNWorker:
     _last_time: float = field(init=False, default=0.0)
     current_epsilon: float = field(init=False, default=1.0)
 
+    # Additional metrics
+    x_at_death_history: List[int] = field(init=False, default_factory=list)
+    time_to_flag_history: List[int] = field(init=False, default_factory=list)
+    speed_history: List[float] = field(init=False, default_factory=list)
+    episode_start_time: int = field(init=False, default=400)  # Mario starts with 400 time
+
     def __post_init__(self) -> None:
         """Initialize environment, network, and buffer."""
         # Auto-detect best device
@@ -764,8 +770,28 @@ class DDQNWorker:
                 if len(self.reward_history) > 100:
                     self.reward_history.pop(0)
 
-                if info.get("is_dead", False) or info.get("is_dying", False):
+                # Calculate speed (x_pos / time_elapsed)
+                game_time = info.get("time", 0)
+                time_elapsed = self.episode_start_time - game_time
+                if time_elapsed > 0:
+                    speed = x_pos / time_elapsed
+                    self.speed_history.append(speed)
+                    if len(self.speed_history) > 20:
+                        self.speed_history.pop(0)
+
+                # Track death/flag metrics
+                is_dead = info.get("is_dead", False) or info.get("is_dying", False)
+                flag_get = info.get("flag_get", False)
+
+                if flag_get:
+                    self.time_to_flag_history.append(game_time)
+                    if len(self.time_to_flag_history) > 20:
+                        self.time_to_flag_history.pop(0)
+                elif is_dead:
                     self.deaths += 1
+                    self.x_at_death_history.append(x_pos)
+                    if len(self.x_at_death_history) > 20:
+                        self.x_at_death_history.pop(0)
 
                 self._send_ui_status(info)
 
@@ -886,6 +912,11 @@ class DDQNWorker:
             rolling_avg = np.mean(self.reward_history) if self.reward_history else 0.0
             level_str = self.base_env.current_level
 
+            # Compute average metrics
+            avg_speed = np.mean(self.speed_history) if self.speed_history else 0.0
+            avg_x_at_death = np.mean(self.x_at_death_history) if self.x_at_death_history else 0.0
+            avg_time_to_flag = np.mean(self.time_to_flag_history) if self.time_to_flag_history else 0.0
+
             msg = UIMessage(
                 msg_type=MessageType.WORKER_STATUS,
                 source_id=self.worker_id,
@@ -910,8 +941,12 @@ class DDQNWorker:
                     "current_level": level_str,
                     "last_weight_sync": self.last_weight_sync,
                     "rolling_avg_reward": rolling_avg,
-                    "first_flag_time": 0.0,
+                    "first_flag_time": avg_time_to_flag,
                     "per_beta": self.buffer.current_beta,
+                    # Additional metrics
+                    "avg_speed": avg_speed,
+                    "avg_x_at_death": avg_x_at_death,
+                    "avg_time_to_flag": avg_time_to_flag,
                 },
             )
             self.ui_queue.put_nowait(msg)

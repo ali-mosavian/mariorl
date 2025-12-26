@@ -596,7 +596,7 @@ class TrainingUI:
             snapshot_restores = ws.get("snapshot_restores", 0)
             # Convergence metrics
             rolling_avg_reward = ws.get("rolling_avg_reward", 0)
-            first_flag_time = ws.get("first_flag_time", 0)
+            ws.get("first_flag_time", 0)
             best_x_ever = ws.get("best_x_ever", 0)
 
             # Calculate time since last weight sync
@@ -628,21 +628,24 @@ class TrainingUI:
             grads_sent = ws.get("gradients_sent", 0)
             stdscr.addstr(f"  ε={epsilon:.3f}  Exp={exp:,}  ↑{grads_sent} ↓{weight_sync_count}")
 
-            # Convergence metrics line (rolling avg + first flag time)
+            # Convergence metrics line (rolling avg + speed + flag time)
             avg_color = curses.color_pair(1) if rolling_avg_reward > 0 else curses.color_pair(3)
-            stdscr.addstr(y + 3, 4, "r̄₁₀₀=")
-            stdscr.addstr(f"{rolling_avg_reward:8.0f}", avg_color)
-            stdscr.addstr(f"  BestX={best_x_ever:5d}  ")
+            avg_speed = ws.get("avg_speed", 0)
+            avg_x_at_death = ws.get("avg_x_at_death", 0)
+            avg_time_to_flag = ws.get("avg_time_to_flag", 0)
 
-            if first_flag_time > 0:
-                # Format time nicely
-                mins = int(first_flag_time // 60)
-                secs = int(first_flag_time % 60)
-                stdscr.addstr("1st🏁=", curses.A_BOLD)
-                stdscr.addstr(f"{mins}m{secs:02d}s", curses.color_pair(1) | curses.A_BOLD)
+            stdscr.addstr(y + 3, 4, "r̄=")
+            stdscr.addstr(f"{rolling_avg_reward:6.0f}", avg_color)
+            stdscr.addstr(f"  BestX={best_x_ever:4d}")
+            stdscr.addstr(f"  Spd={avg_speed:4.1f}x/t")
+            stdscr.addstr(f"  💀X̄={avg_x_at_death:4.0f}")
+
+            if avg_time_to_flag > 0:
+                stdscr.addstr("  🏁T̄=", curses.A_BOLD)
+                stdscr.addstr(f"{avg_time_to_flag:3.0f}", curses.color_pair(1) | curses.A_BOLD)
             else:
-                stdscr.addstr("1st🏁=", curses.A_DIM)
-                stdscr.addstr("waiting", curses.A_DIM)
+                stdscr.addstr("  🏁T̄=", curses.A_DIM)
+                stdscr.addstr("---", curses.A_DIM)
         else:
             stdscr.addstr(y + 1, 4, "Starting...", curses.A_DIM)
 
