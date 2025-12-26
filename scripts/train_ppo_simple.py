@@ -161,6 +161,9 @@ def main() -> None:
     total_flags = 0
     recent_x_at_death: list[int] = []  # X position when dying (to track progress)
     recent_times_to_flag: list[int] = []  # Game time remaining when getting flag
+    recent_time_survived: list[int] = []  # Game time elapsed before death (400 - time_remaining)
+    recent_speed: list[float] = []  # X position / time elapsed (advancement speed)
+    episode_start_time = 400  # Mario starts with 400 time units
 
     # Entropy collapse detection
     entropy_history: list[float] = []
@@ -234,10 +237,18 @@ def main() -> None:
                 flag_get = info.get("flag_get", False)
                 is_dead = info.get("is_dead", False) or info.get("is_dying", False)
                 game_time = info.get("time", 0)
+                time_elapsed = episode_start_time - game_time  # How long Mario survived
+
+                # Track speed (X / time) - higher is better
+                if time_elapsed > 0:
+                    speed = x_pos / time_elapsed
+                    recent_speed.append(speed)
+                    if len(recent_speed) > 20:
+                        recent_speed.pop(0)
 
                 if flag_get:
                     total_flags += 1
-                    recent_times_to_flag.append(game_time)
+                    recent_times_to_flag.append(game_time)  # Time remaining = faster completion
                     if len(recent_times_to_flag) > 20:
                         recent_times_to_flag.pop(0)
                 elif is_dead:
@@ -245,6 +256,10 @@ def main() -> None:
                     recent_x_at_death.append(x_pos)
                     if len(recent_x_at_death) > 20:
                         recent_x_at_death.pop(0)
+                    # Track time survived before death
+                    recent_time_survived.append(time_elapsed)
+                    if len(recent_time_survived) > 20:
+                        recent_time_survived.pop(0)
 
                 episode_count += 1
                 episode_reward = 0.0
@@ -346,6 +361,8 @@ def main() -> None:
         avg_reward = np.mean(recent_rewards) if recent_rewards else 0.0
         avg_x_at_death = np.mean(recent_x_at_death) if recent_x_at_death else 0.0
         avg_time_to_flag = np.mean(recent_times_to_flag) if recent_times_to_flag else 0.0
+        avg_time_survived = np.mean(recent_time_survived) if recent_time_survived else 0.0
+        avg_speed = np.mean(recent_speed) if recent_speed else 0.0
 
         # Compute final metrics for logging
         with torch.no_grad():
@@ -379,7 +396,7 @@ def main() -> None:
         # Add KL early stop indicator
         kl_status = f" [KL stop @ep{stopped_at_epoch+1}]" if early_stop_epoch else ""
 
-        # Two-line output for readability
+        # Three-line output for readability
         print(
             f"Step {total_steps:>7,} | "
             f"Ep: {episode_count:>4} | "
@@ -394,11 +411,14 @@ def main() -> None:
             f"         Avg R: {avg_reward:>6.1f} | "
             f"X: {current_x:>4} | "
             f"Best: {best_x:>4} | "
-            f"Deaths: {total_deaths:>4} (avg X: {avg_x_at_death:>4.0f}) | "
-            f"Flags: {total_flags:>3} (avg T: {avg_time_to_flag:>3.0f}) | "
+            f"Speed: {avg_speed:>5.2f} x/t | "
             f"SPS: {steps_per_sec:>4.0f}"
         )
-        print("-" * 70)
+        print(
+            f"         Deaths: {total_deaths:>4} (X: {avg_x_at_death:>4.0f}, T: {avg_time_survived:>3.0f}) | "
+            f"Flags: {total_flags:>3} (T: {avg_time_to_flag:>3.0f})"
+        )
+        print("-" * 85)
 
     print("=" * 70)
     print("Training complete!")
