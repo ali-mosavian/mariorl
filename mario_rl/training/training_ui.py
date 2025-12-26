@@ -338,16 +338,17 @@ class TrainingUI:
         if plot_width < 10 or plot_height < 3:
             return
 
-        # Downsample ALL data to fit in plot_width (show full history from step 0)
+        # Downsample ALL data to fit in plot_width (show full history)
         if len(data) > plot_width:
             step = len(data) / plot_width
             display_data = [data[int(i * step)] for i in range(plot_width)]
             if x_data:
-                [x_data[int(i * step)] for i in range(plot_width)]
+                display_x: List[int] | None = [x_data[int(i * step)] for i in range(plot_width)]
             else:
-                pass
+                display_x = None
         else:
             display_data = data
+            display_x = x_data
 
         # Calculate data range - always include 0 in Y-axis for context
         data_min = min(data)  # Use full data range for Y-axis
@@ -400,18 +401,17 @@ class TrainingUI:
         except curses.error:
             pass
 
-        # Draw X-axis labels (show actual data range)
+        # Draw X-axis labels (always from 0 to current max)
         try:
             label_y = axis_y + 1
 
-            # X-axis shows range of data we actually have
+            # X-axis always starts at 0
+            start_val = 0
             if x_data:
-                start_val = x_data[0]
                 end_val = x_data[-1]
             else:
-                start_val = 0
                 end_val = len(data)
-            mid_val = (start_val + end_val) // 2
+            mid_val = end_val // 2
 
             # Format function based on magnitude
             def fmt_steps(v: int) -> str:
@@ -434,7 +434,8 @@ class TrainingUI:
         except curses.error:
             pass
 
-        # Plot the data using dots - spread evenly across width
+        # Plot the data using dots - position at actual step value (relative to 0)
+        max_step = x_data[-1] if x_data else len(data)
         for i, val in enumerate(display_data):
             try:
                 # Normalize value to row position (Y)
@@ -442,11 +443,12 @@ class TrainingUI:
                 normalized_y = max(0, min(1, normalized_y))  # Clamp to [0, 1]
                 row = int((1 - normalized_y) * (plot_height - 1))
 
-                # Spread points evenly across plot width
-                if len(display_data) > 1:
-                    col = int(i * (plot_width - 1) / (len(display_data) - 1))
+                # Position X at actual step value (relative to 0 to max_step)
+                if display_x and max_step > 0:
+                    step_val = display_x[i]
+                    col = int((step_val / max_step) * (plot_width - 1))
                 else:
-                    col = plot_width // 2
+                    col = int(i * (plot_width - 1) / max(len(display_data) - 1, 1))
 
                 # Draw the point
                 plot_x = x + y_axis_width + col
