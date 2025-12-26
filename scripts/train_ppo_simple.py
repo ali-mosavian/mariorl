@@ -149,12 +149,22 @@ def main() -> None:
     episode_reward = 0.0
     episode_length = 0
     best_x = 0
+    current_x = 0
     recent_rewards: list[float] = []
     start_time = time.time()
 
-    print("=" * 60)
+    # Episode stats
+    total_deaths = 0
+    total_flags = 0
+    recent_x_at_death: list[int] = []  # X position when dying (to track progress)
+    recent_times_to_flag: list[int] = []  # Game time remaining when getting flag
+
+    print("=" * 70)
     print("Starting training...")
-    print("=" * 60)
+    print(f"  Level: {args.level}")
+    print(f"  Device: {device}")
+    print(f"  LR: {args.lr}, Entropy: {args.ent_coef}, Clip: {args.clip_range}")
+    print("=" * 70)
 
     while total_steps < args.total_steps:
         # Collect rollout
@@ -184,8 +194,9 @@ def main() -> None:
             episode_reward += reward
             episode_length += 1
 
-            # Track best x position
+            # Track positions
             x_pos = info.get("x_pos", 0)
+            current_x = x_pos
             if x_pos > best_x:
                 best_x = x_pos
 
@@ -193,6 +204,23 @@ def main() -> None:
                 recent_rewards.append(episode_reward)
                 if len(recent_rewards) > 100:
                     recent_rewards.pop(0)
+
+                # Track deaths and flags
+                flag_get = info.get("flag_get", False)
+                is_dead = info.get("is_dead", False) or info.get("is_dying", False)
+                game_time = info.get("time", 0)
+
+                if flag_get:
+                    total_flags += 1
+                    recent_times_to_flag.append(game_time)
+                    if len(recent_times_to_flag) > 20:
+                        recent_times_to_flag.pop(0)
+                elif is_dead:
+                    total_deaths += 1
+                    recent_x_at_death.append(x_pos)
+                    if len(recent_x_at_death) > 20:
+                        recent_x_at_death.pop(0)
+
                 episode_count += 1
                 episode_reward = 0.0
                 episode_length = 0
@@ -274,6 +302,8 @@ def main() -> None:
         elapsed = time.time() - start_time
         steps_per_sec = total_steps / elapsed if elapsed > 0 else 0
         avg_reward = np.mean(recent_rewards) if recent_rewards else 0.0
+        avg_x_at_death = np.mean(recent_x_at_death) if recent_x_at_death else 0.0
+        avg_time_to_flag = np.mean(recent_times_to_flag) if recent_times_to_flag else 0.0
 
         # Compute final metrics for logging
         with torch.no_grad():
@@ -283,25 +313,36 @@ def main() -> None:
             kl = ((ratio - 1) - log_ratio).mean().item()
             clip_frac = ((ratio - 1).abs() > args.clip_range).float().mean().item()
 
+        # Two-line output for readability
         print(
             f"Step {total_steps:>7,} | "
             f"Ep: {episode_count:>4} | "
-            f"Avg R: {avg_reward:>6.1f} | "
-            f"π_loss: {pg_loss.item():>7.4f} | "
-            f"v_loss: {v_loss.item():>7.4f} | "
+            f"π: {pg_loss.item():>7.4f} | "
+            f"v: {v_loss.item():>6.4f} | "
             f"H: {entropy.mean().item():>5.3f} | "
             f"KL: {kl:>6.4f} | "
-            f"Clip: {clip_frac:>5.3f} | "
-            f"Best_X: {best_x:>5} | "
-            f"SPS: {steps_per_sec:>5.0f}"
+            f"Clip: {clip_frac:>4.2f}"
         )
+        print(
+            f"         Avg R: {avg_reward:>6.1f} | "
+            f"X: {current_x:>4} | "
+            f"Best: {best_x:>4} | "
+            f"Deaths: {total_deaths:>4} (avg X: {avg_x_at_death:>4.0f}) | "
+            f"Flags: {total_flags:>3} (avg T: {avg_time_to_flag:>3.0f}) | "
+            f"SPS: {steps_per_sec:>4.0f}"
+        )
+        print("-" * 70)
 
-    print("=" * 60)
+    print("=" * 70)
     print("Training complete!")
-    print(f"Total steps: {total_steps:,}")
-    print(f"Episodes: {episode_count}")
-    print(f"Best X position: {best_x}")
-    print("=" * 60)
+    print(f"  Total steps: {total_steps:,}")
+    print(f"  Episodes: {episode_count}")
+    print(f"  Best X position: {best_x}")
+    print(f"  Total deaths: {total_deaths}")
+    print(f"  Total flags: {total_flags}")
+    if total_flags > 0:
+        print(f"  Flag rate: {total_flags / episode_count * 100:.1f}%")
+    print("=" * 70)
 
     env.close()
 
