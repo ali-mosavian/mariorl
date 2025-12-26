@@ -343,12 +343,11 @@ class TrainingUI:
             step = len(data) / plot_width
             display_data = [data[int(i * step)] for i in range(plot_width)]
             if x_data:
-                display_x: List[int] | None = [x_data[int(i * step)] for i in range(plot_width)]
+                [x_data[int(i * step)] for i in range(plot_width)]
             else:
-                display_x = None
+                pass
         else:
             display_data = data
-            display_x = x_data
 
         # Calculate data range - always include 0 in Y-axis for context
         data_min = min(data)  # Use full data range for Y-axis
@@ -401,17 +400,18 @@ class TrainingUI:
         except curses.error:
             pass
 
-        # Draw X-axis labels (show full range: 0 to current max)
+        # Draw X-axis labels (show actual data range)
         try:
             label_y = axis_y + 1
 
-            # X-axis always starts at 0, ends at current max step
-            start_val = 0
+            # X-axis shows range of data we actually have
             if x_data:
-                end_val = x_data[-1]  # Use original x_data for full range
+                start_val = x_data[0]
+                end_val = x_data[-1]
             else:
+                start_val = 0
                 end_val = len(data)
-            mid_val = end_val // 2
+            mid_val = (start_val + end_val) // 2
 
             # Format function based on magnitude
             def fmt_steps(v: int) -> str:
@@ -434,8 +434,7 @@ class TrainingUI:
         except curses.error:
             pass
 
-        # Plot the data using dots - position at actual X value (relative to 0)
-        max_step = x_data[-1] if x_data else len(data)
+        # Plot the data using dots - spread evenly across width
         for i, val in enumerate(display_data):
             try:
                 # Normalize value to row position (Y)
@@ -443,13 +442,11 @@ class TrainingUI:
                 normalized_y = max(0, min(1, normalized_y))  # Clamp to [0, 1]
                 row = int((1 - normalized_y) * (plot_height - 1))
 
-                # Position X based on actual step value (relative to 0 to max_step)
-                if display_x and max_step > 0:
-                    step_val = display_x[i]
-                    col = int((step_val / max_step) * (plot_width - 1))
+                # Spread points evenly across plot width
+                if len(display_data) > 1:
+                    col = int(i * (plot_width - 1) / (len(display_data) - 1))
                 else:
-                    # Fallback: spread evenly
-                    col = int(i * (plot_width - 1) / max(len(display_data) - 1, 1))
+                    col = plot_width // 2
 
                 # Draw the point
                 plot_x = x + y_axis_width + col
