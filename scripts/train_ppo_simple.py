@@ -167,12 +167,11 @@ def main() -> None:
 
     # Entropy collapse prevention
     entropy_history: list[float] = []
-    entropy_collapse_threshold = 0.1  # Below this = collapsed
-    entropy_warning_threshold = 0.5  # Below this = warning
+    entropy_collapse_threshold = 0.3  # Below this = collapsed (raised from 0.1)
+    entropy_warning_threshold = 0.8  # Below this = warning (raised from 0.5)
     current_ent_coef = args.ent_coef
-    current_temperature = 1.0  # Softmax temperature (increases when entropy drops)
     collapse_recovery_count = 0
-    max_entropy = np.log(n_actions)  # Maximum possible entropy for uniform distribution
+    np.log(n_actions)  # Maximum possible entropy for uniform distribution
 
     print("=" * 70)
     print("Starting training...")
@@ -204,7 +203,7 @@ def main() -> None:
 
             with torch.no_grad():
                 obs_t = torch.from_numpy(obs).unsqueeze(0).to(device)
-                action, log_prob, _, value = model.get_action_and_value(obs_t, temperature=current_temperature)
+                action, log_prob, _, value = model.get_action_and_value(obs_t)
                 action = action.cpu().numpy()[0]
                 log_prob = log_prob.cpu().numpy()[0]
                 value = value.cpu().numpy()[0]
@@ -317,10 +316,8 @@ def main() -> None:
                 mb_advantages = advantages_t[mb_indices]
                 mb_returns = returns_t[mb_indices]
 
-                # Get current policy outputs (use same temperature as collection for consistent ratio)
-                _, new_log_probs, entropy, new_values = model.get_action_and_value(
-                    mb_obs, mb_actions, temperature=current_temperature
-                )
+                # Get current policy outputs
+                _, new_log_probs, entropy, new_values = model.get_action_and_value(mb_obs, mb_actions)
 
                 # Compute ratio and approximate KL
                 log_ratio = new_log_probs - mb_old_log_probs
@@ -370,13 +367,13 @@ def main() -> None:
 
         # Compute final metrics for logging (use temp=1 to see raw network entropy)
         with torch.no_grad():
-            _, new_log_probs, entropy, new_values = model.get_action_and_value(obs_t, actions_t, temperature=1.0)
+            _, new_log_probs, entropy, new_values = model.get_action_and_value(obs_t, actions_t)
             log_ratio = new_log_probs - old_log_probs_t
             ratio = torch.exp(log_ratio)
             kl = ((ratio - 1) - log_ratio).mean().item()
             clip_frac = ((ratio - 1).abs() > args.clip_range).float().mean().item()
 
-        # Entropy collapse prevention with temperature scaling
+        # Entropy collapse prevention (simpler approach - just boost ent_coef)
         current_entropy = entropy.mean().item()
         entropy_history.append(current_entropy)
         if len(entropy_history) > 20:
@@ -385,32 +382,15 @@ def main() -> None:
         avg_entropy = np.mean(entropy_history)
         entropy_status = ""
 
-        # Dynamic temperature: increase when entropy drops to encourage exploration
-        # Target: keep entropy above 50% of maximum
-        target_entropy = 0.5 * max_entropy
-        if avg_entropy < target_entropy:
-            # Increase temperature to spread out probabilities
-            old_temp = current_temperature
-            current_temperature = min(3.0, current_temperature * 1.1)  # Max temp = 3.0
-            if current_temperature != old_temp:
-                entropy_status = f" [temp: {old_temp:.2f}->{current_temperature:.2f}]"
-        elif avg_entropy > 0.8 * max_entropy and current_temperature > 1.0:
-            # Entropy is healthy, can reduce temperature
-            current_temperature = max(1.0, current_temperature * 0.95)
-
         if avg_entropy < entropy_collapse_threshold:
-            # COLLAPSE DETECTED - more aggressive intervention
+            # COLLAPSE DETECTED - increase entropy coefficient
             old_ent = current_ent_coef
-            current_ent_coef = min(1.0, current_ent_coef * 2.0)
-            current_temperature = min(3.0, current_temperature * 1.5)  # Also boost temperature
+            current_ent_coef = min(0.5, current_ent_coef * 1.5)  # More conservative increase
             collapse_recovery_count += 1
-            entropy_status = (
-                f" [COLLAPSE #{collapse_recovery_count}! ent:{old_ent:.2f}->{current_ent_coef:.2f}, "
-                f"temp->{current_temperature:.2f}]"
-            )
+            entropy_status = f" [COLLAPSE #{collapse_recovery_count}! ent:{old_ent:.3f}->{current_ent_coef:.3f}]"
             entropy_history.clear()
         elif avg_entropy < entropy_warning_threshold:
-            entropy_status += " [LOW H]"
+            entropy_status = " [LOW H]"
 
         # Add KL early stop indicator
         kl_status = f" [KL stop @ep{stopped_at_epoch+1}]" if early_stop_epoch else ""
@@ -426,13 +406,12 @@ def main() -> None:
             f"Clip: {clip_frac:>4.2f}"
             f"{entropy_status}{kl_status}"
         )
-        temp_str = f" T:{current_temperature:.1f}" if current_temperature > 1.0 else ""
         print(
             f"         Avg R: {avg_reward:>6.1f} | "
             f"X: {current_x:>4} | "
             f"Best: {best_x:>4} | "
             f"Speed: {avg_speed:>5.2f} x/t | "
-            f"SPS: {steps_per_sec:>4.0f}{temp_str}"
+            f"SPS: {steps_per_sec:>4.0f}"
         )
         print(
             f"         Deaths: {total_deaths:>4} (X: {avg_x_at_death:>4.0f}, T: {avg_time_survived:>3.0f}) | "
