@@ -161,6 +161,13 @@ def main() -> None:
     recent_x_at_death: list[int] = []  # X position when dying (to track progress)
     recent_times_to_flag: list[int] = []  # Game time remaining when getting flag
 
+    # Entropy collapse detection
+    entropy_history: list[float] = []
+    entropy_collapse_threshold = 0.1  # Below this = collapsed
+    entropy_warning_threshold = 0.5  # Below this = warning
+    current_ent_coef = args.ent_coef
+    collapse_recovery_count = 0
+
     print("=" * 70)
     print("Starting training...")
     print(f"  Level: {args.level}")
@@ -308,8 +315,8 @@ def main() -> None:
                 # Entropy loss (negative because we want to maximize entropy)
                 entropy_loss = -entropy.mean()
 
-                # Total loss
-                loss = pg_loss + args.vf_coef * v_loss + args.ent_coef * entropy_loss
+                # Total loss (use current_ent_coef which may be increased on collapse)
+                loss = pg_loss + args.vf_coef * v_loss + current_ent_coef * entropy_loss
 
                 # Early stop this epoch if entropy is too low (prevents collapse)
                 if entropy.mean().item() < 0.01:
@@ -335,15 +342,37 @@ def main() -> None:
             kl = ((ratio - 1) - log_ratio).mean().item()
             clip_frac = ((ratio - 1).abs() > args.clip_range).float().mean().item()
 
+        # Entropy collapse detection
+        current_entropy = entropy.mean().item()
+        entropy_history.append(current_entropy)
+        if len(entropy_history) > 20:
+            entropy_history.pop(0)
+
+        avg_entropy = np.mean(entropy_history)
+        entropy_status = ""
+
+        if avg_entropy < entropy_collapse_threshold:
+            # COLLAPSE DETECTED - increase entropy coefficient significantly
+            old_ent = current_ent_coef
+            current_ent_coef = min(1.0, current_ent_coef * 2.0)  # Double it, max 1.0
+            collapse_recovery_count += 1
+            entropy_status = (
+                f" [COLLAPSE #{collapse_recovery_count}! ent_coef: {old_ent:.3f} -> {current_ent_coef:.3f}]"
+            )
+            entropy_history.clear()  # Reset history after intervention
+        elif avg_entropy < entropy_warning_threshold:
+            entropy_status = " [LOW ENTROPY WARNING]"
+
         # Two-line output for readability
         print(
             f"Step {total_steps:>7,} | "
             f"Ep: {episode_count:>4} | "
             f"π: {pg_loss.item():>7.4f} | "
             f"v: {v_loss.item():>6.4f} | "
-            f"H: {entropy.mean().item():>5.3f} | "
+            f"H: {current_entropy:>5.3f} | "
             f"KL: {kl:>6.4f} | "
             f"Clip: {clip_frac:>4.2f}"
+            f"{entropy_status}"
         )
         print(
             f"         Avg R: {avg_reward:>6.1f} | "
@@ -364,6 +393,9 @@ def main() -> None:
     print(f"  Total flags: {total_flags}")
     if total_flags > 0:
         print(f"  Flag rate: {total_flags / episode_count * 100:.1f}%")
+    if collapse_recovery_count > 0:
+        print(f"  Entropy collapses recovered: {collapse_recovery_count}")
+        print(f"  Final entropy coef: {current_ent_coef:.4f} (started at {args.ent_coef:.4f})")
     print("=" * 70)
 
     env.close()
