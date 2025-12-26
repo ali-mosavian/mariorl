@@ -1,0 +1,298 @@
+#!/usr/bin/env python3
+"""
+Distributed DDQN training with async gradient updates.
+
+Workers compute gradients locally and send them to the learner.
+Similar to Gorila DQN / APPO architecture.
+
+Architecture
+============
+
+┌─────────────────────────────────────────────────────────────────────────┐
+│                           MAIN PROCESS                                   │
+│                                                                          │
+│   ┌─────────────────────────────────────────────────────────────────┐   │
+│   │                      Gradient Queue                              │   │
+│   │              (workers → learner, ~2MB per packet)                │   │
+│   └─────────────────────────────────────────────────────────────────┘   │
+│                                                                          │
+└─────────────────────────────────────────────────────────────────────────┘
+          │                    │                    │
+          │                    │                    │
+          ▼                    ▼                    ▼
+   ┌─────────────┐      ┌─────────────┐      ┌─────────────┐
+   │  WORKER 0   │      │  WORKER 1   │      │  WORKER N   │
+   │             │      │             │      │             │
+   │ ε = 0.4^1   │      │ ε = 0.4^2   │      │ ε = 0.4^N   │
+   │             │      │             │      │             │
+   │ 1. Collect  │      │ 1. Collect  │      │ 1. Collect  │
+   │    steps    │      │    steps    │      │    steps    │
+   │             │      │             │      │             │
+   │ 2. Sample   │      │ 2. Sample   │      │ 2. Sample   │
+   │    batch    │      │    batch    │      │    batch    │
+   │             │      │             │      │             │
+   │ 3. Compute  │      │ 3. Compute  │      │ 3. Compute  │
+   │    DQN loss │      │    DQN loss │      │    DQN loss │
+   │             │      │             │      │             │
+   │ 4. Backward │      │ 4. Backward │      │ 4. Backward │
+   │    pass     │      │    pass     │      │    pass     │
+   │             │      │             │      │             │
+   │ 5. Send     │      │ 5. Send     │      │ 5. Send     │
+   │    gradients│      │    gradients│      │    gradients│
+   └──────┬──────┘      └──────┬──────┘      └──────┬──────┘
+          │                    │                    │
+          │     GRADIENT QUEUE (small, ~2MB each)   │
+          └────────────────────┼────────────────────┘
+                               │
+                               ▼
+                    ┌─────────────────────┐
+                    │      LEARNER        │
+                    │                     │
+                    │  1. Receive grads   │
+                    │  2. Accumulate      │
+                    │  3. Average         │
+                    │  4. Clip            │
+                    │  5. Optimizer step  │
+                    │  6. Soft update     │
+                    │  7. Save weights    │
+                    └─────────────────────┘
+
+Comparison with Standard DDQN
+=============================
+
+    Standard DDQN:
+    Single process: collect → store → sample → forward → backward → step
+
+    Distributed DDQN:
+    Worker: collect → sample → forward → backward → send grads (async)
+    Learner: receive grads → accumulate → step → soft update
+
+    Benefits:
+    - ~Nx faster with N workers
+    - Distributed computation (workers do forward+backward)
+    - ~4x less data through IPC (grads ~2MB vs experiences ~8MB)
+    - GPU utilization for training
+    - Diverse exploration (different epsilons per worker)
+
+Usage:
+    uv run mario-train-ddqn-dist --workers 4 --level random
+    uv run mario-train-ddqn-dist --workers 8 --level 1,1 --accumulate-grads 4
+"""
+
+import os
+import sys
+import signal
+from pathlib import Path
+from typing import Literal
+from datetime import datetime
+from multiprocessing import Queue
+from multiprocessing import Process
+
+# Ensure unbuffered output
+os.environ["PYTHONUNBUFFERED"] = "1"
+os.environ["KMP_DUPLICATE_LIB_OK"] = "True"
+
+import click
+
+sys.path.insert(0, str(Path(__file__).parent.parent))
+
+from mario_rl.training.ddqn_worker import run_ddqn_worker
+from mario_rl.training.ddqn_learner import run_ddqn_learner
+
+LevelType = Literal["sequential", "random"] | tuple[int, int]
+
+
+def parse_level(level_str: str) -> LevelType:
+    """Parse level string into LevelType."""
+    if level_str == "random":
+        return "random"
+    elif level_str == "sequential":
+        return "sequential"
+    else:
+        parts = level_str.split(",")
+        if len(parts) == 2:
+            return (int(parts[0]), int(parts[1]))
+        raise ValueError(f"Invalid level format: {level_str}")
+
+
+@click.command()
+@click.option("--workers", "-w", default=4, help="Number of worker processes")
+@click.option("--level", "-l", default="random", help="Level: 'random', 'sequential', or 'W,S'")
+@click.option("--save-dir", default="checkpoints", help="Directory for saving checkpoints")
+# Learning hyperparameters
+@click.option("--lr", default=2.5e-4, help="Initial learning rate")
+@click.option("--lr-end", default=1e-5, help="Final learning rate")
+@click.option("--gamma", default=0.99, help="Discount factor")
+@click.option("--n-step", default=3, help="N-step returns")
+@click.option("--tau", default=0.005, help="Soft update coefficient")
+# Worker settings
+@click.option("--local-buffer-size", default=10_000, help="Local replay buffer per worker")
+@click.option("--batch-size", default=32, help="Training batch size per worker")
+@click.option("--collect-steps", default=64, help="Steps to collect per cycle")
+@click.option("--train-steps", default=4, help="Gradient computations per cycle")
+# Learner settings
+@click.option("--accumulate-grads", default=1, help="Gradients to accumulate before update")
+# Epsilon settings (per worker)
+@click.option("--eps-base", default=0.4, help="Base for per-worker epsilon (ε = base^(1+i/N))")
+@click.option("--eps-decay-steps", default=100_000, help="Steps for epsilon decay per worker")
+# Other
+@click.option("--total-steps", default=2_000_000, help="Total training steps (for LR schedule)")
+@click.option("--max-grad-norm", default=10.0, help="Maximum gradient norm")
+@click.option("--weight-decay", default=1e-4, help="L2 regularization")
+@click.option("--resume", is_flag=True, help="Resume from latest checkpoint")
+def main(
+    workers: int,
+    level: str,
+    save_dir: str,
+    lr: float,
+    lr_end: float,
+    gamma: float,
+    n_step: int,
+    tau: float,
+    local_buffer_size: int,
+    batch_size: int,
+    collect_steps: int,
+    train_steps: int,
+    accumulate_grads: int,
+    eps_base: float,
+    eps_decay_steps: int,
+    total_steps: int,
+    max_grad_norm: float,
+    weight_decay: float,
+    resume: bool,
+) -> None:
+    """Train Mario using Distributed DDQN with async gradient updates."""
+    # Parse level
+    level_type = parse_level(level)
+
+    # Create save directory
+    timestamp = datetime.now().strftime("%Y-%m-%dT%H-%M-%S")
+    run_dir = Path(save_dir) / f"ddqn_dist_{timestamp}"
+
+    # Check for resume
+    if resume:
+        checkpoints = list(Path(save_dir).glob("ddqn_dist_*/weights.pt"))
+        if checkpoints:
+            latest = max(checkpoints, key=lambda p: p.stat().st_mtime)
+            run_dir = latest.parent
+            print(f"Resuming from: {run_dir}")
+
+    run_dir.mkdir(parents=True, exist_ok=True)
+    weights_path = run_dir / "weights.pt"
+    logs_dir = run_dir / "logs"
+    logs_dir.mkdir(exist_ok=True)
+
+    print("=" * 70)
+    print("Distributed DDQN Training (Async Gradients)")
+    print("=" * 70)
+    print(f"  Workers: {workers}")
+    print(f"  Level: {level}")
+    print(f"  Save dir: {run_dir}")
+    print(f"  LR: {lr} → {lr_end} (cosine)")
+    print(f"  Gamma: {gamma}, N-step: {n_step}")
+    print(f"  Tau: {tau}")
+    print(f"  Local buffer: {local_buffer_size:,}, Batch: {batch_size}")
+    print(f"  Collect steps: {collect_steps}, Train steps: {train_steps}")
+    print(f"  Accumulate grads: {accumulate_grads}")
+    print(f"  Per-worker epsilon: {eps_base}^(1+i/N)")
+    print(f"  Total steps: {total_steps:,}")
+    print("=" * 70)
+
+    # Create gradient queue (like APPO)
+    gradient_queue: Queue = Queue(maxsize=workers * 2)
+    ui_queue: Queue | None = None  # UI not implemented for DDQN yet
+
+    # Start worker processes with different epsilons
+    worker_processes = []
+    for i in range(workers):
+        # Each worker has different exploration rate
+        # Worker 0: most exploration, Worker N-1: least exploration
+        worker_eps_end = eps_base ** (1 + (i + 1) / workers)
+
+        p = Process(
+            target=run_ddqn_worker,
+            args=(i, weights_path, gradient_queue),
+            kwargs={
+                "level": level_type,
+                "n_step": n_step,
+                "gamma": gamma,
+                "local_buffer_size": local_buffer_size,
+                "batch_size": batch_size,
+                "steps_per_collection": collect_steps,
+                "train_steps": train_steps,
+                "eps_start": 1.0,
+                "eps_end": worker_eps_end,
+                "eps_decay_steps": eps_decay_steps,
+                "max_grad_norm": max_grad_norm,
+                "ui_queue": ui_queue,
+            },
+            daemon=True,
+        )
+        p.start()
+        worker_processes.append(p)
+        print(f"Started worker {i} (ε_end = {worker_eps_end:.4f})")
+
+    # Start learner process
+    learner_process = Process(
+        target=run_ddqn_learner,
+        args=(weights_path, run_dir, gradient_queue),
+        kwargs={
+            "learning_rate": lr,
+            "lr_end": lr_end,
+            "tau": tau,
+            "max_grad_norm": max_grad_norm,
+            "weight_decay": weight_decay,
+            "accumulate_grads": accumulate_grads,
+            "total_timesteps": total_steps,
+            "ui_queue": ui_queue,
+        },
+        daemon=True,
+    )
+    learner_process.start()
+    print("Started learner")
+
+    # Handle Ctrl+C
+    shutdown_initiated = False
+
+    def signal_handler(signum, frame):
+        nonlocal shutdown_initiated
+        if shutdown_initiated:
+            return
+        shutdown_initiated = True
+
+        print("\nShutting down...")
+
+        # Cancel queue join thread
+        gradient_queue.cancel_join_thread()
+
+        # Terminate all processes
+        for p in worker_processes:
+            if p.is_alive():
+                p.terminate()
+        if learner_process.is_alive():
+            learner_process.terminate()
+
+        # Wait for processes to finish
+        for p in worker_processes:
+            p.join(timeout=1.0)
+        learner_process.join(timeout=1.0)
+
+        # Close queue
+        gradient_queue.close()
+
+        sys.exit(0)
+
+    signal.signal(signal.SIGINT, signal_handler)
+    signal.signal(signal.SIGTERM, signal_handler)
+
+    # Wait for processes
+    try:
+        learner_process.join()
+    except KeyboardInterrupt:
+        signal_handler(None, None)
+
+    print("Training complete!")
+
+
+if __name__ == "__main__":
+    main()

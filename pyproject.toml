@@ -42,6 +42,7 @@ mario-train-ppo-custom = "scripts.train_ppo_custom:main"
 mario-train-appo = "scripts.train_appo:main"
 mario-train-simple = "scripts.train_ppo_simple:main"
 mario-train-ddqn = "scripts.train_ddqn_simple:main"
+mario-train-ddqn-dist = "scripts.train_ddqn_distributed:main"
 mario-watch = "scripts.watch:main"
 
 [build-system]
