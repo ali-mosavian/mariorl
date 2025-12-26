@@ -149,6 +149,7 @@ class APPOLearner:
     optimizer: Any = field(init=False, repr=False)
     update_count: int = field(init=False, default=0)
     total_timesteps_collected: int = field(init=False, default=0)
+    worker_episodes: Dict[int, int] = field(init=False, default_factory=dict)
     weight_version: int = field(init=False, default=0)
     _metrics_csv: Path = field(init=False, repr=False)
 
@@ -296,6 +297,9 @@ class APPOLearner:
         self.gradients_received += num_packets
         for packet in gradient_packets:
             self.total_timesteps_collected += packet["timesteps"]
+            worker_id = packet.get("worker_id", 0)
+            episodes = packet.get("episodes", 0)
+            self.worker_episodes[worker_id] = episodes
 
         # Average metrics from workers
         avg_metrics = {}
@@ -365,12 +369,14 @@ class APPOLearner:
             from mario_rl.training.training_ui import UIMessage
             from mario_rl.training.training_ui import MessageType
 
+            total_episodes = sum(self.worker_episodes.values())
             msg = UIMessage(
                 msg_type=MessageType.PPO_STATUS,
                 source_id=0,
                 data={
                     "step": self.update_count,
                     "timesteps": self.total_timesteps_collected,
+                    "total_episodes": total_episodes,
                     "policy_loss": self.last_policy_loss,
                     "value_loss": self.last_value_loss,
                     "entropy": self.last_entropy,

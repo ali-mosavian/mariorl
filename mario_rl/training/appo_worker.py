@@ -555,6 +555,7 @@ class APPOWorker:
         gradient_packet = {
             "grads": grads,
             "timesteps": len(states),
+            "episodes": self.episode_count,
             "worker_id": self.worker_id,
             "weight_version": self.weight_version,
             "metrics": avg_metrics,

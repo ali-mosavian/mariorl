@@ -433,6 +433,8 @@ class TrainingUI:
         ppo = self.ppo_status
         if ppo:
             step = ppo.get("step", 0)
+            timesteps = ppo.get("timesteps", 0)
+            total_episodes = ppo.get("total_episodes", 0)
             policy_loss = ppo.get("policy_loss", 0.0)
             value_loss = ppo.get("value_loss", 0.0)
             entropy = ppo.get("entropy", 0.0)
@@ -446,9 +448,9 @@ class TrainingUI:
             seconds = int(elapsed % 60)
             time_str = f"{hours:02d}:{minutes:02d}:{seconds:02d}"
 
-            # Main stats line
+            # Main stats line with total steps and episodes
             stdscr.addstr(y + 1, 4, f"Step: {step:,}  ", curses.color_pair(4))
-            stdscr.addstr(f"{steps_per_sec:.1f} sps  Time: {time_str}")
+            stdscr.addstr(f"Steps: {timesteps:,}  Eps: {total_episodes:,}  {steps_per_sec:.1f} gps  Time: {time_str}")
 
             # Loss stats
             stdscr.addstr(y + 2, 4, "Policy Loss: ")
