@@ -395,44 +395,53 @@ class TrainingUI:
         except curses.error:
             pass
 
-        # Draw X-axis labels
+        # Draw X-axis labels (always start from 0)
         try:
             label_y = axis_y + 1
-            # Start label
+            # X-axis always starts at 0, ends at current max
+            start_val = 0
             if x_sampled:
-                start_val = x_sampled[0]
                 end_val = x_sampled[-1]
             else:
-                start_val = 0
                 end_val = len(data)
+            mid_val = end_val // 2
 
-            # Format based on magnitude
-            if end_val >= 1_000_000:
-                start_str = f"{start_val/1_000_000:.1f}M"
-                end_str = f"{end_val/1_000_000:.1f}M"
-            elif end_val >= 1000:
-                start_str = f"{start_val/1000:.0f}k"
-                end_str = f"{end_val/1000:.0f}k"
-            else:
-                start_str = f"{start_val:.0f}"
-                end_str = f"{end_val:.0f}"
+            # Format function based on magnitude
+            def fmt_steps(v: int) -> str:
+                if v >= 1_000_000:
+                    return f"{v/1_000_000:.1f}M"
+                elif v >= 1000:
+                    return f"{v/1000:.0f}k"
+                else:
+                    return f"{v:.0f}"
 
+            start_str = fmt_steps(start_val)
+            mid_str = fmt_steps(mid_val)
+            end_str = fmt_steps(end_val)
+
+            # Draw start, middle, and end labels
             stdscr.addstr(label_y, x + y_axis_width, start_str)
+            mid_x = x + y_axis_width + plot_width // 2 - len(mid_str) // 2
+            stdscr.addstr(label_y, mid_x, mid_str, curses.A_DIM)
             stdscr.addstr(label_y, x + y_axis_width + plot_width - len(end_str), end_str)
-
-            # Center x_label
-            label_x = x + y_axis_width + (plot_width - len(x_label)) // 2
-            stdscr.addstr(label_y, label_x, x_label, curses.A_DIM)
         except curses.error:
             pass
 
-        # Plot the data using dots
-        for col, val in enumerate(sampled):
+        # Plot the data using dots - position X based on actual step values from 0
+        max_step = x_sampled[-1] if x_sampled else len(sampled)
+        for i, val in enumerate(sampled):
             try:
-                # Normalize value to row position
-                normalized = (val - min_val) / range_val if range_val > 0 else 0.5
-                normalized = max(0, min(1, normalized))  # Clamp to [0, 1]
-                row = int((1 - normalized) * (plot_height - 1))
+                # Normalize value to row position (Y)
+                normalized_y = (val - min_val) / range_val if range_val > 0 else 0.5
+                normalized_y = max(0, min(1, normalized_y))  # Clamp to [0, 1]
+                row = int((1 - normalized_y) * (plot_height - 1))
+
+                # Position X based on actual step value (relative to 0)
+                if x_sampled and max_step > 0:
+                    step_val = x_sampled[i]
+                    col = int((step_val / max_step) * (plot_width - 1))
+                else:
+                    col = i
 
                 # Draw the point
                 plot_x = x + y_axis_width + col
