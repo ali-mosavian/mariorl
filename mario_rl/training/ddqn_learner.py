@@ -173,6 +173,7 @@ class DDQNLearner:
     grads_per_sec: float = field(init=False, default=0.0)
     gradients_received: int = field(init=False, default=0)
     _last_time: float = field(init=False, default=0.0)
+    _resumed_from_checkpoint: bool = field(init=False, default=False)
 
     def __post_init__(self):
         """Initialize network and optimizer."""
@@ -219,9 +220,11 @@ class DDQNLearner:
                     self.weight_version = checkpoint.get("version", 0)
                 else:
                     self.net.load_state_dict(checkpoint)
-                print(f"Resumed from checkpoint: {self.weights_path} (v{self.weight_version})")
-            except Exception as e:
-                print(f"Failed to load checkpoint: {e}")
+                # Log will be sent in run() after _log is available
+                self._resumed_from_checkpoint = True
+            except Exception:
+                # Will create new weights
+                self._resumed_from_checkpoint = False
                 self.save_weights()
         else:
             self.save_weights()
@@ -416,6 +419,8 @@ class DDQNLearner:
         """
         self._log(f"DDQN Learner started on {self.device}")
         self._log(f"  LR: {self.learning_rate} → {self.lr_end}, Tau: {self.tau}")
+        if self._resumed_from_checkpoint:
+            self._log(f"  Resumed from v{self.weight_version}")
 
         while max_updates < 0 or self.update_count < max_updates:
             # Collect gradients from workers

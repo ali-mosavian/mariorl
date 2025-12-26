@@ -123,6 +123,52 @@ def run_training_ui(num_workers: int, ui_queue: Queue) -> None:
     ui.run()
 
 
+def run_worker_silent(
+    worker_id: int,
+    weights_path: Path,
+    gradient_queue: Queue,
+    **kwargs,
+) -> None:
+    """Run worker with stdout/stderr suppressed (for UI mode)."""
+    import os
+    import sys
+    import warnings
+
+    # Suppress all warnings
+    warnings.filterwarnings("ignore")
+
+    # Redirect stdout/stderr to /dev/null
+    devnull = open(os.devnull, "w")
+    sys.stdout = devnull
+    sys.stderr = devnull
+
+    # Now run the actual worker
+    run_ddqn_worker(worker_id, weights_path, gradient_queue, **kwargs)
+
+
+def run_learner_silent(
+    weights_path: Path,
+    save_dir: Path,
+    gradient_queue: Queue,
+    **kwargs,
+) -> None:
+    """Run learner with stdout/stderr suppressed (for UI mode)."""
+    import os
+    import sys
+    import warnings
+
+    # Suppress all warnings
+    warnings.filterwarnings("ignore")
+
+    # Redirect stdout/stderr to /dev/null
+    devnull = open(os.devnull, "w")
+    sys.stdout = devnull
+    sys.stderr = devnull
+
+    # Now run the actual learner
+    run_ddqn_learner(weights_path, save_dir, gradient_queue, **kwargs)
+
+
 @click.command()
 @click.option("--workers", "-w", default=4, help="Number of worker processes")
 @click.option("--level", "-l", default="random", help="Level: 'random', 'sequential', or 'W,S'")
@@ -224,6 +270,10 @@ def main(
         )
         ui_process.start()
 
+    # Choose worker/learner targets based on UI mode
+    worker_target = run_worker_silent if not no_ui else run_ddqn_worker
+    learner_target = run_learner_silent if not no_ui else run_ddqn_learner
+
     # Start worker processes with different epsilons
     worker_processes = []
     for i in range(workers):
@@ -232,7 +282,7 @@ def main(
         worker_eps_end = eps_base ** (1 + (i + 1) / workers)
 
         p = Process(
-            target=run_ddqn_worker,
+            target=worker_target,
             args=(i, weights_path, gradient_queue),
             kwargs={
                 "level": level_type,
@@ -257,7 +307,7 @@ def main(
 
     # Start learner process
     learner_process = Process(
-        target=run_ddqn_learner,
+        target=learner_target,
         args=(weights_path, run_dir, gradient_queue),
         kwargs={
             "learning_rate": lr,

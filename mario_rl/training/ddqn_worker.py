@@ -870,7 +870,7 @@ class DDQNWorker:
             self.gradient_queue.put(gradient_packet, timeout=5.0)
             self.gradients_sent += 1
         except Exception as e:
-            print(f"Worker {self.worker_id}: Failed to send gradients: {e}")
+            self._log(f"Failed to send gradients: {e}")
 
         return metrics
 
