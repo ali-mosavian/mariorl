@@ -35,6 +35,7 @@ class PPOBackbone(nn.Module):
 
     Improvements over vanilla:
     - GELU activation (smoother gradients)
+    - Dropout2d between conv layers (drops entire feature maps)
     - LayerNorm after flatten (stabilizes training)
     - Orthogonal initialization (standard for PPO)
     """
@@ -64,17 +65,22 @@ class PPOBackbone(nn.Module):
         self.fc = layer_init(nn.Linear(flat_size, feature_dim))
         self.feature_dim = feature_dim
 
-        # Dropout for regularization (only on FC, not conv)
-        # Small value (0.1) to avoid destabilizing policy
-        self.dropout = nn.Dropout(dropout) if dropout > 0 else nn.Identity()
+        # Dropout for regularization
+        # Dropout2d drops entire feature maps (better for CNNs)
+        # Regular Dropout for FC layers
+        self.dropout_rate = dropout
+        self.conv_dropout = nn.Dropout2d(dropout) if dropout > 0 else nn.Identity()
+        self.fc_dropout = nn.Dropout(dropout) if dropout > 0 else nn.Identity()
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         x = torch.nn.functional.gelu(self.conv1(x))
+        x = self.conv_dropout(x)
         x = torch.nn.functional.gelu(self.conv2(x))
+        x = self.conv_dropout(x)
         x = torch.nn.functional.gelu(self.conv3(x))
         x = x.flatten(1)
         x = self.layer_norm(x)
-        x = self.dropout(x)  # Dropout before FC
+        x = self.fc_dropout(x)  # Dropout before FC
         x = torch.nn.functional.gelu(self.fc(x))
         return x
 
