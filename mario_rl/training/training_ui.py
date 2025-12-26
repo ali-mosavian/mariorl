@@ -468,9 +468,10 @@ class TrainingUI:
 
     def _draw_graphs_section(self, stdscr, y: int, width: int, height: int) -> None:
         """Draw the graphs section with reward and speed plots."""
-        # Header
-        stdscr.addstr(y, 2, "┌─ GRAPHS ", curses.A_BOLD | curses.color_pair(4))
-        stdscr.addstr(y, 12, "─" * (width - 14))
+        # Header with data count
+        data_count = len(self.graph_reward_history)
+        stdscr.addstr(y, 2, f"┌─ GRAPHS ({data_count} pts) ", curses.A_BOLD | curses.color_pair(4))
+        stdscr.addstr(y, 22, "─" * (width - 24))
 
         if not self.graph_reward_history:
             stdscr.addstr(y + 1, 4, "Waiting for data...", curses.A_DIM)
@@ -534,7 +535,7 @@ class TrainingUI:
 
         # Graphs section - show if we have distributed DDQN data and enough height
         has_graph_data = len(self.graph_reward_history) > 2
-        graphs_height = 12 if has_graph_data and height > 50 else 0
+        graphs_height = 12 if has_graph_data and height > 40 else 0
 
         log_height = (
             height
