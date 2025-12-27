@@ -116,7 +116,11 @@ LevelType = Literal["sequential", "random"] | tuple[Literal[1, 2, 3, 4, 5, 6, 7,
 
 
 def create_env(level: LevelType = (1, 1), render_frames: bool = False):
-    """Create wrapped Mario environment."""
+    """Create wrapped Mario environment.
+
+    Returns:
+        Tuple of (env, base_env, fstack) where fstack is the FrameStackObservation wrapper.
+    """
     if render_frames:
         try:
             from pyglet.window import key
@@ -136,8 +140,8 @@ def create_env(level: LevelType = (1, 1), render_frames: bool = False):
         func=lambda x: x / 255.0,
         observation_space=Box(low=0.0, high=1.0, shape=(64, 64, 1), dtype=np.float32),
     )
-    env = FrameStackObservation(env, stack_size=4)
-    return env, base_env
+    fstack = FrameStackObservation(env, stack_size=4)
+    return fstack, base_env, fstack
 
 
 @dataclass
@@ -598,7 +602,9 @@ class DDQNWorker:
     snapshot_slots: int = 10  # Number of rotating snapshot slots
     snapshot_restores: int = field(init=False, default=0)
     _slot_to_time: Dict[int, int] = field(init=False, default_factory=dict)
+    # Snapshot: (observation, frame_stack_queue, nes_state_bytes)
     _slot_to_state: Dict[int, Tuple[np.ndarray, List[np.ndarray], bytes]] = field(init=False, default_factory=dict)
+    _fstack: Any = field(init=False, repr=False)  # Reference to FrameStackObservation wrapper
 
     def __post_init__(self) -> None:
         """Initialize environment, network, and buffer."""
@@ -612,7 +618,7 @@ class DDQNWorker:
                 self.device = "cpu"
 
         # Create environment
-        self.env, self.base_env = create_env(
+        self.env, self.base_env, self._fstack = create_env(
             level=self.level,
             render_frames=self.render_frames,
         )
@@ -735,7 +741,13 @@ class DDQNWorker:
         return int(q_values.argmax(dim=1).item())
 
     def _save_game_snapshot(self, state: np.ndarray, info: dict) -> None:
-        """Save game snapshot at current time checkpoint."""
+        """Save game snapshot at current time checkpoint.
+
+        Saves:
+        - Current observation (state)
+        - Frame stack queue (for proper restoration)
+        - NES emulator state
+        """
         if not self.use_snapshots:
             return
 
@@ -751,12 +763,14 @@ class DDQNWorker:
         slot_id = world_time % self.snapshot_slots
         self._slot_to_time[slot_id] = world_time
 
-        # Save: observation, NES emulator state
+        # Save: observation, frame stack queue, NES emulator state
         try:
             nes_state = self.base_env.env.dump_state()
+            # Save the frame stack queue (deque of individual frames)
+            frame_queue = list(self._fstack.obs_queue) if hasattr(self._fstack, "obs_queue") else []
             self._slot_to_state[slot_id] = (
                 state.copy(),
-                [],  # Reserved for frame stack if needed
+                frame_queue,
                 nes_state.tobytes() if hasattr(nes_state, "tobytes") else bytes(nes_state),
             )
         except Exception:
@@ -765,6 +779,11 @@ class DDQNWorker:
     def _try_restore_game_snapshot(self, info: dict) -> Tuple[np.ndarray, bool]:
         """
         Try to restore from a recent snapshot after death.
+
+        Restores:
+        - NES emulator state
+        - Frame stack queue
+        - Returns saved observation
 
         Returns:
             Tuple of (restored_state, success)
@@ -790,12 +809,19 @@ class DDQNWorker:
         if slot_id is None or slot_id not in self._slot_to_state:
             return np.array([]), False
 
-        saved_state, _, nes_state_bytes = self._slot_to_state[slot_id]
+        saved_state, saved_frames, nes_state_bytes = self._slot_to_state[slot_id]
 
         try:
             # Restore NES emulator state
             nes_state = np.frombuffer(nes_state_bytes, dtype=np.uint8)
             self.base_env.env.load_state(nes_state)
+
+            # Restore frame stack queue
+            if saved_frames and hasattr(self._fstack, "obs_queue"):
+                self._fstack.obs_queue.clear()
+                for frame in saved_frames:
+                    self._fstack.obs_queue.append(frame)
+
             self.snapshot_restores += 1
             return saved_state, True
         except Exception:
