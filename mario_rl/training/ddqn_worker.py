@@ -611,6 +611,9 @@ class DDQNWorker:
     _best_x_at_restore: int = field(init=False, default=0)
     _restores_without_progress: int = field(init=False, default=0)
 
+    # Debug: track when worker last took an action
+    _last_action_time: float = field(init=False, default=0.0)
+
     def __post_init__(self) -> None:
         """Initialize environment, network, and buffer."""
         # Auto-detect best device
@@ -802,22 +805,13 @@ class DDQNWorker:
         if not self.use_snapshots or not self._slot_to_state:
             return np.array([]), False
 
+        # Already at max restores without progress - let episode end
+        if self._restores_without_progress >= self.max_restores_without_progress:
+            return np.array([]), False
+
         game_time = info.get("time", 0)
         checkpoint_time = game_time // self.snapshot_interval
         restore_time = checkpoint_time + 1  # Checkpoint from 1 interval earlier
-
-        # Check if we're making progress
-        if current_best_x > self._best_x_at_restore:
-            # Made progress - reset counter
-            self._restores_without_progress = 0
-            self._best_x_at_restore = current_best_x
-        else:
-            # No progress since last restore
-            self._restores_without_progress += 1
-
-        # If too many restores without progress, let episode end
-        if self._restores_without_progress >= self.max_restores_without_progress:
-            return np.array([]), False
 
         # Only restore if we have the EXACT checkpoint
         time_to_slot = {v: k for k, v in self._slot_to_time.items()}
@@ -843,6 +837,16 @@ class DDQNWorker:
                     self._fstack.obs_queue.append(frame)
 
             self.snapshot_restores += 1
+
+            # Track progress ONLY on successful restore
+            if current_best_x > self._best_x_at_restore:
+                # Made progress since last restore - reset counter
+                self._restores_without_progress = 0
+                self._best_x_at_restore = current_best_x
+            else:
+                # No progress since last restore
+                self._restores_without_progress += 1
+
             return saved_state, True
         except Exception:
             return np.array([]), False
@@ -875,6 +879,7 @@ class DDQNWorker:
             # Step environment
             next_state, reward, terminated, truncated, info = self.env.step(action)
             done = terminated or truncated
+            self._last_action_time = time.time()
 
             # Check for death
             is_dead = info.get("is_dead", False) or info.get("is_dying", False)
@@ -1142,6 +1147,7 @@ class DDQNWorker:
                     "avg_x_at_death": avg_x_at_death,
                     "avg_time_to_flag": avg_time_to_flag,
                     "entropy": avg_entropy,
+                    "last_action_time": self._last_action_time,
                 },
             )
             self.ui_queue.put_nowait(msg)

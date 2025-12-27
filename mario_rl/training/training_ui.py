@@ -909,6 +909,14 @@ class TrainingUI:
             else:
                 stdscr.addstr("  🏁T̄=", curses.A_DIM)
                 stdscr.addstr("---", curses.A_DIM)
+
+            # Show seconds since last action (for stuck detection)
+            last_action_time = ws.get("last_action_time", 0)
+            if last_action_time > 0:
+                idle_secs = int(time.time() - last_action_time)
+                if idle_secs > 5:
+                    # Worker appears stuck
+                    stdscr.addstr(f"  ⚠ idle {idle_secs}s", curses.color_pair(3) | curses.A_BOLD)
         else:
             stdscr.addstr(y + 1, 4, "Starting...", curses.A_DIM)
 
