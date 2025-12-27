@@ -10,75 +10,6 @@ Features
 - N-step returns for better credit assignment
 - Double DQN for reduced overestimation
 - Importance sampling weights for unbiased gradients
-
-Architecture
-============
-
-                    ┌─────────────────────────┐
-                    │    LEARNER (GPU/MPS)    │
-                    │  ┌───────────────────┐  │
-                    │  │  Global Network   │  │
-                    │  │    (weights θ)    │  │
-                    │  └───────────────────┘  │
-                    │           │             │
-                    │  ┌────────▼────────┐    │
-                    │  │    Optimizer    │    │
-                    │  │ (gradient step) │    │
-                    │  └────────┬────────┘    │
-                    │           │             │
-                    │  ┌────────▼────────┐    │
-                    │  │   weights.pt    │    │
-                    └──┴────────┬────────┴────┘
-                                │
-           ┌────────────────────┼────────────────────┐
-           │                    │                    │
-           ▼                    ▼                    ▼
-    ┌─────────────┐      ┌─────────────┐      ┌─────────────┐
-    │  WORKER 0   │      │  WORKER 1   │      │  WORKER N   │
-    │ ┌─────────┐ │      │ ┌─────────┐ │      │ ┌─────────┐ │
-    │ │  Local  │ │      │ │  Local  │ │      │ │  Local  │ │
-    │ │ Network │ │      │ │ Network │ │      │ │ Network │ │
-    │ │ + PER   │ │      │ │ + PER   │ │      │ │ + PER   │ │
-    │ └────┬────┘ │      │ └────┬────┘ │      │ └────┬────┘ │
-    │      │      │      │      │      │      │      │      │
-    │ 1.Collect   │      │ 1.Collect   │      │ 1.Collect   │
-    │   N steps   │      │   N steps   │      │   N steps   │
-    │      │      │      │      │      │      │      │      │
-    │ 2.PER sample│      │ 2.PER sample│      │ 2.PER sample│
-    │   (priority)│      │   (priority)│      │   (priority)│
-    │      │      │      │      │      │      │      │      │
-    │ 3.Compute   │      │ 3.Compute   │      │ 3.Compute   │
-    │   DQN loss  │      │   DQN loss  │      │   DQN loss  │
-    │      │      │      │      │      │      │      │      │
-    │ 4.Update    │      │ 4.Update    │      │ 4.Update    │
-    │  priorities │      │  priorities │      │  priorities │
-    │      │      │      │      │      │      │      │      │
-    │ 5.Backward  │      │ 5.Backward  │      │ 5.Backward  │
-    │   (grads)   │      │   (grads)   │      │   (grads)   │
-    │      │      │      │      │      │      │      │      │
-    └──────┼──────┘      └──────┼──────┘      └──────┼──────┘
-           │                    │                    │
-           │    GRADIENT QUEUE (small ~2MB each)     │
-           └────────────────────┼────────────────────┘
-                                │
-                                ▼
-                          ┌──────────┐
-                          │ LEARNER  │
-                          │ applies  │
-                          │ gradients│
-                          └──────────┘
-
-Data Flow
-=========
-
-Standard DQN:   Worker → [experiences ~8MB] → Learner (compute loss + backward)
-Distributed:    Worker (compute loss + backward) → [gradients ~2MB] → Learner
-
-Benefits:
-- ~4x less data through IPC
-- Distributed computation across worker CPUs/GPUs
-- Reduced learner bottleneck
-- Each worker maintains diverse local buffer with PER
 """
 
 import os
@@ -91,8 +22,6 @@ from typing import Any
 from typing import Dict
 from typing import List
 from pathlib import Path
-from typing import Tuple
-from typing import Literal
 from typing import Optional
 from dataclasses import field
 from dataclasses import dataclass
@@ -100,413 +29,14 @@ from dataclasses import dataclass
 import torch
 import numpy as np
 from torch import nn
-from gymnasium.spaces import Box
-from nes_py.wrappers import JoypadSpace
-from gymnasium.wrappers import GrayscaleObservation
-from gymnasium.wrappers import TransformObservation
-from gymnasium.wrappers import FrameStackObservation
-from gym_super_mario_bros import actions as smb_actions
 
+from mario_rl.buffers import NStepBuffer
+from mario_rl.core.config import LevelType
 from mario_rl.agent.ddqn_net import DoubleDQN
-from mario_rl.environment.wrappers import SkipFrame
-from mario_rl.environment.wrappers import ResizeObservation
-from mario_rl.environment.mariogym import SuperMarioBrosMultiLevel
-
-LevelType = Literal["sequential", "random"] | tuple[Literal[1, 2, 3, 4, 5, 6, 7, 8], Literal[1, 2, 3, 4]]
-
-
-def create_env(level: LevelType = (1, 1), render_frames: bool = False):
-    """Create wrapped Mario environment.
-
-    Returns:
-        Tuple of (env, base_env, fstack) where fstack is the FrameStackObservation wrapper.
-    """
-    if render_frames:
-        try:
-            from pyglet.window import key
-            import nes_py._image_viewer as _iv
-
-            _iv.key = key
-        except Exception:
-            pass
-
-    base_env = SuperMarioBrosMultiLevel(level=level)
-    env = JoypadSpace(base_env, actions=smb_actions.COMPLEX_MOVEMENT)
-    env = SkipFrame(env, skip=4, render_frames=render_frames)
-    env = GrayscaleObservation(env, keep_dim=True)
-    env = ResizeObservation(env, shape=64)
-    env = TransformObservation(
-        env,
-        func=lambda x: x / 255.0,
-        observation_space=Box(low=0.0, high=1.0, shape=(64, 64, 1), dtype=np.float32),
-    )
-    fstack = FrameStackObservation(env, stack_size=4)
-    return fstack, base_env, fstack
-
-
-@dataclass
-class SumTree:
-    """
-    Sum Tree data structure for O(log n) priority sampling.
-
-    A binary tree where each parent is the sum of its children.
-    Leaf nodes store priorities, internal nodes store sums.
-
-    Structure (capacity=4):
-                    [sum]
-                   /     \\
-              [sum]       [sum]
-             /    \\      /    \\
-           [p0]  [p1]  [p2]  [p3]  <- priorities (leaves)
-    """
-
-    capacity: int
-    tree: np.ndarray = field(init=False, repr=False)
-    data_pointer: int = field(init=False, default=0)
-
-    def __post_init__(self) -> None:
-        """Initialize tree array with zeros."""
-        # Tree has 2*capacity - 1 nodes (capacity leaves + capacity-1 internal)
-        self.tree = np.zeros(2 * self.capacity - 1, dtype=np.float64)
-        self.data_pointer = 0
-
-    @property
-    def total(self) -> float:
-        """Return the root node (sum of all priorities)."""
-        return float(self.tree[0])
-
-    def add(self, priority: float) -> int:
-        """
-        Add a new priority and return the leaf index.
-
-        Args:
-            priority: Priority value for the new sample
-
-        Returns:
-            Leaf index where priority was stored
-        """
-        leaf_idx = self.data_pointer + self.capacity - 1
-        self.update(leaf_idx, priority)
-
-        self.data_pointer = (self.data_pointer + 1) % self.capacity
-        return leaf_idx
-
-    def update(self, leaf_idx: int, priority: float) -> None:
-        """
-        Update priority at leaf_idx and propagate change up the tree.
-
-        Args:
-            leaf_idx: Index in the tree array (not data index)
-            priority: New priority value
-        """
-        change = priority - self.tree[leaf_idx]
-        self.tree[leaf_idx] = priority
-
-        # Propagate change up to root
-        parent = leaf_idx
-        while parent != 0:
-            parent = (parent - 1) // 2
-            self.tree[parent] += change
-
-    def get(self, value: float) -> Tuple[int, float, int]:
-        """
-        Find leaf node for a given cumulative value.
-
-        Args:
-            value: Cumulative priority value to search for
-
-        Returns:
-            Tuple of (leaf_idx, priority, data_idx)
-        """
-        parent = 0
-
-        while True:
-            left = 2 * parent + 1
-            right = left + 1
-
-            # Reached leaf
-            if left >= len(self.tree):
-                leaf_idx = parent
-                break
-
-            # Go left or right based on value
-            if value <= self.tree[left]:
-                parent = left
-            else:
-                value -= self.tree[left]
-                parent = right
-
-        data_idx = leaf_idx - self.capacity + 1
-        return leaf_idx, self.tree[leaf_idx], data_idx
-
-
-@dataclass
-class PrioritizedReplayBuffer:
-    """
-    Prioritized Experience Replay buffer using SumTree.
-
-    Samples experiences proportional to their TD-error priority.
-    Uses importance sampling weights to correct for bias.
-
-    Reference: Schaul et al. "Prioritized Experience Replay" (2015)
-    """
-
-    capacity: int
-    obs_shape: Tuple[int, ...]
-    alpha: float = 0.6  # Priority exponent (0 = uniform, 1 = full prioritization)
-    beta_start: float = 0.4  # Initial importance sampling exponent
-    beta_end: float = 1.0  # Final importance sampling exponent
-    epsilon: float = 1e-6  # Small constant to ensure non-zero priorities
-
-    # Storage arrays (initialized in __post_init__)
-    tree: SumTree = field(init=False, repr=False)
-    states: np.ndarray = field(init=False, repr=False)
-    actions: np.ndarray = field(init=False, repr=False)
-    rewards: np.ndarray = field(init=False, repr=False)
-    next_states: np.ndarray = field(init=False, repr=False)
-    dones: np.ndarray = field(init=False, repr=False)
-
-    # Tracking
-    size: int = field(init=False, default=0)
-    max_priority: float = field(init=False, default=1.0)
-    current_beta: float = field(init=False, default=0.4)
-
-    def __post_init__(self) -> None:
-        """Initialize tree and storage arrays."""
-        self.tree = SumTree(capacity=self.capacity)
-        self.states = np.zeros((self.capacity, *self.obs_shape), dtype=np.float32)
-        self.actions = np.zeros(self.capacity, dtype=np.int64)
-        self.rewards = np.zeros(self.capacity, dtype=np.float32)
-        self.next_states = np.zeros((self.capacity, *self.obs_shape), dtype=np.float32)
-        self.dones = np.zeros(self.capacity, dtype=np.float32)
-        self.size = 0
-        self.max_priority = 1.0
-        self.current_beta = self.beta_start
-
-    def add(
-        self,
-        state: np.ndarray,
-        action: int,
-        reward: float,
-        next_state: np.ndarray,
-        done: bool,
-    ) -> None:
-        """
-        Add a transition with max priority (will be updated after first sample).
-
-        Args:
-            state: Current observation
-            action: Action taken
-            reward: Reward received
-            next_state: Next observation
-            done: Whether episode ended
-        """
-        # Get data index from tree pointer
-        data_idx = self.tree.data_pointer
-
-        # Store transition
-        self.states[data_idx] = state
-        self.actions[data_idx] = action
-        self.rewards[data_idx] = reward
-        self.next_states[data_idx] = next_state
-        self.dones[data_idx] = float(done)
-
-        # Add with max priority (ensures new samples are seen at least once)
-        priority = self.max_priority**self.alpha
-        self.tree.add(priority)
-
-        self.size = min(self.size + 1, self.capacity)
-
-    def sample(
-        self,
-        batch_size: int,
-        beta: float | None = None,
-    ) -> Tuple[
-        np.ndarray,
-        np.ndarray,
-        np.ndarray,
-        np.ndarray,
-        np.ndarray,
-        np.ndarray,
-        np.ndarray,
-    ]:
-        """
-        Sample a batch of transitions proportional to their priorities.
-
-        Args:
-            batch_size: Number of transitions to sample
-            beta: Importance sampling exponent (uses current_beta if None)
-
-        Returns:
-            Tuple of (states, actions, rewards, next_states, dones, indices, weights)
-        """
-        if beta is None:
-            beta = self.current_beta
-
-        indices = np.zeros(batch_size, dtype=np.int64)
-        priorities = np.zeros(batch_size, dtype=np.float64)
-        data_indices = np.zeros(batch_size, dtype=np.int64)
-
-        # Divide priority range into segments for stratified sampling
-        total_priority = self.tree.total
-        segment_size = total_priority / batch_size
-
-        for i in range(batch_size):
-            # Sample uniformly within segment
-            low = segment_size * i
-            high = segment_size * (i + 1)
-            value = np.random.uniform(low, high)
-
-            leaf_idx, priority, data_idx = self.tree.get(value)
-            indices[i] = leaf_idx
-            priorities[i] = priority
-            data_indices[i] = data_idx
-
-        # Compute importance sampling weights
-        # w_i = (N * P(i))^(-beta) / max_w
-        probabilities = priorities / total_priority
-        weights = (self.size * probabilities) ** (-beta)
-        weights = weights / weights.max()  # Normalize
-
-        return (
-            self.states[data_indices],
-            self.actions[data_indices],
-            self.rewards[data_indices],
-            self.next_states[data_indices],
-            self.dones[data_indices],
-            indices,
-            weights.astype(np.float32),
-        )
-
-    def update_priorities(
-        self,
-        indices: np.ndarray,
-        td_errors: np.ndarray,
-    ) -> None:
-        """
-        Update priorities based on TD errors.
-
-        Args:
-            indices: Leaf indices from sampling
-            td_errors: Absolute TD errors for each transition
-        """
-        for idx, td_error in zip(indices, td_errors, strict=False):
-            priority = (abs(td_error) + self.epsilon) ** self.alpha
-            self.tree.update(idx, priority)
-            self.max_priority = max(self.max_priority, abs(td_error) + self.epsilon)
-
-    def update_beta(self, progress: float) -> None:
-        """
-        Update beta based on training progress.
-
-        Args:
-            progress: Training progress from 0 to 1
-        """
-        self.current_beta = self.beta_start + progress * (self.beta_end - self.beta_start)
-
-    def __len__(self) -> int:
-        return self.size
-
-
-@dataclass
-class NStepBuffer:
-    """
-    Buffer for computing N-step returns.
-
-    Accumulates transitions and computes discounted N-step rewards.
-    """
-
-    n_step: int
-    gamma: float
-    buffer: List[Tuple[np.ndarray, int, float, np.ndarray, bool]] = field(init=False, default_factory=list)
-
-    def add(
-        self,
-        state: np.ndarray,
-        action: int,
-        reward: float,
-        next_state: np.ndarray,
-        done: bool,
-    ) -> Tuple[np.ndarray, int, float, np.ndarray, bool] | None:
-        """
-        Add transition and return N-step transition if ready.
-
-        Args:
-            state: Current observation
-            action: Action taken
-            reward: Reward received
-            next_state: Next observation
-            done: Whether episode ended
-
-        Returns:
-            N-step transition tuple or None if not enough steps yet
-        """
-        self.buffer.append((state.copy(), action, reward, next_state.copy(), done))
-
-        if len(self.buffer) < self.n_step:
-            return None
-
-        # Compute N-step return
-        n_step_reward = 0.0
-        for i, (_, _, r, _, d) in enumerate(self.buffer):
-            n_step_reward += (self.gamma**i) * r
-            if d:
-                # Episode ended early - use actual final state
-                result = (
-                    self.buffer[0][0],
-                    self.buffer[0][1],
-                    n_step_reward,
-                    self.buffer[i][3],
-                    True,
-                )
-                self.buffer.pop(0)
-                return result
-
-        # Full N-step - use state from N steps ahead
-        result = (
-            self.buffer[0][0],
-            self.buffer[0][1],
-            n_step_reward,
-            self.buffer[-1][3],
-            self.buffer[-1][4],
-        )
-        self.buffer.pop(0)
-        return result
-
-    def flush(self) -> List[Tuple[np.ndarray, int, float, np.ndarray, bool]]:
-        """
-        Flush remaining transitions at episode end.
-
-        Returns:
-            List of remaining N-step transitions
-        """
-        transitions = []
-        while len(self.buffer) > 0:
-            n_step_reward = 0.0
-            last_idx = len(self.buffer) - 1
-
-            for i, (_, _, r, _, d) in enumerate(self.buffer):
-                n_step_reward += (self.gamma**i) * r
-                if d:
-                    last_idx = i
-                    break
-
-            transitions.append(
-                (
-                    self.buffer[0][0],
-                    self.buffer[0][1],
-                    n_step_reward,
-                    self.buffer[last_idx][3],
-                    self.buffer[last_idx][4],
-                )
-            )
-            self.buffer.pop(0)
-
-        return transitions
-
-    def reset(self) -> None:
-        """Clear the buffer."""
-        self.buffer.clear()
+from mario_rl.core.config import SnapshotConfig
+from mario_rl.environment.factory import create_env
+from mario_rl.buffers import PrioritizedReplayBuffer
+from mario_rl.training.snapshot import SnapshotManager
 
 
 @dataclass
@@ -531,10 +61,10 @@ class DDQNWorker:
 
     # Configuration
     level: LevelType = (1, 1)
-    n_step: int = 3  # N-step returns
+    n_step: int = 3
     gamma: float = 0.99
     render_frames: bool = False
-    weight_sync_interval: float = 5.0  # Seconds between weight syncs
+    weight_sync_interval: float = 5.0
 
     # Local buffer settings (PER)
     local_buffer_size: int = 10_000
@@ -543,11 +73,11 @@ class DDQNWorker:
     train_steps: int = 4
 
     # PER hyperparameters
-    per_alpha: float = 0.6  # Priority exponent
-    per_beta_start: float = 0.4  # Initial IS exponent
-    per_beta_end: float = 1.0  # Final IS exponent
+    per_alpha: float = 0.6
+    per_beta_start: float = 0.4
+    per_beta_end: float = 1.0
 
-    # Exploration (different per worker)
+    # Exploration
     eps_start: float = 1.0
     eps_end: float = 0.01
     eps_decay_steps: int = 100_000
@@ -561,13 +91,21 @@ class DDQNWorker:
     # UI
     ui_queue: Optional[mp.Queue] = None
 
-    # Private fields
+    # Snapshots
+    use_snapshots: bool = True
+    snapshot_slots: int = 10
+    snapshot_interval: int = 5
+    max_restores_without_progress: int = 3
+
+    # Private fields (initialized in __post_init__)
     env: Any = field(init=False, repr=False)
     base_env: Any = field(init=False, repr=False)
     net: Any = field(init=False, repr=False)
     buffer: PrioritizedReplayBuffer = field(init=False, repr=False)
     n_step_buffer: NStepBuffer = field(init=False, repr=False)
+    snapshots: Optional[SnapshotManager] = field(init=False, repr=False)
     action_dim: int = field(init=False)
+    _fstack: Any = field(init=False, repr=False)
 
     # Tracking
     episode_count: int = field(init=False, default=0)
@@ -591,35 +129,19 @@ class DDQNWorker:
     x_at_death_history: List[int] = field(init=False, default_factory=list)
     time_to_flag_history: List[int] = field(init=False, default_factory=list)
     speed_history: List[float] = field(init=False, default_factory=list)
-    episode_start_time: int = field(init=False, default=400)  # Mario starts with 400 time
+    episode_start_time: int = field(init=False, default=400)
 
-    # Entropy tracking (softmax entropy over Q-values)
+    # Entropy tracking
     entropy_history: List[float] = field(init=False, default_factory=list)
     last_entropy: float = field(init=False, default=0.0)
 
-    # Game state snapshots (for practicing from checkpoints)
-    use_snapshots: bool = True
-    snapshot_slots: int = 10  # Number of rotating snapshot slots
-    snapshot_interval: int = 5  # Save checkpoint every N seconds of Mario time
-    max_restores_without_progress: int = 3  # End episode after N restores with no x progress
-    snapshot_restores: int = field(init=False, default=0)
-    _slot_to_time: Dict[int, int] = field(init=False, default_factory=dict)
-    # Snapshot: (observation, frame_stack_queue, nes_state_array)
-    _slot_to_state: Dict[int, Tuple[np.ndarray, List[np.ndarray], np.ndarray]] = field(init=False, default_factory=dict)
-    _fstack: Any = field(init=False, repr=False)  # Reference to FrameStackObservation wrapper
-    # Progress tracking for snapshots
-    _best_x_at_restore: int = field(init=False, default=0)
-    _restores_without_progress: int = field(init=False, default=0)
-
-    # Debug: track when worker last took an action
+    # Debug
     _last_action_time: float = field(init=False, default=0.0)
-
-    # Persistent state across collect_steps calls
     _current_state: Optional[np.ndarray] = field(init=False, default=None)
 
     def __post_init__(self) -> None:
         """Initialize environment, network, and buffer."""
-        # Auto-detect best device
+        # Auto-detect device
         if self.device is None:
             if torch.cuda.is_available():
                 self.device = "cuda"
@@ -640,12 +162,9 @@ class DDQNWorker:
         self.net = DoubleDQN(
             input_shape=state_dim,
             num_actions=self.action_dim,
-            feature_dim=512,
-            hidden_dim=256,
-            dropout=0.1,
         ).to(self.device)
 
-        # Create local PER buffer
+        # Create buffers
         self.buffer = PrioritizedReplayBuffer(
             capacity=self.local_buffer_size,
             obs_shape=state_dim,
@@ -653,36 +172,27 @@ class DDQNWorker:
             beta_start=self.per_beta_start,
             beta_end=self.per_beta_end,
         )
-
-        # Create N-step buffer
         self.n_step_buffer = NStepBuffer(n_step=self.n_step, gamma=self.gamma)
-
-        # Compute n-step gamma for TD target
         self.n_step_gamma = self.gamma**self.n_step
 
-        # Initialize tracking
-        self.episode_count = 0
-        self.total_steps = 0
-        self.episode_reward = 0.0
-        self.episode_length = 0
-        self.best_x = 0
-        self.best_x_ever = 0
-        self.flags = 0
-        self.deaths = 0
-        self.reward_history = []
-        self.last_weight_sync = 0.0
-        self.weight_version = 0
-        self.weight_sync_count = 0
-        self.gradients_sent = 0
-        self._last_time = time.time()
-        self.current_epsilon = self.eps_start
+        # Create snapshot manager
+        if self.use_snapshots:
+            snapshot_config = SnapshotConfig(
+                enabled=True,
+                slots=self.snapshot_slots,
+                interval=self.snapshot_interval,
+                max_restores_without_progress=self.max_restores_without_progress,
+            )
+            self.snapshots = SnapshotManager(
+                config=snapshot_config,
+                base_env=self.base_env,
+                fstack=self._fstack,
+            )
+        else:
+            self.snapshots = None
 
-        # Initialize snapshot tracking
-        self._slot_to_time = {}
-        self._slot_to_state = {}
-        self.snapshot_restores = 0
-        self._best_x_at_restore = 0
-        self._restores_without_progress = 0
+        # Initialize timing
+        self._last_time = time.time()
         self._last_action_time = time.time()
 
         # Load initial weights
@@ -695,11 +205,10 @@ class DDQNWorker:
         return state
 
     def _load_weights(self) -> bool:
-        """Load latest weights from disk with retry on failure."""
+        """Load latest weights from disk."""
         if not self.weights_path.exists():
             return False
 
-        # Retry a few times in case learner is writing
         for attempt in range(3):
             try:
                 checkpoint = torch.load(
@@ -712,14 +221,13 @@ class DDQNWorker:
                     self.weight_version = checkpoint.get("version", 0)
                 else:
                     self.net.load_state_dict(checkpoint)
-                # Sync target network with online
                 self.net.sync_target()
                 self.last_weight_sync = time.time()
                 self.weight_sync_count += 1
                 return True
             except Exception:
                 if attempt < 2:
-                    time.sleep(0.1)  # Brief delay before retry
+                    time.sleep(0.1)
                 continue
         return False
 
@@ -745,145 +253,31 @@ class DDQNWorker:
         state_tensor = torch.from_numpy(np.expand_dims(state, 0)).float().to(self.device)
         q_values = self.net.online(state_tensor)
 
-        # Compute entropy of softmax over Q-values (measures action certainty)
-        # Temperature scaling for meaningful entropy
-        probs = torch.softmax(q_values / 0.5, dim=1)  # temp=0.5 for smoother distribution
+        # Compute entropy
+        probs = torch.softmax(q_values / 0.5, dim=1)
         log_probs = torch.log(probs + 1e-8)
         entropy = -(probs * log_probs).sum(dim=1).item()
         self.last_entropy = entropy
 
         return int(q_values.argmax(dim=1).item())
 
-    def _save_game_snapshot(self, state: np.ndarray, info: dict) -> None:
-        """Save game snapshot at current time checkpoint.
-
-        Saves checkpoints every snapshot_interval seconds of Mario time.
-        - Current observation (state)
-        - Frame stack queue (for proper restoration)
-        - NES emulator state
-        """
-        if not self.use_snapshots:
-            return
-
-        game_time = info.get("time", 0)
-        # Checkpoint every snapshot_interval seconds (default 5s)
-        checkpoint_time = game_time // self.snapshot_interval
-
-        # Only save at new checkpoint times (not already saved)
-        time_to_slot = {v: k for k, v in self._slot_to_time.items()}
-        if checkpoint_time in time_to_slot or checkpoint_time <= 0:
-            return
-
-        # Use rotating slots
-        slot_id = checkpoint_time % self.snapshot_slots
-        self._slot_to_time[slot_id] = checkpoint_time
-
-        # Save: observation, frame stack queue, NES emulator state
-        try:
-            # Get NES state directly as numpy array (like MadMario does)
-            nes_state = self.base_env.env.dump_state()
-
-            # Save COPIES of frame stack queue (deque contains references that get mutated)
-            frame_queue = []
-            if hasattr(self._fstack, "obs_queue"):
-                frame_queue = [np.array(f, copy=True) for f in self._fstack.obs_queue]
-
-            self._slot_to_state[slot_id] = (
-                np.array(state, copy=True),
-                frame_queue,
-                nes_state,  # Store numpy array directly
-            )
-        except Exception:
-            pass  # Silently fail if can't save
-
-    def _try_restore_game_snapshot(self, info: dict, current_best_x: int) -> Tuple[np.ndarray, bool]:
-        """
-        Try to restore from a recent snapshot after death.
-
-        Only restores if:
-        1. We have a checkpoint from 1 interval earlier
-        2. We haven't exceeded max_restores_without_progress
-
-        Args:
-            info: Environment info dict
-            current_best_x: Current best x position in this episode
-
-        Returns:
-            Tuple of (restored_state, success)
-        """
-        if not self.use_snapshots or not self._slot_to_state:
-            return np.array([]), False
-
-        # Already at max restores without progress - let episode end
-        if self._restores_without_progress >= self.max_restores_without_progress:
-            return np.array([]), False
-
-        game_time = info.get("time", 0)
-        checkpoint_time = game_time // self.snapshot_interval
-        restore_time = checkpoint_time + 1  # Checkpoint from 1 interval earlier
-
-        # Only restore if we have the EXACT checkpoint
-        time_to_slot = {v: k for k, v in self._slot_to_time.items()}
-        if restore_time not in time_to_slot:
-            # Don't have a checkpoint far enough back - let episode end normally
-            return np.array([]), False
-
-        slot_id = time_to_slot[restore_time]
-        if slot_id not in self._slot_to_state:
-            return np.array([]), False
-
-        saved_state, saved_frames, nes_state = self._slot_to_state[slot_id]
-
-        try:
-            # Restore frame stack queue FIRST (like MadMario does)
-            if saved_frames and hasattr(self._fstack, "obs_queue"):
-                self._fstack.obs_queue.clear()
-                for frame in saved_frames:
-                    self._fstack.obs_queue.append(frame)
-
-            # Then restore NES emulator state
-            self.base_env.env.load_state(nes_state)
-
-            self.snapshot_restores += 1
-
-            # Track progress ONLY on successful restore
-            if current_best_x > self._best_x_at_restore:
-                # Made progress since last restore - reset counter
-                self._restores_without_progress = 0
-                self._best_x_at_restore = current_best_x
-            else:
-                # No progress since last restore
-                self._restores_without_progress += 1
-
-            return saved_state, True
-        except Exception:
-            return np.array([]), False
-
     def collect_steps(self, num_steps: int) -> int:
-        """
-        Collect experiences for num_steps and store in local PER buffer.
-
-        Returns number of episodes completed.
-        """
+        """Collect experiences for num_steps and store in local PER buffer."""
         episodes_completed = 0
 
-        # Get current state (reset only if we don't have one)
-        if not hasattr(self, "_current_state") or self._current_state is None:
+        # Get current state
+        if self._current_state is None:
             state, _ = self.env.reset()
             self._current_state = state
-            # Clear snapshots and progress tracking on new episode
-            self._slot_to_time.clear()
-            self._slot_to_state.clear()
-            self._best_x_at_restore = 0
-            self._restores_without_progress = 0
+            if self.snapshots:
+                self.snapshots.reset()
         else:
             state = self._current_state
 
         for _ in range(num_steps):
-            # Get action (also computes entropy)
             action = self._get_action(state)
 
-            # Track entropy periodically
+            # Track entropy
             if self.total_steps % 10 == 0:
                 self.entropy_history.append(self.last_entropy)
                 if len(self.entropy_history) > 100:
@@ -894,14 +288,13 @@ class DDQNWorker:
             done = terminated or truncated
             self._last_action_time = time.time()
 
-            # Check for death
             is_dead = info.get("is_dead", False) or info.get("is_dying", False)
 
-            # Preprocess states
+            # Process states
             state_processed = self._preprocess_state(state)
             next_state_processed = self._preprocess_state(next_state)
 
-            # Add to N-step buffer and get N-step transition
+            # Add to buffers
             n_step_transition = self.n_step_buffer.add(state_processed, action, reward, next_state_processed, done)
             if n_step_transition is not None:
                 self.buffer.add(*n_step_transition)
@@ -920,53 +313,47 @@ class DDQNWorker:
             if info.get("flag_get", False):
                 self.flags += 1
 
-            # Update PER beta based on progress
+            # Update PER beta
             progress = min(1.0, self.total_steps / self.eps_decay_steps)
             self.buffer.update_beta(progress)
 
-            # Send UI status periodically
+            # Send UI status
             if self.total_steps % 50 == 0:
                 self._send_ui_status(info)
 
-            # Save game snapshot at new time checkpoints
-            self._save_game_snapshot(state, info)
+            # Save snapshot
+            if self.snapshots:
+                self.snapshots.maybe_save(state, info)
 
-            # Try to restore from snapshot on death (instead of full reset)
-            if is_dead and self.use_snapshots:
+            # Try restore on death
+            if is_dead and self.snapshots:
                 game_time = info.get("time", 0)
                 checkpoint_time = game_time // self.snapshot_interval
-
-                # Only restore if we have snapshots and not too early in the level
-                # (checkpoint_time > 3 means at least 15+ seconds into the level with 5s intervals)
                 if checkpoint_time > 3:
-                    restored_state, restored = self._try_restore_game_snapshot(info, self.best_x)
+                    restored_state, restored = self.snapshots.try_restore(info, self.best_x)
                     if restored:
-                        # Track death
                         self.deaths += 1
                         self.x_at_death_history.append(x_pos)
                         if len(self.x_at_death_history) > 20:
                             self.x_at_death_history.pop(0)
-
-                        # Flush N-step buffer (interrupted episode)
                         self.n_step_buffer.reset()
-
                         state = restored_state
                         self._current_state = state
-                        continue  # Skip to next step without resetting episode
+                        continue
 
             if done:
-                # Flush remaining N-step transitions
+                # Flush N-step buffer
                 for transition in self.n_step_buffer.flush():
                     self.buffer.add(*transition)
 
-                # Track episode stats
+                # Track stats
                 self.episode_count += 1
                 episodes_completed += 1
                 self.reward_history.append(self.episode_reward)
                 if len(self.reward_history) > 100:
                     self.reward_history.pop(0)
 
-                # Calculate speed (x_pos / time_elapsed)
+                # Calculate speed
                 game_time = info.get("time", 0)
                 time_elapsed = self.episode_start_time - game_time
                 if time_elapsed > 0:
@@ -975,10 +362,8 @@ class DDQNWorker:
                     if len(self.speed_history) > 20:
                         self.speed_history.pop(0)
 
-                # Track death/flag metrics
-                flag_get = info.get("flag_get", False)
-
-                if flag_get:
+                # Track death/flag
+                if info.get("flag_get", False):
                     self.time_to_flag_history.append(game_time)
                     if len(self.time_to_flag_history) > 20:
                         self.time_to_flag_history.pop(0)
@@ -990,43 +375,27 @@ class DDQNWorker:
 
                 self._send_ui_status(info)
 
-                # Reset and clear snapshots for new episode
+                # Reset for new episode
                 state, _ = self.env.reset()
                 self._current_state = state
-                self._slot_to_time.clear()
-                self._slot_to_state.clear()
-                self._best_x_at_restore = 0
-                self._restores_without_progress = 0
+                if self.snapshots:
+                    self.snapshots.reset()
                 self.episode_reward = 0.0
                 self.episode_length = 0
                 self.best_x = 0
             else:
                 state = next_state
 
-        # Save state for next collect_steps call
         self._current_state = state
         return episodes_completed
 
     def compute_and_send_gradients(self) -> Dict[str, float]:
-        """
-        Sample from local PER buffer, compute DQN loss, update priorities,
-        and send gradients to learner.
-
-        Returns metrics dictionary.
-        """
+        """Sample from PER buffer, compute loss, and send gradients."""
         if len(self.buffer) < self.batch_size:
             return {}
 
-        # Sample batch from PER buffer
-        (
-            states,
-            actions,
-            rewards,
-            next_states,
-            dones,
-            indices,
-            weights,
-        ) = self.buffer.sample(self.batch_size)
+        # Sample batch
+        states, actions, rewards, next_states, dones, indices, weights = self.buffer.sample(self.batch_size)
 
         # Convert to tensors
         states_t = torch.from_numpy(states).to(self.device)
@@ -1038,12 +407,9 @@ class DDQNWorker:
 
         # Compute Double DQN loss
         self.net.train()
-
-        # Current Q-values
         current_q = self.net.online(states_t)
         current_q_selected = current_q.gather(1, actions_t.unsqueeze(1)).squeeze(1)
 
-        # Double DQN target
         with torch.no_grad():
             next_q_online = self.net.online(next_states_t)
             best_actions = next_q_online.argmax(dim=1)
@@ -1051,31 +417,26 @@ class DDQNWorker:
             next_q_selected = next_q_target.gather(1, best_actions.unsqueeze(1)).squeeze(1)
             target_q = rewards_t + self.n_step_gamma * next_q_selected * (1.0 - dones_t)
 
-        # Compute TD errors for priority update
         td_errors = (current_q_selected - target_q).detach()
-
-        # Weighted Huber loss (importance sampling)
         element_wise_loss = torch.nn.functional.huber_loss(current_q_selected, target_q, reduction="none", delta=1.0)
         loss = (weights_t * element_wise_loss).mean()
 
         # Backward
         self.net.online.zero_grad()
         loss.backward()
-
-        # Clip gradients
         nn.utils.clip_grad_norm_(self.net.online.parameters(), self.max_grad_norm)
 
-        # Update priorities in PER buffer
+        # Update priorities
         self.buffer.update_priorities(indices, td_errors.abs().cpu().numpy())
 
-        # Extract gradients (move to CPU for IPC)
+        # Extract gradients
         grads = {
             name: param.grad.cpu().clone()
             for name, param in self.net.online.named_parameters()
             if param.grad is not None
         }
 
-        # Metrics (include aggregated worker stats for learner)
+        # Metrics
         rolling_avg_reward = np.mean(self.reward_history) if self.reward_history else 0.0
         avg_speed = np.mean(self.speed_history) if self.speed_history else 0.0
         avg_entropy = np.mean(self.entropy_history) if self.entropy_history else 0.0
@@ -1086,7 +447,6 @@ class DDQNWorker:
             "td_error": td_errors.abs().mean().item(),
             "per_beta": self.buffer.current_beta,
             "entropy": avg_entropy,
-            # Aggregated worker stats for learner graphs
             "avg_reward": rolling_avg_reward,
             "avg_speed": avg_speed,
             "total_deaths": self.deaths,
@@ -1094,7 +454,7 @@ class DDQNWorker:
             "best_x_ever": self.best_x_ever,
         }
 
-        # Send gradients to learner
+        # Send gradients
         gradient_packet = {
             "grads": grads,
             "timesteps": self.batch_size,
@@ -1105,11 +465,9 @@ class DDQNWorker:
         }
 
         try:
-            # Short timeout to avoid blocking workers too long
             self.gradient_queue.put(gradient_packet, timeout=0.5)
             self.gradients_sent += 1
         except Exception:
-            # Queue full - skip this gradient to avoid blocking
             pass
 
         return metrics
@@ -1125,13 +483,14 @@ class DDQNWorker:
 
             rolling_avg = np.mean(self.reward_history) if self.reward_history else 0.0
             level_str = self.base_env.current_level
-
-            # Compute average metrics
             avg_speed = np.mean(self.speed_history) if self.speed_history else 0.0
             avg_x_at_death = np.mean(self.x_at_death_history) if self.x_at_death_history else 0.0
             avg_time_to_flag = np.mean(self.time_to_flag_history) if self.time_to_flag_history else 0.0
-
             avg_entropy = np.mean(self.entropy_history) if self.entropy_history else 0.0
+
+            snapshot_restores = self.snapshots.restore_count if self.snapshots else 0
+            restores_without_progress = self.snapshots.restores_without_progress if self.snapshots else 0
+            max_restores = self.snapshots.max_restores if self.snapshots else 3
 
             msg = UIMessage(
                 msg_type=MessageType.WORKER_STATUS,
@@ -1153,15 +512,14 @@ class DDQNWorker:
                     "weight_sync_count": self.weight_sync_count,
                     "gradients_sent": self.gradients_sent,
                     "steps_per_sec": self.steps_per_sec,
-                    "snapshot_restores": self.snapshot_restores,
-                    "restores_without_progress": self._restores_without_progress,
-                    "max_restores": self.max_restores_without_progress,
+                    "snapshot_restores": snapshot_restores,
+                    "restores_without_progress": restores_without_progress,
+                    "max_restores": max_restores,
                     "current_level": level_str,
                     "last_weight_sync": self.last_weight_sync,
                     "rolling_avg_reward": rolling_avg,
                     "first_flag_time": avg_time_to_flag,
                     "per_beta": self.buffer.current_beta,
-                    # Additional metrics
                     "avg_speed": avg_speed,
                     "avg_x_at_death": avg_x_at_death,
                     "avg_time_to_flag": avg_time_to_flag,
@@ -1187,22 +545,21 @@ class DDQNWorker:
                 )
                 self.ui_queue.put_nowait(msg)
             except Exception:
-                pass
+                print(f"[W{self.worker_id}] {text}")
         else:
-            print(text)
+            print(f"[W{self.worker_id}] {text}")
 
     def run(self) -> None:
-        """Main worker loop."""
+        """Main training loop."""
         self._log(
-            f"Worker {self.worker_id} started "
-            f"(level={self.level}, device={self.device}, ε_end={self.eps_end:.4f}, PER)"
+            f"Worker {self.worker_id} started (level={self.level}, "
+            f"device={self.device}, ε_end={self.eps_end:.4f}, PER)"
         )
 
         loop_count = 0
         while True:
             loop_count += 1
 
-            # Log every 100 loops to confirm workers are alive (print directly for reliability)
             if loop_count % 100 == 1:
                 import sys
 
@@ -1212,19 +569,14 @@ class DDQNWorker:
                     flush=True,
                 )
 
-            # Maybe sync weights from learner
             self._maybe_sync_weights()
-
-            # Collect experiences
             self.collect_steps(self.steps_per_collection)
 
-            # Calculate speed
             now = time.time()
             elapsed = now - self._last_time
             self.steps_per_sec = self.steps_per_collection / elapsed if elapsed > 0 else 0
             self._last_time = now
 
-            # Compute gradients and send to learner
             if len(self.buffer) >= self.batch_size:
                 for _ in range(self.train_steps):
                     self.compute_and_send_gradients()
@@ -1253,7 +605,6 @@ def run_ddqn_worker(
         import sys
         import traceback
 
-        # Try to log to UI queue
         if ui_queue is not None:
             try:
                 from mario_rl.training.training_ui import UIMessage
@@ -1269,7 +620,6 @@ def run_ddqn_worker(
             except Exception:
                 pass
 
-        # Also print to stderr (might be visible without UI)
         print(f"[W{worker_id}] CRASH: {e}", file=sys.stderr, flush=True)
         traceback.print_exc(file=sys.stderr)
         raise
