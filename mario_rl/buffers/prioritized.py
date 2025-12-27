@@ -13,6 +13,8 @@ from dataclasses import dataclass
 
 import numpy as np
 
+from mario_rl.core.types import PERBatch
+from mario_rl.core.types import Transition
 from mario_rl.buffers.sum_tree import SumTree
 
 
@@ -57,33 +59,22 @@ class PrioritizedReplayBuffer:
         self.max_priority = 1.0
         self.current_beta = self.beta_start
 
-    def add(
-        self,
-        state: np.ndarray,
-        action: int,
-        reward: float,
-        next_state: np.ndarray,
-        done: bool,
-    ) -> None:
+    def add(self, transition: Transition) -> None:
         """
         Add a transition with max priority (will be updated after first sample).
 
         Args:
-            state: Current observation
-            action: Action taken
-            reward: Reward received
-            next_state: Next observation
-            done: Whether episode ended
+            transition: The experience transition to store
         """
         # Get data index from tree pointer
         data_idx = self.tree.data_pointer
 
         # Store transition
-        self.states[data_idx] = state
-        self.actions[data_idx] = action
-        self.rewards[data_idx] = reward
-        self.next_states[data_idx] = next_state
-        self.dones[data_idx] = float(done)
+        self.states[data_idx] = transition.state
+        self.actions[data_idx] = transition.action
+        self.rewards[data_idx] = transition.reward
+        self.next_states[data_idx] = transition.next_state
+        self.dones[data_idx] = float(transition.done)
 
         # Add with max priority (ensures new samples are seen at least once)
         priority = self.max_priority**self.alpha
@@ -91,19 +82,7 @@ class PrioritizedReplayBuffer:
 
         self.size = min(self.size + 1, self.capacity)
 
-    def sample(
-        self,
-        batch_size: int,
-        beta: float | None = None,
-    ) -> Tuple[
-        np.ndarray,
-        np.ndarray,
-        np.ndarray,
-        np.ndarray,
-        np.ndarray,
-        np.ndarray,
-        np.ndarray,
-    ]:
+    def sample(self, batch_size: int, beta: float | None = None) -> PERBatch:
         """
         Sample a batch of transitions proportional to their priorities.
 
@@ -112,7 +91,7 @@ class PrioritizedReplayBuffer:
             beta: Importance sampling exponent (uses current_beta if None)
 
         Returns:
-            Tuple of (states, actions, rewards, next_states, dones, indices, weights)
+            PERBatch with states, actions, rewards, next_states, dones, indices, weights
         """
         if beta is None:
             beta = self.current_beta
@@ -131,10 +110,10 @@ class PrioritizedReplayBuffer:
             high = segment_size * (i + 1)
             value = np.random.uniform(low, high)
 
-            leaf_idx, priority, data_idx = self.tree.get(value)
-            indices[i] = leaf_idx
-            priorities[i] = priority
-            data_indices[i] = data_idx
+            node = self.tree.get(value)
+            indices[i] = node.leaf_idx
+            priorities[i] = node.priority
+            data_indices[i] = node.data_idx
 
         # Compute importance sampling weights
         # w_i = (N * P(i))^(-beta) / max_w
@@ -142,21 +121,17 @@ class PrioritizedReplayBuffer:
         weights = (self.size * probabilities) ** (-beta)
         weights = weights / weights.max()  # Normalize
 
-        return (
-            self.states[data_indices],
-            self.actions[data_indices],
-            self.rewards[data_indices],
-            self.next_states[data_indices],
-            self.dones[data_indices],
-            indices,
-            weights.astype(np.float32),
+        return PERBatch(
+            states=self.states[data_indices],
+            actions=self.actions[data_indices],
+            rewards=self.rewards[data_indices],
+            next_states=self.next_states[data_indices],
+            dones=self.dones[data_indices],
+            indices=indices,
+            weights=weights.astype(np.float32),
         )
 
-    def update_priorities(
-        self,
-        indices: np.ndarray,
-        td_errors: np.ndarray,
-    ) -> None:
+    def update_priorities(self, indices: np.ndarray, td_errors: np.ndarray) -> None:
         """
         Update priorities based on TD errors.
 

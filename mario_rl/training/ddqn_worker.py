@@ -20,7 +20,6 @@ os.environ["KMP_DUPLICATE_LIB_OK"] = "True"
 
 from typing import Any
 from typing import Dict
-from typing import List
 from pathlib import Path
 from typing import Optional
 from dataclasses import field
@@ -32,8 +31,12 @@ from torch import nn
 
 from mario_rl.buffers import NStepBuffer
 from mario_rl.core.config import LevelType
+from mario_rl.core.types import Transition
 from mario_rl.agent.ddqn_net import DoubleDQN
+from mario_rl.core.device import detect_device
+from mario_rl.core.episode import EpisodeState
 from mario_rl.core.config import SnapshotConfig
+from mario_rl.core.metrics import MetricsTracker
 from mario_rl.environment.factory import create_env
 from mario_rl.buffers import PrioritizedReplayBuffer
 from mario_rl.training.snapshot import SnapshotManager
@@ -97,7 +100,7 @@ class DDQNWorker:
     snapshot_interval: int = 5
     max_restores_without_progress: int = 3
 
-    # Private fields (initialized in __post_init__)
+    # Components (initialized in __post_init__)
     env: Any = field(init=False, repr=False)
     base_env: Any = field(init=False, repr=False)
     net: Any = field(init=False, repr=False)
@@ -107,35 +110,17 @@ class DDQNWorker:
     action_dim: int = field(init=False)
     _fstack: Any = field(init=False, repr=False)
 
-    # Tracking
-    episode_count: int = field(init=False, default=0)
-    total_steps: int = field(init=False, default=0)
-    episode_reward: float = field(init=False, default=0.0)
-    episode_length: int = field(init=False, default=0)
-    best_x: int = field(init=False, default=0)
-    best_x_ever: int = field(init=False, default=0)
-    flags: int = field(init=False, default=0)
-    deaths: int = field(init=False, default=0)
-    reward_history: List[float] = field(init=False, default_factory=list)
+    # State tracking (extracted to dataclasses)
+    metrics: MetricsTracker = field(init=False)
+    episode: EpisodeState = field(init=False)
+
+    # Remaining state
     last_weight_sync: float = field(init=False, default=0.0)
     weight_version: int = field(init=False, default=0)
-    weight_sync_count: int = field(init=False, default=0)
-    gradients_sent: int = field(init=False, default=0)
     steps_per_sec: float = field(init=False, default=0.0)
     _last_time: float = field(init=False, default=0.0)
     current_epsilon: float = field(init=False, default=1.0)
-
-    # Additional metrics
-    x_at_death_history: List[int] = field(init=False, default_factory=list)
-    time_to_flag_history: List[int] = field(init=False, default_factory=list)
-    speed_history: List[float] = field(init=False, default_factory=list)
-    episode_start_time: int = field(init=False, default=400)
-
-    # Entropy tracking
-    entropy_history: List[float] = field(init=False, default_factory=list)
     last_entropy: float = field(init=False, default=0.0)
-
-    # Debug
     _last_action_time: float = field(init=False, default=0.0)
     _current_state: Optional[np.ndarray] = field(init=False, default=None)
 
@@ -143,12 +128,7 @@ class DDQNWorker:
         """Initialize environment, network, and buffer."""
         # Auto-detect device
         if self.device is None:
-            if torch.cuda.is_available():
-                self.device = "cuda"
-            elif torch.backends.mps.is_available():
-                self.device = "mps"
-            else:
-                self.device = "cpu"
+            self.device = detect_device()
 
         # Create environment
         self.env, self.base_env, self._fstack = create_env(
@@ -191,6 +171,10 @@ class DDQNWorker:
         else:
             self.snapshots = None
 
+        # Initialize state trackers
+        self.metrics = MetricsTracker()
+        self.episode = EpisodeState()
+
         # Initialize timing
         self._last_time = time.time()
         self._last_action_time = time.time()
@@ -223,7 +207,7 @@ class DDQNWorker:
                     self.net.load_state_dict(checkpoint)
                 self.net.sync_target()
                 self.last_weight_sync = time.time()
-                self.weight_sync_count += 1
+                self.metrics.weight_sync_count += 1
                 return True
             except Exception:
                 if attempt < 2:
@@ -238,7 +222,7 @@ class DDQNWorker:
 
     def _get_epsilon(self) -> float:
         """Get current epsilon based on decay schedule."""
-        progress = min(1.0, self.total_steps / self.eps_decay_steps)
+        progress = min(1.0, self.metrics.total_steps / self.eps_decay_steps)
         return self.eps_start + (self.eps_end - self.eps_start) * progress
 
     @torch.no_grad()
@@ -278,10 +262,8 @@ class DDQNWorker:
             action = self._get_action(state)
 
             # Track entropy
-            if self.total_steps % 10 == 0:
-                self.entropy_history.append(self.last_entropy)
-                if len(self.entropy_history) > 100:
-                    self.entropy_history.pop(0)
+            if self.metrics.total_steps % 10 == 0:
+                self.metrics.add_entropy(self.last_entropy)
 
             # Step environment
             next_state, reward, terminated, truncated, info = self.env.step(action)
@@ -294,31 +276,33 @@ class DDQNWorker:
             state_processed = self._preprocess_state(state)
             next_state_processed = self._preprocess_state(next_state)
 
-            # Add to buffers
-            n_step_transition = self.n_step_buffer.add(state_processed, action, reward, next_state_processed, done)
+            # Add to buffers using Transition
+            transition = Transition(
+                state=state_processed,
+                action=action,
+                reward=reward,
+                next_state=next_state_processed,
+                done=done,
+            )
+            n_step_transition = self.n_step_buffer.add(transition)
             if n_step_transition is not None:
-                self.buffer.add(*n_step_transition)
+                self.buffer.add(n_step_transition)
 
             # Update tracking
-            self.episode_reward += reward
-            self.episode_length += 1
-            self.total_steps += 1
-
             x_pos = info.get("x_pos", 0)
-            if x_pos > self.best_x:
-                self.best_x = x_pos
-            if x_pos > self.best_x_ever:
-                self.best_x_ever = x_pos
+            self.episode.step(reward, x_pos)
+            self.metrics.total_steps += 1
+            self.metrics.update_best_x(x_pos)
 
             if info.get("flag_get", False):
-                self.flags += 1
+                self.metrics.flags += 1
 
             # Update PER beta
-            progress = min(1.0, self.total_steps / self.eps_decay_steps)
+            progress = min(1.0, self.metrics.total_steps / self.eps_decay_steps)
             self.buffer.update_beta(progress)
 
             # Send UI status
-            if self.total_steps % 50 == 0:
+            if self.metrics.total_steps % 50 == 0:
                 self._send_ui_status(info)
 
             # Save snapshot
@@ -330,12 +314,9 @@ class DDQNWorker:
                 game_time = info.get("time", 0)
                 checkpoint_time = game_time // self.snapshot_interval
                 if checkpoint_time > 3:
-                    restored_state, restored = self.snapshots.try_restore(info, self.best_x)
+                    restored_state, restored = self.snapshots.try_restore(info, self.episode.best_x)
                     if restored:
-                        self.deaths += 1
-                        self.x_at_death_history.append(x_pos)
-                        if len(self.x_at_death_history) > 20:
-                            self.x_at_death_history.pop(0)
+                        self.metrics.add_death(x_pos)
                         self.n_step_buffer.reset()
                         state = restored_state
                         self._current_state = state
@@ -343,35 +324,26 @@ class DDQNWorker:
 
             if done:
                 # Flush N-step buffer
-                for transition in self.n_step_buffer.flush():
-                    self.buffer.add(*transition)
+                for trans in self.n_step_buffer.flush():
+                    self.buffer.add(trans)
 
                 # Track stats
-                self.episode_count += 1
+                self.metrics.episode_count += 1
                 episodes_completed += 1
-                self.reward_history.append(self.episode_reward)
-                if len(self.reward_history) > 100:
-                    self.reward_history.pop(0)
+                self.metrics.add_reward(self.episode.reward)
 
                 # Calculate speed
                 game_time = info.get("time", 0)
-                time_elapsed = self.episode_start_time - game_time
+                time_elapsed = self.episode.start_time - game_time
                 if time_elapsed > 0:
                     speed = x_pos / time_elapsed
-                    self.speed_history.append(speed)
-                    if len(self.speed_history) > 20:
-                        self.speed_history.pop(0)
+                    self.metrics.add_speed(speed)
 
                 # Track death/flag
                 if info.get("flag_get", False):
-                    self.time_to_flag_history.append(game_time)
-                    if len(self.time_to_flag_history) > 20:
-                        self.time_to_flag_history.pop(0)
+                    self.metrics.add_flag(game_time)
                 elif is_dead:
-                    self.deaths += 1
-                    self.x_at_death_history.append(x_pos)
-                    if len(self.x_at_death_history) > 20:
-                        self.x_at_death_history.pop(0)
+                    self.metrics.add_death(x_pos)
 
                 self._send_ui_status(info)
 
@@ -380,9 +352,7 @@ class DDQNWorker:
                 self._current_state = state
                 if self.snapshots:
                     self.snapshots.reset()
-                self.episode_reward = 0.0
-                self.episode_length = 0
-                self.best_x = 0
+                self.episode.reset()
             else:
                 state = next_state
 
@@ -394,16 +364,16 @@ class DDQNWorker:
         if len(self.buffer) < self.batch_size:
             return {}
 
-        # Sample batch
-        states, actions, rewards, next_states, dones, indices, weights = self.buffer.sample(self.batch_size)
+        # Sample batch (returns PERBatch dataclass)
+        batch = self.buffer.sample(self.batch_size)
 
         # Convert to tensors
-        states_t = torch.from_numpy(states).to(self.device)
-        actions_t = torch.from_numpy(actions).to(self.device)
-        rewards_t = torch.from_numpy(rewards).to(self.device)
-        next_states_t = torch.from_numpy(next_states).to(self.device)
-        dones_t = torch.from_numpy(dones).to(self.device)
-        weights_t = torch.from_numpy(weights).to(self.device)
+        states_t = torch.from_numpy(batch.states).to(self.device)
+        actions_t = torch.from_numpy(batch.actions).to(self.device)
+        rewards_t = torch.from_numpy(batch.rewards).to(self.device)
+        next_states_t = torch.from_numpy(batch.next_states).to(self.device)
+        dones_t = torch.from_numpy(batch.dones).to(self.device)
+        weights_t = torch.from_numpy(batch.weights).to(self.device)
 
         # Compute Double DQN loss
         self.net.train()
@@ -427,7 +397,7 @@ class DDQNWorker:
         nn.utils.clip_grad_norm_(self.net.online.parameters(), self.max_grad_norm)
 
         # Update priorities
-        self.buffer.update_priorities(indices, td_errors.abs().cpu().numpy())
+        self.buffer.update_priorities(batch.indices, td_errors.abs().cpu().numpy())
 
         # Extract gradients
         grads = {
@@ -437,28 +407,25 @@ class DDQNWorker:
         }
 
         # Metrics
-        rolling_avg_reward = np.mean(self.reward_history) if self.reward_history else 0.0
-        avg_speed = np.mean(self.speed_history) if self.speed_history else 0.0
-        avg_entropy = np.mean(self.entropy_history) if self.entropy_history else 0.0
         metrics = {
             "loss": loss.item(),
             "q_mean": current_q_selected.mean().item(),
             "q_max": current_q_selected.max().item(),
             "td_error": td_errors.abs().mean().item(),
             "per_beta": self.buffer.current_beta,
-            "entropy": avg_entropy,
-            "avg_reward": rolling_avg_reward,
-            "avg_speed": avg_speed,
-            "total_deaths": self.deaths,
-            "total_flags": self.flags,
-            "best_x_ever": self.best_x_ever,
+            "entropy": self.metrics.avg_entropy,
+            "avg_reward": self.metrics.avg_reward,
+            "avg_speed": self.metrics.avg_speed,
+            "total_deaths": self.metrics.deaths,
+            "total_flags": self.metrics.flags,
+            "best_x_ever": self.metrics.best_x_ever,
         }
 
         # Send gradients
         gradient_packet = {
             "grads": grads,
             "timesteps": self.batch_size,
-            "episodes": self.episode_count,
+            "episodes": self.metrics.episode_count,
             "worker_id": self.worker_id,
             "weight_version": self.weight_version,
             "metrics": metrics,
@@ -466,7 +433,7 @@ class DDQNWorker:
 
         try:
             self.gradient_queue.put(gradient_packet, timeout=0.5)
-            self.gradients_sent += 1
+            self.metrics.gradients_sent += 1
         except Exception:
             pass
 
@@ -481,13 +448,7 @@ class DDQNWorker:
             from mario_rl.training.training_ui import UIMessage
             from mario_rl.training.training_ui import MessageType
 
-            rolling_avg = np.mean(self.reward_history) if self.reward_history else 0.0
             level_str = self.base_env.current_level
-            avg_speed = np.mean(self.speed_history) if self.speed_history else 0.0
-            avg_x_at_death = np.mean(self.x_at_death_history) if self.x_at_death_history else 0.0
-            avg_time_to_flag = np.mean(self.time_to_flag_history) if self.time_to_flag_history else 0.0
-            avg_entropy = np.mean(self.entropy_history) if self.entropy_history else 0.0
-
             snapshot_restores = self.snapshots.restore_count if self.snapshots else 0
             restores_without_progress = self.snapshots.restores_without_progress if self.snapshots else 0
             max_restores = self.snapshots.max_restores if self.snapshots else 3
@@ -496,34 +457,34 @@ class DDQNWorker:
                 msg_type=MessageType.WORKER_STATUS,
                 source_id=self.worker_id,
                 data={
-                    "episode": self.episode_count,
-                    "step": self.episode_length,
-                    "reward": self.episode_reward,
+                    "episode": self.metrics.episode_count,
+                    "step": self.episode.length,
+                    "reward": self.episode.reward,
                     "x_pos": info.get("x_pos", 0),
                     "game_time": info.get("time", 0),
-                    "best_x": self.best_x,
-                    "best_x_ever": self.best_x_ever,
-                    "deaths": self.deaths,
-                    "flags": self.flags,
+                    "best_x": self.episode.best_x,
+                    "best_x_ever": self.metrics.best_x_ever,
+                    "deaths": self.metrics.deaths,
+                    "flags": self.metrics.flags,
                     "epsilon": self.current_epsilon,
-                    "experiences": self.total_steps,
+                    "experiences": self.metrics.total_steps,
                     "q_mean": 0.0,
                     "q_max": 0.0,
-                    "weight_sync_count": self.weight_sync_count,
-                    "gradients_sent": self.gradients_sent,
+                    "weight_sync_count": self.metrics.weight_sync_count,
+                    "gradients_sent": self.metrics.gradients_sent,
                     "steps_per_sec": self.steps_per_sec,
                     "snapshot_restores": snapshot_restores,
                     "restores_without_progress": restores_without_progress,
                     "max_restores": max_restores,
                     "current_level": level_str,
                     "last_weight_sync": self.last_weight_sync,
-                    "rolling_avg_reward": rolling_avg,
-                    "first_flag_time": avg_time_to_flag,
+                    "rolling_avg_reward": self.metrics.avg_reward,
+                    "first_flag_time": self.metrics.avg_time_to_flag,
                     "per_beta": self.buffer.current_beta,
-                    "avg_speed": avg_speed,
-                    "avg_x_at_death": avg_x_at_death,
-                    "avg_time_to_flag": avg_time_to_flag,
-                    "entropy": avg_entropy,
+                    "avg_speed": self.metrics.avg_speed,
+                    "avg_x_at_death": self.metrics.avg_x_at_death,
+                    "avg_time_to_flag": self.metrics.avg_time_to_flag,
+                    "entropy": self.metrics.avg_entropy,
                     "last_action_time": self._last_action_time,
                 },
             )
@@ -564,7 +525,8 @@ class DDQNWorker:
                 import sys
 
                 print(
-                    f"[W{self.worker_id}] Loop {loop_count}: buf={len(self.buffer)}, steps={self.total_steps}",
+                    f"[W{self.worker_id}] Loop {loop_count}: "
+                    f"buf={len(self.buffer)}, steps={self.metrics.total_steps}",
                     file=sys.stderr,
                     flush=True,
                 )

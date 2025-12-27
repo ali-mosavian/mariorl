@@ -5,11 +5,12 @@ Used by Prioritized Experience Replay to efficiently sample
 transitions proportional to their priority.
 """
 
-from typing import Tuple
 from dataclasses import field
 from dataclasses import dataclass
 
 import numpy as np
+
+from mario_rl.core.types import TreeNode
 
 
 @dataclass
@@ -76,7 +77,7 @@ class SumTree:
             parent = (parent - 1) // 2
             self.tree[parent] += change
 
-    def get(self, value: float) -> Tuple[int, float, int]:
+    def get(self, value: float) -> TreeNode:
         """
         Find leaf node for a given cumulative value.
 
@@ -84,7 +85,7 @@ class SumTree:
             value: Cumulative priority value to search for
 
         Returns:
-            Tuple of (leaf_idx, priority, data_idx)
+            TreeNode with leaf_idx, priority, and data_idx
         """
         parent = 0
 
@@ -105,4 +106,4 @@ class SumTree:
                 parent = right
 
         data_idx = leaf_idx - self.capacity + 1
-        return leaf_idx, self.tree[leaf_idx], data_idx
+        return TreeNode(leaf_idx=leaf_idx, priority=float(self.tree[leaf_idx]), data_idx=data_idx)

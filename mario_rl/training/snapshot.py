@@ -7,7 +7,6 @@ enabling more efficient learning of difficult sections.
 
 from typing import Any
 from typing import Dict
-from typing import List
 from typing import Tuple
 from typing import Protocol
 from dataclasses import field
@@ -15,6 +14,7 @@ from dataclasses import dataclass
 
 import numpy as np
 
+from mario_rl.core.types import GameSnapshot
 from mario_rl.core.config import SnapshotConfig
 
 
@@ -48,7 +48,7 @@ class SnapshotManager:
 
     # Internal state
     _slot_to_time: Dict[int, int] = field(init=False, default_factory=dict)
-    _slot_to_state: Dict[int, Tuple[np.ndarray, List[np.ndarray], np.ndarray]] = field(init=False, default_factory=dict)
+    _slot_to_state: Dict[int, GameSnapshot] = field(init=False, default_factory=dict)
 
     # Progress tracking
     restore_count: int = field(init=False, default=0)
@@ -92,15 +92,15 @@ class SnapshotManager:
             # Get NES state directly as numpy array
             nes_state = self.base_env.env.dump_state()
 
-            # Save COPIES of frame stack queue
-            frame_queue: List[np.ndarray] = []
+            # Save COPIES of frame stack queue as immutable tuple
+            frame_queue: tuple = ()
             if hasattr(self.fstack, "obs_queue"):
-                frame_queue = [np.array(f, copy=True) for f in self.fstack.obs_queue]
+                frame_queue = tuple(np.array(f, copy=True) for f in self.fstack.obs_queue)
 
-            self._slot_to_state[slot_id] = (
-                np.array(state, copy=True),
-                frame_queue,
-                nes_state,
+            self._slot_to_state[slot_id] = GameSnapshot(
+                observation=np.array(state, copy=True),
+                frame_queue=frame_queue,
+                nes_state=nes_state,
             )
             return True
         except Exception:
@@ -142,17 +142,17 @@ class SnapshotManager:
         if slot_id not in self._slot_to_state:
             return np.array([]), False
 
-        saved_state, saved_frames, nes_state = self._slot_to_state[slot_id]
+        snapshot = self._slot_to_state[slot_id]
 
         try:
             # Restore frame stack queue FIRST (like MadMario does)
-            if saved_frames and hasattr(self.fstack, "obs_queue"):
+            if snapshot.frame_queue and hasattr(self.fstack, "obs_queue"):
                 self.fstack.obs_queue.clear()
-                for frame in saved_frames:
+                for frame in snapshot.frame_queue:
                     self.fstack.obs_queue.append(frame)
 
             # Then restore NES emulator state
-            self.base_env.env.load_state(nes_state)
+            self.base_env.env.load_state(snapshot.nes_state)
 
             self.restore_count += 1
 
@@ -163,7 +163,7 @@ class SnapshotManager:
             else:
                 self._restores_without_progress += 1
 
-            return saved_state, True
+            return snapshot.observation, True
         except Exception:
             return np.array([]), False
 

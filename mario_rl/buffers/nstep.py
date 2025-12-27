@@ -6,11 +6,10 @@ for better credit assignment in reinforcement learning.
 """
 
 from typing import List
-from typing import Tuple
 from dataclasses import field
 from dataclasses import dataclass
 
-import numpy as np
+from mario_rl.core.types import Transition
 
 
 @dataclass
@@ -23,86 +22,84 @@ class NStepBuffer:
 
     n_step: int
     gamma: float
-    buffer: List[Tuple[np.ndarray, int, float, np.ndarray, bool]] = field(init=False, default_factory=list)
+    buffer: List[Transition] = field(init=False, default_factory=list)
 
-    def add(
-        self,
-        state: np.ndarray,
-        action: int,
-        reward: float,
-        next_state: np.ndarray,
-        done: bool,
-    ) -> Tuple[np.ndarray, int, float, np.ndarray, bool] | None:
+    def add(self, transition: Transition) -> Transition | None:
         """
         Add transition and return N-step transition if ready.
 
         Args:
-            state: Current observation
-            action: Action taken
-            reward: Reward received
-            next_state: Next observation
-            done: Whether episode ended
+            transition: The experience transition to add
 
         Returns:
-            N-step transition tuple or None if not enough steps yet
+            N-step transition or None if not enough steps yet
         """
-        self.buffer.append((state.copy(), action, reward, next_state.copy(), done))
+        # Store with copied arrays
+        self.buffer.append(
+            Transition(
+                state=transition.state.copy(),
+                action=transition.action,
+                reward=transition.reward,
+                next_state=transition.next_state.copy(),
+                done=transition.done,
+            )
+        )
 
         if len(self.buffer) < self.n_step:
             return None
 
         # Compute N-step return
         n_step_reward = 0.0
-        for i, (_, _, r, _, d) in enumerate(self.buffer):
-            n_step_reward += (self.gamma**i) * r
-            if d:
+        for i, t in enumerate(self.buffer):
+            n_step_reward += (self.gamma**i) * t.reward
+            if t.done:
                 # Episode ended early - use actual final state
-                result = (
-                    self.buffer[0][0],
-                    self.buffer[0][1],
-                    n_step_reward,
-                    self.buffer[i][3],
-                    True,
+                result = Transition(
+                    state=self.buffer[0].state,
+                    action=self.buffer[0].action,
+                    reward=n_step_reward,
+                    next_state=self.buffer[i].next_state,
+                    done=True,
                 )
                 self.buffer.pop(0)
                 return result
 
         # Full N-step - use state from N steps ahead
-        result = (
-            self.buffer[0][0],
-            self.buffer[0][1],
-            n_step_reward,
-            self.buffer[-1][3],
-            self.buffer[-1][4],
+        result = Transition(
+            state=self.buffer[0].state,
+            action=self.buffer[0].action,
+            reward=n_step_reward,
+            next_state=self.buffer[-1].next_state,
+            done=self.buffer[-1].done,
         )
         self.buffer.pop(0)
         return result
 
-    def flush(self) -> List[Tuple[np.ndarray, int, float, np.ndarray, bool]]:
+    def flush(self) -> List[Transition]:
         """
         Flush remaining transitions at episode end.
 
         Returns:
             List of remaining N-step transitions
         """
-        transitions = []
+        transitions: List[Transition] = []
         while len(self.buffer) > 0:
             n_step_reward = 0.0
             last_idx = len(self.buffer) - 1
 
-            for i, (_, _, r, _, d) in enumerate(self.buffer):
-                n_step_reward += (self.gamma**i) * r
-                if d:
+            for i, t in enumerate(self.buffer):
+                n_step_reward += (self.gamma**i) * t.reward
+                if t.done:
                     last_idx = i
                     break
 
             transitions.append(
-                (
-                    self.buffer[0][0],
-                    self.buffer[0][1],
-                    n_step_reward,
-                    self.buffer[last_idx][3],
-                    self.buffer[last_idx][4],
+                Transition(
+                    state=self.buffer[0].state,
+                    action=self.buffer[0].action,
+                    reward=n_step_reward,
+                    next_state=self.buffer[last_idx].next_state,
+                    done=self.buffer[last_idx].done,
                 )
             )
             self.buffer.pop(0)
