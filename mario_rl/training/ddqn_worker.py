@@ -614,6 +614,9 @@ class DDQNWorker:
     # Debug: track when worker last took an action
     _last_action_time: float = field(init=False, default=0.0)
 
+    # Persistent state across collect_steps calls
+    _current_state: Optional[np.ndarray] = field(init=False, default=None)
+
     def __post_init__(self) -> None:
         """Initialize environment, network, and buffer."""
         # Auto-detect best device
@@ -858,14 +861,19 @@ class DDQNWorker:
 
         Returns number of episodes completed.
         """
-        state, _ = self.env.reset()
         episodes_completed = 0
 
-        # Clear snapshots and progress tracking on new episode
-        self._slot_to_time.clear()
-        self._slot_to_state.clear()
-        self._best_x_at_restore = 0
-        self._restores_without_progress = 0
+        # Get current state (reset only if we don't have one)
+        if not hasattr(self, "_current_state") or self._current_state is None:
+            state, _ = self.env.reset()
+            self._current_state = state
+            # Clear snapshots and progress tracking on new episode
+            self._slot_to_time.clear()
+            self._slot_to_state.clear()
+            self._best_x_at_restore = 0
+            self._restores_without_progress = 0
+        else:
+            state = self._current_state
 
         for _ in range(num_steps):
             # Get action (also computes entropy)
@@ -939,6 +947,7 @@ class DDQNWorker:
                         self.n_step_buffer.reset()
 
                         state = restored_state
+                        self._current_state = state
                         continue  # Skip to next step without resetting episode
 
             if done:
@@ -979,6 +988,7 @@ class DDQNWorker:
 
                 # Reset and clear snapshots for new episode
                 state, _ = self.env.reset()
+                self._current_state = state
                 self._slot_to_time.clear()
                 self._slot_to_state.clear()
                 self._best_x_at_restore = 0
@@ -989,6 +999,8 @@ class DDQNWorker:
             else:
                 state = next_state
 
+        # Save state for next collect_steps call
+        self._current_state = state
         return episodes_completed
 
     def compute_and_send_gradients(self) -> Dict[str, float]:
