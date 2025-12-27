@@ -852,6 +852,8 @@ class TrainingUI:
             last_weight_sync = ws.get("last_weight_sync", 0)
             weight_sync_count = ws.get("weight_sync_count", 0)
             snapshot_restores = ws.get("snapshot_restores", 0)
+            restores_without_progress = ws.get("restores_without_progress", 0)
+            max_restores = ws.get("max_restores", 3)
             # Convergence metrics
             rolling_avg_reward = ws.get("rolling_avg_reward", 0)
             ws.get("first_flag_time", 0)
@@ -880,7 +882,10 @@ class TrainingUI:
 
             stdscr.addstr(y + 2, 4, f"r={reward:8.0f}  💀=")
             stdscr.addstr(f"{deaths:2d}", death_color)
+            # Show restores: total(stuck/max) - color red if near limit
+            restore_color = curses.color_pair(3) if restores_without_progress >= max_restores - 1 else curses.A_NORMAL
             stdscr.addstr(f"  ⏮={snapshot_restores:2d}")
+            stdscr.addstr(f"({restores_without_progress}/{max_restores})", restore_color)
             stdscr.addstr("  🏁=")
             stdscr.addstr(f"{flags:2d}", flag_color)
             grads_sent = ws.get("gradients_sent", 0)

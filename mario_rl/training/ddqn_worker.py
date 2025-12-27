@@ -1130,6 +1130,8 @@ class DDQNWorker:
                     "gradients_sent": self.gradients_sent,
                     "steps_per_sec": self.steps_per_sec,
                     "snapshot_restores": self.snapshot_restores,
+                    "restores_without_progress": self._restores_without_progress,
+                    "max_restores": self.max_restores_without_progress,
                     "current_level": level_str,
                     "last_weight_sync": self.last_weight_sync,
                     "rolling_avg_reward": rolling_avg,
