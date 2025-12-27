@@ -1,7 +1,8 @@
 """
-UI Reporter for sending worker status to the training UI.
+Generic UI reporter that sends WorkerStatus to the training UI.
 
-Encapsulates all UI communication logic to keep workers clean.
+This is algorithm-agnostic - it just sends WorkerStatus dataclass instances.
+Each algorithm provides its own StatusCollector to gather the data.
 """
 
 from typing import Any
@@ -10,10 +11,12 @@ from typing import Optional
 from dataclasses import field
 from dataclasses import dataclass
 
+from mario_rl.core.types import WorkerStatus
+
 
 @dataclass
 class UIReporter:
-    """Handles sending status updates and logs to the UI queue."""
+    """Sends WorkerStatus and log messages to UI queue."""
 
     worker_id: int
     queue: Optional[mp.Queue] = None
@@ -39,85 +42,49 @@ class UIReporter:
         """Check if UI reporting is enabled."""
         return self.queue is not None and self._UIMessage is not None
 
-    def send_status(
-        self,
-        *,
-        # Episode info
-        episode: int,
-        step: int,
-        reward: float,
-        x_pos: int,
-        game_time: int,
-        best_x: int,
-        best_x_ever: int,
-        # Counters
-        deaths: int,
-        flags: int,
-        experiences: int,
-        gradients_sent: int,
-        weight_sync_count: int,
-        # Exploration
-        epsilon: float,
-        # Q-values
-        q_mean: float = 0.0,
-        q_max: float = 0.0,
-        # Performance
-        steps_per_sec: float,
-        last_action_time: float,
-        last_weight_sync: float,
-        # Snapshots
-        snapshot_restores: int,
-        restores_without_progress: int,
-        max_restores: int,
-        # Level
-        current_level: str,
-        # Averages
-        rolling_avg_reward: float,
-        avg_speed: float,
-        avg_x_at_death: float,
-        avg_time_to_flag: float,
-        entropy: float,
-        per_beta: float,
-    ) -> None:
+    def send_status(self, status: WorkerStatus) -> None:
         """Send worker status to UI."""
         if not self.enabled:
             return
 
         try:
+            # Convert frozen dataclass to dict for UI message
+            data = {
+                "episode": status.episode,
+                "step": status.step,
+                "reward": status.reward,
+                "x_pos": status.x_pos,
+                "game_time": status.game_time,
+                "best_x": status.best_x,
+                "best_x_ever": status.best_x_ever,
+                "deaths": status.deaths,
+                "flags": status.flags,
+                "epsilon": status.epsilon,
+                "experiences": status.experiences,
+                "q_mean": 0.0,
+                "q_max": 0.0,
+                "weight_sync_count": status.weight_sync_count,
+                "gradients_sent": status.gradients_sent,
+                "steps_per_sec": status.steps_per_sec,
+                "snapshot_restores": status.snapshot_restores,
+                "restores_without_progress": status.restores_without_progress,
+                "max_restores": status.max_restores,
+                "current_level": status.current_level,
+                "last_weight_sync": status.last_weight_sync,
+                "rolling_avg_reward": status.rolling_avg_reward,
+                "first_flag_time": status.avg_time_to_flag,
+                "per_beta": status.per_beta,
+                "avg_speed": status.avg_speed,
+                "avg_x_at_death": status.avg_x_at_death,
+                "avg_time_to_flag": status.avg_time_to_flag,
+                "entropy": status.entropy,
+                "last_action_time": status.last_action_time,
+            }
+
             msg = self._UIMessage(
                 msg_type=self._MessageType.WORKER_STATUS,
                 source_id=self.worker_id,
-                data={
-                    "episode": episode,
-                    "step": step,
-                    "reward": reward,
-                    "x_pos": x_pos,
-                    "game_time": game_time,
-                    "best_x": best_x,
-                    "best_x_ever": best_x_ever,
-                    "deaths": deaths,
-                    "flags": flags,
-                    "epsilon": epsilon,
-                    "experiences": experiences,
-                    "q_mean": q_mean,
-                    "q_max": q_max,
-                    "weight_sync_count": weight_sync_count,
-                    "gradients_sent": gradients_sent,
-                    "steps_per_sec": steps_per_sec,
-                    "snapshot_restores": snapshot_restores,
-                    "restores_without_progress": restores_without_progress,
-                    "max_restores": max_restores,
-                    "current_level": current_level,
-                    "last_weight_sync": last_weight_sync,
-                    "rolling_avg_reward": rolling_avg_reward,
-                    "first_flag_time": avg_time_to_flag,
-                    "per_beta": per_beta,
-                    "avg_speed": avg_speed,
-                    "avg_x_at_death": avg_x_at_death,
-                    "avg_time_to_flag": avg_time_to_flag,
-                    "entropy": entropy,
-                    "last_action_time": last_action_time,
-                },
+                data=data,
             )
             self.queue.put_nowait(msg)  # type: ignore[union-attr]
         except Exception:

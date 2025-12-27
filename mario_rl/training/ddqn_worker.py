@@ -43,6 +43,7 @@ from mario_rl.core.exploration import EpsilonGreedy
 from mario_rl.environment.factory import create_env
 from mario_rl.buffers import PrioritizedReplayBuffer
 from mario_rl.training.snapshot import SnapshotManager
+from mario_rl.training.ddqn_status import DDQNStatusCollector
 
 
 @dataclass
@@ -76,12 +77,13 @@ class DDQNWorker:
     action_dim: int = field(init=False)
     _fstack: Any = field(init=False, repr=False)
 
-    # State tracking - composed components (6)
+    # State tracking - composed components (7)
     metrics: MetricsTracker = field(init=False)
     episode: EpisodeState = field(init=False)
     weights: WeightSync = field(init=False)
     exploration: EpsilonGreedy = field(init=False)
     timing: TimingStats = field(init=False)
+    status_collector: DDQNStatusCollector = field(init=False)
     ui: UIReporter = field(init=False)
 
     # Remaining state (1)
@@ -139,7 +141,6 @@ class DDQNWorker:
         self.metrics = MetricsTracker()
         self.episode = EpisodeState()
         self.timing = TimingStats()
-        self.ui = UIReporter(worker_id=self.config.worker_id, queue=self.ui_queue)
 
         # Create exploration policy from config
         exp = self.config.exploration
@@ -159,6 +160,22 @@ class DDQNWorker:
         # Load initial weights
         self.weights.load(self.net)
         self.metrics.weight_sync_count = self.weights.count
+
+        # Create status collector (algorithm-specific data gathering)
+        self.status_collector = DDQNStatusCollector(
+            worker_id=self.config.worker_id,
+            metrics=self.metrics,
+            episode=self.episode,
+            weights=self.weights,
+            exploration=self.exploration,
+            timing=self.timing,
+            buffer=self.buffer,
+            snapshots=self.snapshots,
+            get_level=lambda: self.base_env.current_level,
+        )
+
+        # Create UI reporter (generic sender)
+        self.ui = UIReporter(worker_id=self.config.worker_id, queue=self.ui_queue)
 
     def _preprocess_state(self, state: np.ndarray) -> np.ndarray:
         """Convert state from (4, 64, 64, 1) to (4, 64, 64)."""
@@ -381,35 +398,9 @@ class DDQNWorker:
         return metrics
 
     def _send_ui_status(self, info: dict) -> None:
-        """Send status to UI queue."""
-        self.ui.send_status(
-            episode=self.metrics.episode_count,
-            step=self.episode.length,
-            reward=self.episode.reward,
-            x_pos=info.get("x_pos", 0),
-            game_time=info.get("time", 0),
-            best_x=self.episode.best_x,
-            best_x_ever=self.metrics.best_x_ever,
-            deaths=self.metrics.deaths,
-            flags=self.metrics.flags,
-            experiences=self.metrics.total_steps,
-            gradients_sent=self.metrics.gradients_sent,
-            weight_sync_count=self.weights.count,
-            epsilon=self.exploration.get_epsilon(self.metrics.total_steps),
-            steps_per_sec=self.timing.steps_per_sec,
-            last_action_time=self.timing.last_action_time,
-            last_weight_sync=self.weights.last_sync,
-            snapshot_restores=self.snapshots.restore_count if self.snapshots else 0,
-            restores_without_progress=self.snapshots.restores_without_progress if self.snapshots else 0,
-            max_restores=self.snapshots.max_restores if self.snapshots else 3,
-            current_level=self.base_env.current_level,
-            rolling_avg_reward=self.metrics.avg_reward,
-            avg_speed=self.metrics.avg_speed,
-            avg_x_at_death=self.metrics.avg_x_at_death,
-            avg_time_to_flag=self.metrics.avg_time_to_flag,
-            entropy=self.metrics.avg_entropy,
-            per_beta=self.buffer.current_beta,
-        )
+        """Send status to UI queue using collector pattern."""
+        status = self.status_collector.collect(info)
+        self.ui.send_status(status)
 
     def run(self) -> None:
         """Main training loop."""
