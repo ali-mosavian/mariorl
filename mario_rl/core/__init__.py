@@ -8,6 +8,7 @@ from mario_rl.core.types import PERBatch
 from mario_rl.core.types import TreeNode
 from mario_rl.core.config import LevelType
 from mario_rl.core.types import Transition
+from mario_rl.core.timing import TimingStats
 from mario_rl.core.types import GameSnapshot
 from mario_rl.core.types import WorkerStatus
 from mario_rl.core.config import BufferConfig
@@ -20,7 +21,9 @@ from mario_rl.core.config import SnapshotConfig
 from mario_rl.core.config import TrainingConfig
 from mario_rl.core.types import GradientMetrics
 from mario_rl.core.metrics import MetricsTracker
+from mario_rl.core.weight_sync import WeightSync
 from mario_rl.core.config import ExplorationConfig
+from mario_rl.core.exploration import EpsilonGreedy
 
 __all__ = [
     # Config
@@ -36,6 +39,9 @@ __all__ = [
     # State tracking
     "EpisodeState",
     "MetricsTracker",
+    "WeightSync",
+    "EpsilonGreedy",
+    "TimingStats",
     # Types
     "Transition",
     "GameSnapshot",
