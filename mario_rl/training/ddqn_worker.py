@@ -29,10 +29,10 @@ import numpy as np
 from torch import nn
 
 from mario_rl.buffers import NStepBuffer
-from mario_rl.core.config import LevelType
 from mario_rl.core.types import Transition
 from mario_rl.core.timing import TimingStats
 from mario_rl.agent.ddqn_net import DoubleDQN
+from mario_rl.core.config import WorkerConfig
 from mario_rl.core.device import detect_device
 from mario_rl.core.episode import EpisodeState
 from mario_rl.core.config import SnapshotConfig
@@ -59,50 +59,13 @@ class DDQNWorker:
     7. Periodically syncs weights from learner
     """
 
-    # Required fields
-    worker_id: int
+    # Required fields (4)
+    config: WorkerConfig
     weights_path: Path
     gradient_queue: mp.Queue
-
-    # Configuration
-    level: LevelType = (1, 1)
-    n_step: int = 3
-    gamma: float = 0.99
-    render_frames: bool = False
-    weight_sync_interval: float = 5.0
-
-    # Local buffer settings (PER)
-    local_buffer_size: int = 10_000
-    batch_size: int = 32
-    steps_per_collection: int = 64
-    train_steps: int = 4
-
-    # PER hyperparameters
-    per_alpha: float = 0.6
-    per_beta_start: float = 0.4
-    per_beta_end: float = 1.0
-
-    # Exploration
-    eps_start: float = 1.0
-    eps_end: float = 0.01
-    eps_decay_steps: int = 100_000
-
-    # Gradient clipping
-    max_grad_norm: float = 10.0
-
-    # Device
-    device: Optional[str] = None
-
-    # UI
     ui_queue: Optional[mp.Queue] = None
 
-    # Snapshots
-    use_snapshots: bool = True
-    snapshot_slots: int = 10
-    snapshot_interval: int = 5
-    max_restores_without_progress: int = 3
-
-    # Components (initialized in __post_init__)
+    # Components - initialized in __post_init__ (8)
     env: Any = field(init=False, repr=False)
     base_env: Any = field(init=False, repr=False)
     net: DoubleDQN = field(init=False, repr=False)
@@ -112,26 +75,25 @@ class DDQNWorker:
     action_dim: int = field(init=False)
     _fstack: Any = field(init=False, repr=False)
 
-    # State tracking (composed components)
+    # State tracking - composed components (5)
     metrics: MetricsTracker = field(init=False)
     episode: EpisodeState = field(init=False)
     weights: WeightSync = field(init=False)
     exploration: EpsilonGreedy = field(init=False)
     timing: TimingStats = field(init=False)
 
-    # Remaining state
+    # Remaining state (1)
     _current_state: Optional[np.ndarray] = field(init=False, default=None)
 
     def __post_init__(self) -> None:
         """Initialize environment, network, and buffer."""
-        # Auto-detect device
-        if self.device is None:
-            self.device = detect_device()
+        # Get device
+        device = self.config.device or detect_device()
 
         # Create environment
         self.env, self.base_env, self._fstack = create_env(
-            level=self.level,
-            render_frames=self.render_frames,
+            level=self.config.level,
+            render_frames=self.config.render_frames,
         )
         self.action_dim = self.env.action_space.n
 
@@ -140,26 +102,28 @@ class DDQNWorker:
         self.net = DoubleDQN(
             input_shape=state_dim,
             num_actions=self.action_dim,
-        ).to(self.device)
+        ).to(device)
 
-        # Create buffers
+        # Create buffers using config
+        buf = self.config.buffer
         self.buffer = PrioritizedReplayBuffer(
-            capacity=self.local_buffer_size,
+            capacity=buf.capacity,
             obs_shape=state_dim,
-            alpha=self.per_alpha,
-            beta_start=self.per_beta_start,
-            beta_end=self.per_beta_end,
+            alpha=buf.alpha,
+            beta_start=buf.beta_start,
+            beta_end=buf.beta_end,
         )
-        self.n_step_buffer = NStepBuffer(n_step=self.n_step, gamma=self.gamma)
-        self.n_step_gamma = self.gamma**self.n_step
+        self.n_step_buffer = NStepBuffer(n_step=buf.n_step, gamma=buf.gamma)
+        self.n_step_gamma = buf.gamma**buf.n_step
 
         # Create snapshot manager
-        if self.use_snapshots:
+        snap = self.config.snapshot
+        if snap.enabled:
             snapshot_config = SnapshotConfig(
                 enabled=True,
-                slots=self.snapshot_slots,
-                interval=self.snapshot_interval,
-                max_restores_without_progress=self.max_restores_without_progress,
+                slots=snap.slots,
+                interval=snap.interval,
+                max_restores_without_progress=snap.max_restores_without_progress,
             )
             self.snapshots = SnapshotManager(
                 config=snapshot_config,
@@ -173,15 +137,20 @@ class DDQNWorker:
         self.metrics = MetricsTracker()
         self.episode = EpisodeState()
         self.timing = TimingStats()
+
+        # Create exploration policy from config
+        exp = self.config.exploration
         self.exploration = EpsilonGreedy(
-            start=self.eps_start,
-            end=self.eps_end,
-            decay_steps=self.eps_decay_steps,
+            start=exp.epsilon_start,
+            end=exp.epsilon_end,
+            decay_steps=exp.decay_steps,
         )
+
+        # Create weight sync from config
         self.weights = WeightSync(
             path=self.weights_path,
-            device=self.device,
-            interval=self.weight_sync_interval,
+            device=device,
+            interval=self.config.weight_sync_interval,
         )
 
         # Load initial weights
@@ -197,12 +166,12 @@ class DDQNWorker:
     @torch.no_grad()
     def _get_action(self, state: np.ndarray) -> int:
         """Get action using epsilon-greedy policy."""
-        # Check if should explore
         if self.exploration.should_explore(self.metrics.total_steps):
             return int(np.random.randint(0, self.action_dim))
 
         state = self._preprocess_state(state)
-        state_tensor = torch.from_numpy(np.expand_dims(state, 0)).float().to(self.device)
+        device = self.config.device or detect_device()
+        state_tensor = torch.from_numpy(np.expand_dims(state, 0)).float().to(device)
         q_values = self.net.online(state_tensor)
 
         # Compute entropy
@@ -266,7 +235,7 @@ class DDQNWorker:
                 self.metrics.flags += 1
 
             # Update PER beta
-            progress = min(1.0, self.metrics.total_steps / self.eps_decay_steps)
+            progress = min(1.0, self.metrics.total_steps / self.config.exploration.decay_steps)
             self.buffer.update_beta(progress)
 
             # Send UI status
@@ -280,7 +249,7 @@ class DDQNWorker:
             # Try restore on death
             if is_dead and self.snapshots:
                 game_time = info.get("time", 0)
-                checkpoint_time = game_time // self.snapshot_interval
+                checkpoint_time = game_time // self.config.snapshot.interval
                 if checkpoint_time > 3:
                     restored_state, restored = self.snapshots.try_restore(info, self.episode.best_x)
                     if restored:
@@ -329,19 +298,20 @@ class DDQNWorker:
 
     def compute_and_send_gradients(self) -> Dict[str, float]:
         """Sample from PER buffer, compute loss, and send gradients."""
-        if len(self.buffer) < self.batch_size:
+        if len(self.buffer) < self.config.buffer.batch_size:
             return {}
 
         # Sample batch (returns PERBatch dataclass)
-        batch = self.buffer.sample(self.batch_size)
+        batch = self.buffer.sample(self.config.buffer.batch_size)
 
         # Convert to tensors
-        states_t = torch.from_numpy(batch.states).to(self.device)
-        actions_t = torch.from_numpy(batch.actions).to(self.device)
-        rewards_t = torch.from_numpy(batch.rewards).to(self.device)
-        next_states_t = torch.from_numpy(batch.next_states).to(self.device)
-        dones_t = torch.from_numpy(batch.dones).to(self.device)
-        weights_t = torch.from_numpy(batch.weights).to(self.device)
+        device = self.config.device or detect_device()
+        states_t = torch.from_numpy(batch.states).to(device)
+        actions_t = torch.from_numpy(batch.actions).to(device)
+        rewards_t = torch.from_numpy(batch.rewards).to(device)
+        next_states_t = torch.from_numpy(batch.next_states).to(device)
+        dones_t = torch.from_numpy(batch.dones).to(device)
+        weights_t = torch.from_numpy(batch.weights).to(device)
 
         # Compute Double DQN loss
         self.net.train()
@@ -362,7 +332,7 @@ class DDQNWorker:
         # Backward
         self.net.online.zero_grad()
         loss.backward()
-        nn.utils.clip_grad_norm_(self.net.online.parameters(), self.max_grad_norm)
+        nn.utils.clip_grad_norm_(self.net.online.parameters(), self.config.max_grad_norm)
 
         # Update priorities
         self.buffer.update_priorities(batch.indices, td_errors.abs().cpu().numpy())
@@ -392,9 +362,9 @@ class DDQNWorker:
         # Send gradients
         gradient_packet = {
             "grads": grads,
-            "timesteps": self.batch_size,
+            "timesteps": self.config.buffer.batch_size,
             "episodes": self.metrics.episode_count,
-            "worker_id": self.worker_id,
+            "worker_id": self.config.worker_id,
             "weight_version": self.weights.version,
             "metrics": metrics,
         }
@@ -424,7 +394,7 @@ class DDQNWorker:
 
             msg = UIMessage(
                 msg_type=MessageType.WORKER_STATUS,
-                source_id=self.worker_id,
+                source_id=self.config.worker_id,
                 data={
                     "episode": self.metrics.episode_count,
                     "step": self.episode.length,
@@ -470,20 +440,21 @@ class DDQNWorker:
 
                 msg = UIMessage(
                     msg_type=MessageType.WORKER_LOG,
-                    source_id=self.worker_id,
+                    source_id=self.config.worker_id,
                     data={"text": text},
                 )
                 self.ui_queue.put_nowait(msg)
             except Exception:
-                print(f"[W{self.worker_id}] {text}")
+                print(f"[W{self.config.worker_id}] {text}")
         else:
-            print(f"[W{self.worker_id}] {text}")
+            print(f"[W{self.config.worker_id}] {text}")
 
     def run(self) -> None:
         """Main training loop."""
+        device = self.config.device or detect_device()
         self._log(
-            f"Worker {self.worker_id} started (level={self.level}, "
-            f"device={self.device}, ε_end={self.eps_end:.4f}, PER)"
+            f"Worker {self.config.worker_id} started (level={self.config.level}, "
+            f"device={device}, ε_end={self.config.exploration.epsilon_end:.4f}, PER)"
         )
 
         loop_count = 0
@@ -494,7 +465,7 @@ class DDQNWorker:
                 import sys
 
                 print(
-                    f"[W{self.worker_id}] Loop {loop_count}: "
+                    f"[W{self.config.worker_id}] Loop {loop_count}: "
                     f"buf={len(self.buffer)}, steps={self.metrics.total_steps}",
                     file=sys.stderr,
                     flush=True,
@@ -504,31 +475,27 @@ class DDQNWorker:
             if self.weights.maybe_sync(self.net):
                 self.metrics.weight_sync_count = self.weights.count
 
-            self.collect_steps(self.steps_per_collection)
-            self.timing.update_speed(self.steps_per_collection)
+            self.collect_steps(self.config.steps_per_collection)
+            self.timing.update_speed(self.config.steps_per_collection)
 
-            if len(self.buffer) >= self.batch_size:
-                for _ in range(self.train_steps):
+            if len(self.buffer) >= self.config.buffer.batch_size:
+                for _ in range(self.config.train_steps):
                     self.compute_and_send_gradients()
 
 
 def run_ddqn_worker(
-    worker_id: int,
+    config: WorkerConfig,
     weights_path: Path,
     gradient_queue: mp.Queue,
-    level: LevelType = (1, 1),
     ui_queue: Optional[mp.Queue] = None,
-    **kwargs: Any,
 ) -> None:
     """Entry point for worker process."""
     try:
         worker = DDQNWorker(
-            worker_id=worker_id,
+            config=config,
             weights_path=weights_path,
             gradient_queue=gradient_queue,
-            level=level,
             ui_queue=ui_queue,
-            **kwargs,
         )
         worker.run()
     except Exception as e:
@@ -543,13 +510,13 @@ def run_ddqn_worker(
                 ui_queue.put_nowait(
                     UIMessage(
                         msg_type=MessageType.WORKER_LOG,
-                        source_id=worker_id,
+                        source_id=config.worker_id,
                         data={"text": f"CRASH: {e}\n{traceback.format_exc()}"},
                     )
                 )
             except Exception:
                 pass
 
-        print(f"[W{worker_id}] CRASH: {e}", file=sys.stderr, flush=True)
+        print(f"[W{config.worker_id}] CRASH: {e}", file=sys.stderr, flush=True)
         traceback.print_exc(file=sys.stderr)
         raise

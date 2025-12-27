@@ -83,6 +83,7 @@ Usage:
 import os
 import sys
 import signal
+from typing import cast
 from pathlib import Path
 from typing import Literal
 from datetime import datetime
@@ -97,9 +98,14 @@ import click
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
+from mario_rl.core.config import BufferConfig
+from mario_rl.core.config import WorkerConfig
+from mario_rl.core.config import SnapshotConfig
+from mario_rl.core.config import ExplorationConfig
 from mario_rl.training.training_ui import TrainingUI
 from mario_rl.training.ddqn_worker import run_ddqn_worker
 from mario_rl.training.ddqn_learner import run_ddqn_learner
+from mario_rl.core.config import LevelType as ConfigLevelType
 
 LevelType = Literal["sequential", "random"] | tuple[int, int]
 
@@ -124,10 +130,10 @@ def run_training_ui(num_workers: int, ui_queue: Queue) -> None:
 
 
 def run_worker_silent(
-    worker_id: int,
+    config: WorkerConfig,
     weights_path: Path,
-    gradient_queue: Queue,
-    **kwargs,
+    gradient_queue: "Queue[object]",
+    ui_queue: "Queue[object] | None" = None,
 ) -> None:
     """Run worker with stdout/stderr suppressed (for UI mode)."""
     import os
@@ -143,7 +149,7 @@ def run_worker_silent(
     sys.stderr = devnull
 
     # Now run the actual worker
-    run_ddqn_worker(worker_id, weights_path, gradient_queue, **kwargs)
+    run_ddqn_worker(config, weights_path, gradient_queue, ui_queue)
 
 
 def run_learner_silent(
@@ -305,6 +311,19 @@ def main(
     worker_target = run_worker_silent if not no_ui else run_ddqn_worker
     learner_target = run_learner_silent if not no_ui else run_ddqn_learner
 
+    # Create buffer config (shared by all workers)
+    buffer_config = BufferConfig(
+        capacity=local_buffer_size,
+        batch_size=batch_size,
+        n_step=n_step,
+        gamma=gamma,
+    )
+
+    # Create snapshot config
+    snapshot_config = SnapshotConfig(
+        enabled=not no_game_snapshots,
+    )
+
     # Start worker processes with different epsilons
     worker_processes = []
     for i in range(workers):
@@ -312,24 +331,29 @@ def main(
         # Worker 0: most exploration, Worker N-1: least exploration
         worker_eps_end = eps_base ** (1 + (i + 1) / workers)
 
+        # Create exploration config for this worker
+        exploration_config = ExplorationConfig(
+            epsilon_start=1.0,
+            epsilon_end=worker_eps_end,
+            decay_steps=eps_decay_steps,
+        )
+
+        # Create worker config
+        worker_config = WorkerConfig(
+            worker_id=i,
+            level=cast(ConfigLevelType, level_type),
+            steps_per_collection=collect_steps,
+            train_steps=train_steps,
+            max_grad_norm=max_grad_norm,
+            buffer=buffer_config,
+            exploration=exploration_config,
+            snapshot=snapshot_config,
+        )
+
         p = Process(
             target=worker_target,
-            args=(i, weights_path, gradient_queue),
-            kwargs={
-                "level": level_type,
-                "n_step": n_step,
-                "gamma": gamma,
-                "local_buffer_size": local_buffer_size,
-                "batch_size": batch_size,
-                "steps_per_collection": collect_steps,
-                "train_steps": train_steps,
-                "eps_start": 1.0,
-                "eps_end": worker_eps_end,
-                "eps_decay_steps": eps_decay_steps,
-                "max_grad_norm": max_grad_norm,
-                "ui_queue": ui_queue,
-                "use_snapshots": not no_game_snapshots,
-            },
+            args=(worker_config, weights_path, gradient_queue),
+            kwargs={"ui_queue": ui_queue},
             daemon=True,
         )
         p.start()
@@ -344,11 +368,11 @@ def main(
         kwargs={
             "learning_rate": lr,
             "lr_end": lr_end,
+            "total_timesteps": total_steps,
             "tau": tau,
+            "accumulate_grads": accumulate_grads,
             "max_grad_norm": max_grad_norm,
             "weight_decay": weight_decay,
-            "accumulate_grads": accumulate_grads,
-            "total_timesteps": total_steps,
             "ui_queue": ui_queue,
             "restore_snapshot": snapshot_path is not None,
             "snapshot_path": snapshot_path,
@@ -359,44 +383,14 @@ def main(
     if no_ui:
         print("Started learner")
 
-    # Handle Ctrl+C
-    shutdown_initiated = False
-
-    def signal_handler(signum, frame):
-        nonlocal shutdown_initiated
-        if shutdown_initiated:
-            return
-        shutdown_initiated = True
-
-        if no_ui:
-            print("\nShutting down...")
-
-        # Cancel queue join threads
-        gradient_queue.cancel_join_thread()
-        if ui_queue is not None:
-            ui_queue.cancel_join_thread()
-
-        # Terminate all processes
+    # Set up signal handler
+    def signal_handler(sig, frame):
+        print("\nShutting down...")
         for p in worker_processes:
-            if p.is_alive():
-                p.terminate()
-        if learner_process.is_alive():
-            learner_process.terminate()
-        if ui_process is not None and ui_process.is_alive():
+            p.terminate()
+        learner_process.terminate()
+        if ui_process:
             ui_process.terminate()
-
-        # Wait for processes to finish
-        for p in worker_processes:
-            p.join(timeout=1.0)
-        learner_process.join(timeout=1.0)
-        if ui_process is not None:
-            ui_process.join(timeout=1.0)
-
-        # Close queues
-        gradient_queue.close()
-        if ui_queue is not None:
-            ui_queue.close()
-
         sys.exit(0)
 
     signal.signal(signal.SIGINT, signal_handler)
@@ -404,15 +398,14 @@ def main(
 
     # Wait for processes
     try:
-        if ui_process is not None:
-            ui_process.join()  # Wait for UI to exit
-        else:
-            learner_process.join()
+        learner_process.join()
     except KeyboardInterrupt:
-        signal_handler(None, None)
-
-    if no_ui:
-        print("Training complete!")
+        print("\nShutting down...")
+        for p in worker_processes:
+            p.terminate()
+        learner_process.terminate()
+        if ui_process:
+            ui_process.terminate()
 
 
 if __name__ == "__main__":
