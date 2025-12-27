@@ -600,11 +600,16 @@ class DDQNWorker:
     # Game state snapshots (for practicing from checkpoints)
     use_snapshots: bool = True
     snapshot_slots: int = 10  # Number of rotating snapshot slots
+    snapshot_interval: int = 5  # Save checkpoint every N seconds of Mario time
+    max_restores_without_progress: int = 3  # End episode after N restores with no x progress
     snapshot_restores: int = field(init=False, default=0)
     _slot_to_time: Dict[int, int] = field(init=False, default_factory=dict)
     # Snapshot: (observation, frame_stack_queue, nes_state_bytes)
     _slot_to_state: Dict[int, Tuple[np.ndarray, List[np.ndarray], bytes]] = field(init=False, default_factory=dict)
     _fstack: Any = field(init=False, repr=False)  # Reference to FrameStackObservation wrapper
+    # Progress tracking for snapshots
+    _best_x_at_restore: int = field(init=False, default=0)
+    _restores_without_progress: int = field(init=False, default=0)
 
     def __post_init__(self) -> None:
         """Initialize environment, network, and buffer."""
@@ -670,6 +675,8 @@ class DDQNWorker:
         self._slot_to_time = {}
         self._slot_to_state = {}
         self.snapshot_restores = 0
+        self._best_x_at_restore = 0
+        self._restores_without_progress = 0
 
         # Load initial weights
         self._load_weights()
@@ -743,7 +750,7 @@ class DDQNWorker:
     def _save_game_snapshot(self, state: np.ndarray, info: dict) -> None:
         """Save game snapshot at current time checkpoint.
 
-        Saves:
+        Saves checkpoints every snapshot_interval seconds of Mario time.
         - Current observation (state)
         - Frame stack queue (for proper restoration)
         - NES emulator state
@@ -752,16 +759,17 @@ class DDQNWorker:
             return
 
         game_time = info.get("time", 0)
-        world_time = game_time // 2  # Coarser time granularity
+        # Checkpoint every snapshot_interval seconds (default 5s)
+        checkpoint_time = game_time // self.snapshot_interval
 
-        # Only save at new time points (not already saved)
+        # Only save at new checkpoint times (not already saved)
         time_to_slot = {v: k for k, v in self._slot_to_time.items()}
-        if world_time in time_to_slot or world_time <= 0:
+        if checkpoint_time in time_to_slot or checkpoint_time <= 0:
             return
 
         # Use rotating slots
-        slot_id = world_time % self.snapshot_slots
-        self._slot_to_time[slot_id] = world_time
+        slot_id = checkpoint_time % self.snapshot_slots
+        self._slot_to_time[slot_id] = checkpoint_time
 
         # Save: observation, frame stack queue, NES emulator state
         try:
@@ -776,17 +784,17 @@ class DDQNWorker:
         except Exception:
             pass  # Silently fail if can't save
 
-    def _try_restore_game_snapshot(self, info: dict) -> Tuple[np.ndarray, bool]:
+    def _try_restore_game_snapshot(self, info: dict, current_best_x: int) -> Tuple[np.ndarray, bool]:
         """
         Try to restore from a recent snapshot after death.
 
-        Only restores if we have a checkpoint from exactly 2 time units earlier.
-        This prevents death-restore loops from restoring too close to death point.
+        Only restores if:
+        1. We have a checkpoint from 1 interval earlier
+        2. We haven't exceeded max_restores_without_progress
 
-        Restores:
-        - NES emulator state
-        - Frame stack queue
-        - Returns saved observation
+        Args:
+            info: Environment info dict
+            current_best_x: Current best x position in this episode
 
         Returns:
             Tuple of (restored_state, success)
@@ -795,11 +803,23 @@ class DDQNWorker:
             return np.array([]), False
 
         game_time = info.get("time", 0)
-        world_time = game_time // 2
-        restore_time = world_time + 2  # Checkpoint from 2 time units earlier
+        checkpoint_time = game_time // self.snapshot_interval
+        restore_time = checkpoint_time + 1  # Checkpoint from 1 interval earlier
 
-        # Only restore if we have the EXACT checkpoint (like MadMario)
-        # This prevents restoring too close to death point
+        # Check if we're making progress
+        if current_best_x > self._best_x_at_restore:
+            # Made progress - reset counter
+            self._restores_without_progress = 0
+            self._best_x_at_restore = current_best_x
+        else:
+            # No progress since last restore
+            self._restores_without_progress += 1
+
+        # If too many restores without progress, let episode end
+        if self._restores_without_progress >= self.max_restores_without_progress:
+            return np.array([]), False
+
+        # Only restore if we have the EXACT checkpoint
         time_to_slot = {v: k for k, v in self._slot_to_time.items()}
         if restore_time not in time_to_slot:
             # Don't have a checkpoint far enough back - let episode end normally
@@ -836,9 +856,11 @@ class DDQNWorker:
         state, _ = self.env.reset()
         episodes_completed = 0
 
-        # Clear snapshots on new episode (fresh start)
+        # Clear snapshots and progress tracking on new episode
         self._slot_to_time.clear()
         self._slot_to_state.clear()
+        self._best_x_at_restore = 0
+        self._restores_without_progress = 0
 
         for _ in range(num_steps):
             # Get action (also computes entropy)
@@ -894,11 +916,12 @@ class DDQNWorker:
             # Try to restore from snapshot on death (instead of full reset)
             if is_dead and self.use_snapshots:
                 game_time = info.get("time", 0)
-                world_time = game_time // 2
+                checkpoint_time = game_time // self.snapshot_interval
 
                 # Only restore if we have snapshots and not too early in the level
-                if world_time > 15:
-                    restored_state, restored = self._try_restore_game_snapshot(info)
+                # (checkpoint_time > 3 means at least 15+ seconds into the level with 5s intervals)
+                if checkpoint_time > 3:
+                    restored_state, restored = self._try_restore_game_snapshot(info, self.best_x)
                     if restored:
                         # Track death
                         self.deaths += 1
@@ -952,6 +975,8 @@ class DDQNWorker:
                 state, _ = self.env.reset()
                 self._slot_to_time.clear()
                 self._slot_to_state.clear()
+                self._best_x_at_restore = 0
+                self._restores_without_progress = 0
                 self.episode_reward = 0.0
                 self.episode_length = 0
                 self.best_x = 0
