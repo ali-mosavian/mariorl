@@ -780,6 +780,9 @@ class DDQNWorker:
         """
         Try to restore from a recent snapshot after death.
 
+        Only restores if we have a checkpoint from exactly 2 time units earlier.
+        This prevents death-restore loops from restoring too close to death point.
+
         Restores:
         - NES emulator state
         - Frame stack queue
@@ -793,20 +796,17 @@ class DDQNWorker:
 
         game_time = info.get("time", 0)
         world_time = game_time // 2
-        restore_time = world_time + 2  # Restore to a slightly earlier checkpoint
+        restore_time = world_time + 2  # Checkpoint from 2 time units earlier
 
-        # Find slot for restore time
+        # Only restore if we have the EXACT checkpoint (like MadMario)
+        # This prevents restoring too close to death point
         time_to_slot = {v: k for k, v in self._slot_to_time.items()}
         if restore_time not in time_to_slot:
-            # Try closest earlier time
-            available_times = sorted(time_to_slot.keys())
-            earlier_times = [t for t in available_times if t < world_time]
-            if not earlier_times:
-                return np.array([]), False
-            restore_time = earlier_times[-1]  # Most recent earlier time
+            # Don't have a checkpoint far enough back - let episode end normally
+            return np.array([]), False
 
-        slot_id = time_to_slot.get(restore_time)
-        if slot_id is None or slot_id not in self._slot_to_state:
+        slot_id = time_to_slot[restore_time]
+        if slot_id not in self._slot_to_state:
             return np.array([]), False
 
         saved_state, saved_frames, nes_state_bytes = self._slot_to_state[slot_id]
