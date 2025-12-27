@@ -545,15 +545,16 @@ class DDQNLearner:
                 packet = self.gradient_queue.get(timeout=5.0)
                 gradient_packets.append(packet)
 
-                # Collect additional gradients if accumulating
-                while len(gradient_packets) < self.accumulate_grads:
+                # Drain ALL available gradients from queue to prevent worker blocking
+                # This is critical because workers send multiple gradients per cycle
+                while True:
                     try:
                         packet = self.gradient_queue.get_nowait()
                         gradient_packets.append(packet)
                     except Exception:
                         break
 
-                # Apply gradients
+                # Apply gradients (will average if multiple)
                 self.apply_gradients(gradient_packets)
 
             except Exception as e:

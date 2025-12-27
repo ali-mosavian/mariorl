@@ -1101,10 +1101,12 @@ class DDQNWorker:
         }
 
         try:
-            self.gradient_queue.put(gradient_packet, timeout=5.0)
+            # Short timeout to avoid blocking workers too long
+            self.gradient_queue.put(gradient_packet, timeout=0.5)
             self.gradients_sent += 1
-        except Exception as e:
-            self._log(f"Failed to send gradients: {e}")
+        except Exception:
+            # Queue full - skip this gradient to avoid blocking
+            pass
 
         return metrics
 
@@ -1193,11 +1195,16 @@ class DDQNWorker:
         )
 
         while True:
+            loop_start = time.time()
+
             # Maybe sync weights from learner
             self._maybe_sync_weights()
+            sync_time = time.time() - loop_start
 
             # Collect experiences
+            collect_start = time.time()
             self.collect_steps(self.steps_per_collection)
+            collect_time = time.time() - collect_start
 
             # Calculate speed
             now = time.time()
@@ -1206,9 +1213,23 @@ class DDQNWorker:
             self._last_time = now
 
             # Compute gradients and send to learner
+            grad_start = time.time()
+            grad_count = 0
             if len(self.buffer) >= self.batch_size:
                 for _ in range(self.train_steps):
                     self.compute_and_send_gradients()
+                    grad_count += 1
+            grad_time = time.time() - grad_start
+
+            total_time = time.time() - loop_start
+
+            # Log if any phase took too long (> 5 seconds)
+            if total_time > 5.0:
+                self._log(
+                    f"SLOW LOOP: total={total_time:.1f}s "
+                    f"(sync={sync_time:.1f}s, collect={collect_time:.1f}s, "
+                    f"grad={grad_time:.1f}s x{grad_count})"
+                )
 
 
 def run_ddqn_worker(

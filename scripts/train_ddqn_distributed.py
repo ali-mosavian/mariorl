@@ -286,7 +286,9 @@ def main(
         print("=" * 70)
 
     # Create queues
-    gradient_queue: Queue = Queue(maxsize=workers * 2)
+    # Larger queue to reduce worker blocking
+    # Workers send train_steps (4) gradients per cycle, so need more buffer
+    gradient_queue: Queue = Queue(maxsize=workers * 8)
     ui_queue: Queue | None = Queue() if not no_ui else None
 
     # Start UI process
