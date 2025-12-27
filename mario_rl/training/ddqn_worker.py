@@ -680,6 +680,7 @@ class DDQNWorker:
         self.snapshot_restores = 0
         self._best_x_at_restore = 0
         self._restores_without_progress = 0
+        self._last_action_time = time.time()
 
         # Load initial weights
         self._load_weights()
