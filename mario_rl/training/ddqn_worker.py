@@ -1194,17 +1194,25 @@ class DDQNWorker:
             f"(level={self.level}, device={self.device}, ε_end={self.eps_end:.4f}, PER)"
         )
 
+        loop_count = 0
         while True:
-            loop_start = time.time()
+            loop_count += 1
+
+            # Log every 100 loops to confirm workers are alive (print directly for reliability)
+            if loop_count % 100 == 1:
+                import sys
+
+                print(
+                    f"[W{self.worker_id}] Loop {loop_count}: buf={len(self.buffer)}, steps={self.total_steps}",
+                    file=sys.stderr,
+                    flush=True,
+                )
 
             # Maybe sync weights from learner
             self._maybe_sync_weights()
-            sync_time = time.time() - loop_start
 
             # Collect experiences
-            collect_start = time.time()
             self.collect_steps(self.steps_per_collection)
-            collect_time = time.time() - collect_start
 
             # Calculate speed
             now = time.time()
@@ -1213,23 +1221,9 @@ class DDQNWorker:
             self._last_time = now
 
             # Compute gradients and send to learner
-            grad_start = time.time()
-            grad_count = 0
             if len(self.buffer) >= self.batch_size:
                 for _ in range(self.train_steps):
                     self.compute_and_send_gradients()
-                    grad_count += 1
-            grad_time = time.time() - grad_start
-
-            total_time = time.time() - loop_start
-
-            # Log if any phase took too long (> 5 seconds)
-            if total_time > 5.0:
-                self._log(
-                    f"SLOW LOOP: total={total_time:.1f}s "
-                    f"(sync={sync_time:.1f}s, collect={collect_time:.1f}s, "
-                    f"grad={grad_time:.1f}s x{grad_count})"
-                )
 
 
 def run_ddqn_worker(
@@ -1241,12 +1235,37 @@ def run_ddqn_worker(
     **kwargs: Any,
 ) -> None:
     """Entry point for worker process."""
-    worker = DDQNWorker(
-        worker_id=worker_id,
-        weights_path=weights_path,
-        gradient_queue=gradient_queue,
-        level=level,
-        ui_queue=ui_queue,
-        **kwargs,
-    )
-    worker.run()
+    try:
+        worker = DDQNWorker(
+            worker_id=worker_id,
+            weights_path=weights_path,
+            gradient_queue=gradient_queue,
+            level=level,
+            ui_queue=ui_queue,
+            **kwargs,
+        )
+        worker.run()
+    except Exception as e:
+        import sys
+        import traceback
+
+        # Try to log to UI queue
+        if ui_queue is not None:
+            try:
+                from mario_rl.training.training_ui import UIMessage
+                from mario_rl.training.training_ui import MessageType
+
+                ui_queue.put_nowait(
+                    UIMessage(
+                        msg_type=MessageType.WORKER_LOG,
+                        source_id=worker_id,
+                        data={"text": f"CRASH: {e}\n{traceback.format_exc()}"},
+                    )
+                )
+            except Exception:
+                pass
+
+        # Also print to stderr (might be visible without UI)
+        print(f"[W{worker_id}] CRASH: {e}", file=sys.stderr, flush=True)
+        traceback.print_exc(file=sys.stderr)
+        raise
