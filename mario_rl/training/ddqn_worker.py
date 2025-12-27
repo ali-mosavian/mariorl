@@ -271,13 +271,19 @@ class DDQNWorker:
                 game_time = info.get("time", 0)
                 checkpoint_time = game_time // self.config.snapshot.interval
                 if checkpoint_time > 3:
-                    restored_state, restored = self.snapshots.try_restore(info, self.episode.best_x)
-                    if restored:
-                        self.metrics.add_death(x_pos)
-                        self.n_step_buffer.reset()
-                        state = restored_state
-                        self._current_state = state
-                        continue
+                    try:
+                        restored_state, restored = self.snapshots.try_restore(info, self.episode.best_x)
+                        if restored:
+                            # Verify restore succeeded and state is valid
+                            if restored_state.size > 0:
+                                self.metrics.add_death(x_pos)
+                                self.n_step_buffer.reset()
+                                state = restored_state
+                                self._current_state = state
+                                continue
+                    except Exception:
+                        # Restore failed - let episode end normally
+                        pass
 
             if done:
                 # Flush N-step buffer

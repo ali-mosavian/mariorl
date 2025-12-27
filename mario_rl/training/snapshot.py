@@ -158,6 +158,10 @@ class SnapshotManager:
             # load_state() doesn't reset this, causing "cannot step in done env" error
             self.base_env.env._done = False
 
+            # Verify observation is valid
+            if snapshot.observation.size == 0:
+                return np.array([]), False
+
             self.restore_count += 1
 
             # Track progress ONLY on successful restore
@@ -169,6 +173,7 @@ class SnapshotManager:
 
             return snapshot.observation, True
         except Exception:
+            # Restore failed - return failure
             return np.array([]), False
 
     @property
