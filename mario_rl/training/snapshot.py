@@ -154,6 +154,10 @@ class SnapshotManager:
             # Then restore NES emulator state
             self.base_env.env.load_state(snapshot.nes_state)
 
+            # CRITICAL: Reset the NESEnv's _done flag
+            # load_state() doesn't reset this, causing "cannot step in done env" error
+            self.base_env.env._done = False
+
             self.restore_count += 1
 
             # Track progress ONLY on successful restore
