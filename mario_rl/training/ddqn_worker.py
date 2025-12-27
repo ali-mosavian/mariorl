@@ -604,8 +604,8 @@ class DDQNWorker:
     max_restores_without_progress: int = 3  # End episode after N restores with no x progress
     snapshot_restores: int = field(init=False, default=0)
     _slot_to_time: Dict[int, int] = field(init=False, default_factory=dict)
-    # Snapshot: (observation, frame_stack_queue, nes_state_bytes)
-    _slot_to_state: Dict[int, Tuple[np.ndarray, List[np.ndarray], bytes]] = field(init=False, default_factory=dict)
+    # Snapshot: (observation, frame_stack_queue, nes_state_array)
+    _slot_to_state: Dict[int, Tuple[np.ndarray, List[np.ndarray], np.ndarray]] = field(init=False, default_factory=dict)
     _fstack: Any = field(init=False, repr=False)  # Reference to FrameStackObservation wrapper
     # Progress tracking for snapshots
     _best_x_at_restore: int = field(init=False, default=0)
@@ -780,13 +780,18 @@ class DDQNWorker:
 
         # Save: observation, frame stack queue, NES emulator state
         try:
+            # Get NES state directly as numpy array (like MadMario does)
             nes_state = self.base_env.env.dump_state()
-            # Save the frame stack queue (deque of individual frames)
-            frame_queue = list(self._fstack.obs_queue) if hasattr(self._fstack, "obs_queue") else []
+
+            # Save COPIES of frame stack queue (deque contains references that get mutated)
+            frame_queue = []
+            if hasattr(self._fstack, "obs_queue"):
+                frame_queue = [np.array(f, copy=True) for f in self._fstack.obs_queue]
+
             self._slot_to_state[slot_id] = (
-                state.copy(),
+                np.array(state, copy=True),
                 frame_queue,
-                nes_state.tobytes() if hasattr(nes_state, "tobytes") else bytes(nes_state),
+                nes_state,  # Store numpy array directly
             )
         except Exception:
             pass  # Silently fail if can't save
@@ -827,18 +832,17 @@ class DDQNWorker:
         if slot_id not in self._slot_to_state:
             return np.array([]), False
 
-        saved_state, saved_frames, nes_state_bytes = self._slot_to_state[slot_id]
+        saved_state, saved_frames, nes_state = self._slot_to_state[slot_id]
 
         try:
-            # Restore NES emulator state
-            nes_state = np.frombuffer(nes_state_bytes, dtype=np.uint8)
-            self.base_env.env.load_state(nes_state)
-
-            # Restore frame stack queue
+            # Restore frame stack queue FIRST (like MadMario does)
             if saved_frames and hasattr(self._fstack, "obs_queue"):
                 self._fstack.obs_queue.clear()
                 for frame in saved_frames:
                     self._fstack.obs_queue.append(frame)
+
+            # Then restore NES emulator state
+            self.base_env.env.load_state(nes_state)
 
             self.snapshot_restores += 1
 
