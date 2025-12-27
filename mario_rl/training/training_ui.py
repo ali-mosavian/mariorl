@@ -70,6 +70,7 @@ class TrainingUI:
     # Graph history (from learner aggregated stats)
     graph_reward_history: List[float] = field(init=False, default_factory=list)
     graph_speed_history: List[float] = field(init=False, default_factory=list)
+    graph_entropy_history: List[float] = field(init=False, default_factory=list)
     graph_steps_history: List[int] = field(init=False, default_factory=list)
     max_graph_history: int = field(init=False, default=500)
 
@@ -98,6 +99,7 @@ class TrainingUI:
         # Graph history
         self.graph_reward_history = []
         self.graph_speed_history = []
+        self.graph_entropy_history = []
         self.graph_steps_history = []
         self.max_graph_history = 500
 
@@ -173,11 +175,13 @@ class TrainingUI:
                         if not self.graph_steps_history or timesteps > self.graph_steps_history[-1]:
                             self.graph_reward_history.append(msg.data.get("avg_reward", 0))
                             self.graph_speed_history.append(msg.data.get("avg_speed", 0))
+                            self.graph_entropy_history.append(msg.data.get("avg_entropy", 0))
                             self.graph_steps_history.append(timesteps)
                             # Trim to max history
                             if len(self.graph_reward_history) > self.max_graph_history:
                                 self.graph_reward_history.pop(0)
                                 self.graph_speed_history.pop(0)
+                                self.graph_entropy_history.pop(0)
                                 self.graph_steps_history.pop(0)
                 elif msg.msg_type == MessageType.LEARNER_LOG:
                     self._add_log(f"[LEARNER] {msg.data.get('text', '')}")
@@ -459,7 +463,7 @@ class TrainingUI:
                 pass
 
     def _draw_graphs_section(self, stdscr, y: int, width: int, height: int) -> None:
-        """Draw the graphs section with reward and speed plots."""
+        """Draw the graphs section with reward, speed, and entropy plots."""
         # Header with data count
         data_count = len(self.graph_reward_history)
         stdscr.addstr(y, 2, f"┌─ GRAPHS ({data_count} pts) ", curses.A_BOLD | curses.color_pair(4))
@@ -469,36 +473,50 @@ class TrainingUI:
             stdscr.addstr(y + 1, 4, "Waiting for data...", curses.A_DIM)
             return
 
-        # Calculate graph dimensions
+        # Calculate graph dimensions - 3 graphs side by side
         graph_height = height - 2  # Leave room for header
-        half_width = (width - 6) // 2
+        third_width = (width - 8) // 3
 
         # Draw reward graph on the left
         self._draw_graph_with_axes(
             stdscr,
             y=y + 1,
             x=2,
-            width=half_width,
+            width=third_width,
             height=graph_height,
             data=self.graph_reward_history,
             x_data=self.graph_steps_history,
-            title="Average Reward",
+            title="Avg Reward",
             x_label="steps",
             color=1,  # Green
         )
 
-        # Draw speed graph on the right
+        # Draw speed graph in the middle
         self._draw_graph_with_axes(
             stdscr,
             y=y + 1,
-            x=2 + half_width + 2,
-            width=half_width,
+            x=2 + third_width + 2,
+            width=third_width,
             height=graph_height,
             data=self.graph_speed_history,
             x_data=self.graph_steps_history,
-            title="Average Speed (x/t)",
+            title="Avg Speed",
             x_label="steps",
             color=4,  # Blue/Cyan
+        )
+
+        # Draw entropy graph on the right
+        self._draw_graph_with_axes(
+            stdscr,
+            y=y + 1,
+            x=2 + 2 * (third_width + 2),
+            width=third_width,
+            height=graph_height,
+            data=self.graph_entropy_history,
+            x_data=self.graph_steps_history,
+            title="Q-Entropy",
+            x_label="steps",
+            color=5,  # Magenta
         )
 
     def _draw(self, stdscr):

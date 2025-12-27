@@ -181,6 +181,11 @@ class DDQNLearner:
     _worker_deaths: Dict[int, int] = field(init=False, default_factory=dict)
     _worker_flags: Dict[int, int] = field(init=False, default_factory=dict)
     _worker_best_x: Dict[int, int] = field(init=False, default_factory=dict)
+    _worker_entropy: Dict[int, float] = field(init=False, default_factory=dict)
+
+    # Snapshot settings
+    snapshot_interval: int = 500  # Save full snapshot every N updates
+    _snapshot_path: Path = field(init=False, repr=False)
 
     def __post_init__(self):
         """Initialize network and optimizer."""
@@ -236,6 +241,9 @@ class DDQNLearner:
         else:
             self.save_weights()
 
+        # Initialize snapshot path
+        self._snapshot_path = self.save_dir / "snapshot.pt"
+
         # Initialize CSV logging
         self._metrics_csv = self.save_dir / "ddqn_metrics.csv"
         if not self._metrics_csv.exists():
@@ -262,6 +270,70 @@ class DDQNLearner:
             "version": self.weight_version,
         }
         torch.save(checkpoint, self.weights_path)
+
+    def save_snapshot(self) -> None:
+        """
+        Save full training snapshot for resuming training.
+
+        Includes: network, optimizer, scheduler, training state.
+        """
+        snapshot = {
+            "net_state_dict": self.net.state_dict(),
+            "optimizer_state_dict": self.optimizer.state_dict(),
+            "scheduler_state_dict": self.scheduler.state_dict(),
+            "update_count": self.update_count,
+            "total_timesteps_collected": self.total_timesteps_collected,
+            "weight_version": self.weight_version,
+            "gradients_received": self.gradients_received,
+            "timestamp": time.time(),
+        }
+        # Atomic write to prevent corruption
+        tmp_path = self._snapshot_path.with_suffix(".pt.tmp")
+        torch.save(snapshot, tmp_path)
+        tmp_path.rename(self._snapshot_path)
+        self._log(f"Snapshot saved: step={self.update_count}, timesteps={self.total_timesteps_collected:,}")
+
+    def restore_snapshot(self, snapshot_path: Path | None = None) -> bool:
+        """
+        Restore training from a snapshot.
+
+        Args:
+            snapshot_path: Path to snapshot file. Uses default if None.
+
+        Returns:
+            True if restoration succeeded, False otherwise.
+        """
+        path = snapshot_path or self._snapshot_path
+        if not path.exists():
+            return False
+
+        try:
+            snapshot = torch.load(path, map_location=self.device, weights_only=False)
+
+            # Restore network
+            self.net.load_state_dict(snapshot["net_state_dict"])
+
+            # Restore optimizer
+            self.optimizer.load_state_dict(snapshot["optimizer_state_dict"])
+
+            # Restore scheduler
+            self.scheduler.load_state_dict(snapshot["scheduler_state_dict"])
+
+            # Restore training state
+            self.update_count = snapshot["update_count"]
+            self.total_timesteps_collected = snapshot["total_timesteps_collected"]
+            self.weight_version = snapshot["weight_version"]
+            self.gradients_received = snapshot.get("gradients_received", 0)
+
+            self._log(f"Restored from snapshot: step={self.update_count}, timesteps={self.total_timesteps_collected:,}")
+
+            # Save weights for workers to sync
+            self.save_weights()
+            return True
+
+        except Exception as e:
+            self._log(f"Failed to restore snapshot: {e}")
+            return False
 
     def apply_gradients(self, gradient_packets: List[Dict]) -> Dict[str, float]:
         """
@@ -328,6 +400,8 @@ class DDQNLearner:
                 self._worker_flags[worker_id] = metrics["total_flags"]
             if "best_x_ever" in metrics:
                 self._worker_best_x[worker_id] = metrics["best_x_ever"]
+            if "entropy" in metrics:
+                self._worker_entropy[worker_id] = metrics["entropy"]
 
         # Average metrics from workers
         avg_metrics = {}
@@ -349,6 +423,10 @@ class DDQNLearner:
         # Save weights periodically
         if self.update_count % self.save_every == 0:
             self.save_weights()
+
+        # Save full snapshot periodically
+        if self.update_count % self.snapshot_interval == 0:
+            self.save_snapshot()
 
         # Log metrics periodically
         if self.update_count % self.log_every == 0:
@@ -396,6 +474,7 @@ class DDQNLearner:
             # Compute aggregated metrics from all workers
             avg_reward = np.mean(list(self._worker_avg_rewards.values())) if self._worker_avg_rewards else 0.0
             avg_speed = np.mean(list(self._worker_avg_speeds.values())) if self._worker_avg_speeds else 0.0
+            avg_entropy = np.mean(list(self._worker_entropy.values())) if self._worker_entropy else 0.0
             total_deaths = sum(self._worker_deaths.values())
             total_flags = sum(self._worker_flags.values())
             global_best_x = max(self._worker_best_x.values()) if self._worker_best_x else 0
@@ -417,6 +496,7 @@ class DDQNLearner:
                     # Aggregated worker metrics for graphs
                     "avg_reward": avg_reward,
                     "avg_speed": avg_speed,
+                    "avg_entropy": avg_entropy,
                     "total_deaths": total_deaths,
                     "total_flags": total_flags,
                     "global_best_x": global_best_x,
@@ -491,6 +571,8 @@ def run_ddqn_learner(
     save_dir: Path,
     gradient_queue: mp.Queue,
     ui_queue: Optional[mp.Queue] = None,
+    restore_snapshot: bool = False,
+    snapshot_path: Optional[Path] = None,
     **kwargs,
 ) -> None:
     """Entry point for learner process."""
@@ -501,4 +583,9 @@ def run_ddqn_learner(
         ui_queue=ui_queue,
         **kwargs,
     )
+
+    # Optionally restore from snapshot
+    if restore_snapshot:
+        learner.restore_snapshot(snapshot_path)
+
     learner.run()

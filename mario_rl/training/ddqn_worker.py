@@ -589,6 +589,10 @@ class DDQNWorker:
     speed_history: List[float] = field(init=False, default_factory=list)
     episode_start_time: int = field(init=False, default=400)  # Mario starts with 400 time
 
+    # Entropy tracking (softmax entropy over Q-values)
+    entropy_history: List[float] = field(init=False, default_factory=list)
+    last_entropy: float = field(init=False, default=0.0)
+
     def __post_init__(self) -> None:
         """Initialize environment, network, and buffer."""
         # Auto-detect best device
@@ -708,6 +712,14 @@ class DDQNWorker:
         state = self._preprocess_state(state)
         state_tensor = torch.from_numpy(np.expand_dims(state, 0)).float().to(self.device)
         q_values = self.net.online(state_tensor)
+
+        # Compute entropy of softmax over Q-values (measures action certainty)
+        # Temperature scaling for meaningful entropy
+        probs = torch.softmax(q_values / 0.5, dim=1)  # temp=0.5 for smoother distribution
+        log_probs = torch.log(probs + 1e-8)
+        entropy = -(probs * log_probs).sum(dim=1).item()
+        self.last_entropy = entropy
+
         return int(q_values.argmax(dim=1).item())
 
     def collect_steps(self, num_steps: int) -> int:
@@ -720,8 +732,14 @@ class DDQNWorker:
         episodes_completed = 0
 
         for _ in range(num_steps):
-            # Get action
+            # Get action (also computes entropy)
             action = self._get_action(state)
+
+            # Track entropy periodically
+            if self.total_steps % 10 == 0:
+                self.entropy_history.append(self.last_entropy)
+                if len(self.entropy_history) > 100:
+                    self.entropy_history.pop(0)
 
             # Step environment
             next_state, reward, terminated, truncated, info = self.env.step(action)
@@ -876,12 +894,14 @@ class DDQNWorker:
         # Metrics (include aggregated worker stats for learner)
         rolling_avg_reward = np.mean(self.reward_history) if self.reward_history else 0.0
         avg_speed = np.mean(self.speed_history) if self.speed_history else 0.0
+        avg_entropy = np.mean(self.entropy_history) if self.entropy_history else 0.0
         metrics = {
             "loss": loss.item(),
             "q_mean": current_q_selected.mean().item(),
             "q_max": current_q_selected.max().item(),
             "td_error": td_errors.abs().mean().item(),
             "per_beta": self.buffer.current_beta,
+            "entropy": avg_entropy,
             # Aggregated worker stats for learner graphs
             "avg_reward": rolling_avg_reward,
             "avg_speed": avg_speed,
@@ -925,6 +945,8 @@ class DDQNWorker:
             avg_x_at_death = np.mean(self.x_at_death_history) if self.x_at_death_history else 0.0
             avg_time_to_flag = np.mean(self.time_to_flag_history) if self.time_to_flag_history else 0.0
 
+            avg_entropy = np.mean(self.entropy_history) if self.entropy_history else 0.0
+
             msg = UIMessage(
                 msg_type=MessageType.WORKER_STATUS,
                 source_id=self.worker_id,
@@ -955,6 +977,7 @@ class DDQNWorker:
                     "avg_speed": avg_speed,
                     "avg_x_at_death": avg_x_at_death,
                     "avg_time_to_flag": avg_time_to_flag,
+                    "entropy": avg_entropy,
                 },
             )
             self.ui_queue.put_nowait(msg)

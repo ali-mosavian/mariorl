@@ -150,6 +150,8 @@ def run_learner_silent(
     weights_path: Path,
     save_dir: Path,
     gradient_queue: Queue,
+    restore_snapshot: bool = False,
+    snapshot_path: Path | None = None,
     **kwargs,
 ) -> None:
     """Run learner with stdout/stderr suppressed (for UI mode)."""
@@ -166,7 +168,14 @@ def run_learner_silent(
     sys.stderr = devnull
 
     # Now run the actual learner
-    run_ddqn_learner(weights_path, save_dir, gradient_queue, **kwargs)
+    run_ddqn_learner(
+        weights_path,
+        save_dir,
+        gradient_queue,
+        restore_snapshot=restore_snapshot,
+        snapshot_path=snapshot_path,
+        **kwargs,
+    )
 
 
 @click.command()
@@ -195,6 +204,7 @@ def run_learner_silent(
 @click.option("--weight-decay", default=1e-4, help="L2 regularization")
 @click.option("--no-ui", is_flag=True, help="Disable ncurses UI")
 @click.option("--resume", is_flag=True, help="Resume from latest checkpoint")
+@click.option("--restore-snapshot", type=str, default=None, help="Restore from specific snapshot file")
 def main(
     workers: int,
     level: str,
@@ -216,6 +226,7 @@ def main(
     weight_decay: float,
     no_ui: bool,
     resume: bool,
+    restore_snapshot: str | None,
 ) -> None:
     """Train Mario using Distributed DDQN with async gradient updates."""
     # Parse level
@@ -225,13 +236,29 @@ def main(
     timestamp = datetime.now().strftime("%Y-%m-%dT%H-%M-%S")
     run_dir = Path(save_dir) / f"ddqn_dist_{timestamp}"
 
-    # Check for resume
-    if resume:
+    # Parse snapshot path if provided
+    snapshot_path: Path | None = None
+    if restore_snapshot:
+        snapshot_path = Path(restore_snapshot)
+        # If it's a directory, look for snapshot.pt inside
+        if snapshot_path.is_dir():
+            snapshot_path = snapshot_path / "snapshot.pt"
+        # Use the parent directory as run_dir
+        run_dir = snapshot_path.parent
+        print(f"Restoring from snapshot: {snapshot_path}")
+
+    # Check for resume (only if not restoring from specific snapshot)
+    elif resume:
         checkpoints = list(Path(save_dir).glob("ddqn_dist_*/weights.pt"))
         if checkpoints:
             latest = max(checkpoints, key=lambda p: p.stat().st_mtime)
             run_dir = latest.parent
-            print(f"Resuming from: {run_dir}")
+            # Check if snapshot exists
+            if (run_dir / "snapshot.pt").exists():
+                snapshot_path = run_dir / "snapshot.pt"
+                print(f"Resuming from snapshot: {snapshot_path}")
+            else:
+                print(f"Resuming from: {run_dir}")
 
     run_dir.mkdir(parents=True, exist_ok=True)
     weights_path = run_dir / "weights.pt"
@@ -318,6 +345,8 @@ def main(
             "accumulate_grads": accumulate_grads,
             "total_timesteps": total_steps,
             "ui_queue": ui_queue,
+            "restore_snapshot": snapshot_path is not None,
+            "snapshot_path": snapshot_path,
         },
         daemon=True,
     )
