@@ -593,6 +593,13 @@ class DDQNWorker:
     entropy_history: List[float] = field(init=False, default_factory=list)
     last_entropy: float = field(init=False, default=0.0)
 
+    # Game state snapshots (for practicing from checkpoints)
+    use_snapshots: bool = True
+    snapshot_slots: int = 10  # Number of rotating snapshot slots
+    snapshot_restores: int = field(init=False, default=0)
+    _slot_to_time: Dict[int, int] = field(init=False, default_factory=dict)
+    _slot_to_state: Dict[int, Tuple[np.ndarray, List[np.ndarray], bytes]] = field(init=False, default_factory=dict)
+
     def __post_init__(self) -> None:
         """Initialize environment, network, and buffer."""
         # Auto-detect best device
@@ -652,6 +659,11 @@ class DDQNWorker:
         self.gradients_sent = 0
         self._last_time = time.time()
         self.current_epsilon = self.eps_start
+
+        # Initialize snapshot tracking
+        self._slot_to_time = {}
+        self._slot_to_state = {}
+        self.snapshot_restores = 0
 
         # Load initial weights
         self._load_weights()
@@ -722,6 +734,73 @@ class DDQNWorker:
 
         return int(q_values.argmax(dim=1).item())
 
+    def _save_game_snapshot(self, state: np.ndarray, info: dict) -> None:
+        """Save game snapshot at current time checkpoint."""
+        if not self.use_snapshots:
+            return
+
+        game_time = info.get("time", 0)
+        world_time = game_time // 2  # Coarser time granularity
+
+        # Only save at new time points (not already saved)
+        time_to_slot = {v: k for k, v in self._slot_to_time.items()}
+        if world_time in time_to_slot or world_time <= 0:
+            return
+
+        # Use rotating slots
+        slot_id = world_time % self.snapshot_slots
+        self._slot_to_time[slot_id] = world_time
+
+        # Save: observation, NES emulator state
+        try:
+            nes_state = self.base_env.env.dump_state()
+            self._slot_to_state[slot_id] = (
+                state.copy(),
+                [],  # Reserved for frame stack if needed
+                nes_state.tobytes() if hasattr(nes_state, "tobytes") else bytes(nes_state),
+            )
+        except Exception:
+            pass  # Silently fail if can't save
+
+    def _try_restore_game_snapshot(self, info: dict) -> Tuple[np.ndarray, bool]:
+        """
+        Try to restore from a recent snapshot after death.
+
+        Returns:
+            Tuple of (restored_state, success)
+        """
+        if not self.use_snapshots or not self._slot_to_state:
+            return np.array([]), False
+
+        game_time = info.get("time", 0)
+        world_time = game_time // 2
+        restore_time = world_time + 2  # Restore to a slightly earlier checkpoint
+
+        # Find slot for restore time
+        time_to_slot = {v: k for k, v in self._slot_to_time.items()}
+        if restore_time not in time_to_slot:
+            # Try closest earlier time
+            available_times = sorted(time_to_slot.keys())
+            earlier_times = [t for t in available_times if t < world_time]
+            if not earlier_times:
+                return np.array([]), False
+            restore_time = earlier_times[-1]  # Most recent earlier time
+
+        slot_id = time_to_slot.get(restore_time)
+        if slot_id is None or slot_id not in self._slot_to_state:
+            return np.array([]), False
+
+        saved_state, _, nes_state_bytes = self._slot_to_state[slot_id]
+
+        try:
+            # Restore NES emulator state
+            nes_state = np.frombuffer(nes_state_bytes, dtype=np.uint8)
+            self.base_env.env.load_state(nes_state)
+            self.snapshot_restores += 1
+            return saved_state, True
+        except Exception:
+            return np.array([]), False
+
     def collect_steps(self, num_steps: int) -> int:
         """
         Collect experiences for num_steps and store in local PER buffer.
@@ -730,6 +809,10 @@ class DDQNWorker:
         """
         state, _ = self.env.reset()
         episodes_completed = 0
+
+        # Clear snapshots on new episode (fresh start)
+        self._slot_to_time.clear()
+        self._slot_to_state.clear()
 
         for _ in range(num_steps):
             # Get action (also computes entropy)
@@ -744,6 +827,9 @@ class DDQNWorker:
             # Step environment
             next_state, reward, terminated, truncated, info = self.env.step(action)
             done = terminated or truncated
+
+            # Check for death
+            is_dead = info.get("is_dead", False) or info.get("is_dying", False)
 
             # Preprocess states
             state_processed = self._preprocess_state(state)
@@ -776,6 +862,30 @@ class DDQNWorker:
             if self.total_steps % 50 == 0:
                 self._send_ui_status(info)
 
+            # Save game snapshot at new time checkpoints
+            self._save_game_snapshot(state, info)
+
+            # Try to restore from snapshot on death (instead of full reset)
+            if is_dead and self.use_snapshots:
+                game_time = info.get("time", 0)
+                world_time = game_time // 2
+
+                # Only restore if we have snapshots and not too early in the level
+                if world_time > 15:
+                    restored_state, restored = self._try_restore_game_snapshot(info)
+                    if restored:
+                        # Track death
+                        self.deaths += 1
+                        self.x_at_death_history.append(x_pos)
+                        if len(self.x_at_death_history) > 20:
+                            self.x_at_death_history.pop(0)
+
+                        # Flush N-step buffer (interrupted episode)
+                        self.n_step_buffer.reset()
+
+                        state = restored_state
+                        continue  # Skip to next step without resetting episode
+
             if done:
                 # Flush remaining N-step transitions
                 for transition in self.n_step_buffer.flush():
@@ -798,7 +908,6 @@ class DDQNWorker:
                         self.speed_history.pop(0)
 
                 # Track death/flag metrics
-                is_dead = info.get("is_dead", False) or info.get("is_dying", False)
                 flag_get = info.get("flag_get", False)
 
                 if flag_get:
@@ -813,8 +922,10 @@ class DDQNWorker:
 
                 self._send_ui_status(info)
 
-                # Reset
+                # Reset and clear snapshots for new episode
                 state, _ = self.env.reset()
+                self._slot_to_time.clear()
+                self._slot_to_state.clear()
                 self.episode_reward = 0.0
                 self.episode_length = 0
                 self.best_x = 0
@@ -967,7 +1078,7 @@ class DDQNWorker:
                     "weight_sync_count": self.weight_sync_count,
                     "gradients_sent": self.gradients_sent,
                     "steps_per_sec": self.steps_per_sec,
-                    "snapshot_restores": 0,
+                    "snapshot_restores": self.snapshot_restores,
                     "current_level": level_str,
                     "last_weight_sync": self.last_weight_sync,
                     "rolling_avg_reward": rolling_avg,

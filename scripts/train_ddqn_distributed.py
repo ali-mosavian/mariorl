@@ -205,6 +205,7 @@ def run_learner_silent(
 @click.option("--no-ui", is_flag=True, help="Disable ncurses UI")
 @click.option("--resume", is_flag=True, help="Resume from latest checkpoint")
 @click.option("--restore-snapshot", type=str, default=None, help="Restore from specific snapshot file")
+@click.option("--no-game-snapshots", is_flag=True, help="Disable game state snapshots (save/restore on death)")
 def main(
     workers: int,
     level: str,
@@ -227,6 +228,7 @@ def main(
     no_ui: bool,
     resume: bool,
     restore_snapshot: str | None,
+    no_game_snapshots: bool,
 ) -> None:
     """Train Mario using Distributed DDQN with async gradient updates."""
     # Parse level
@@ -324,6 +326,7 @@ def main(
                 "eps_decay_steps": eps_decay_steps,
                 "max_grad_norm": max_grad_norm,
                 "ui_queue": ui_queue,
+                "use_snapshots": not no_game_snapshots,
             },
             daemon=True,
         )
