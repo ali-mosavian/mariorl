@@ -37,6 +37,7 @@ from mario_rl.core.device import detect_device
 from mario_rl.core.episode import EpisodeState
 from mario_rl.core.config import SnapshotConfig
 from mario_rl.core.metrics import MetricsTracker
+from mario_rl.core.ui_reporter import UIReporter
 from mario_rl.core.weight_sync import WeightSync
 from mario_rl.core.exploration import EpsilonGreedy
 from mario_rl.environment.factory import create_env
@@ -75,12 +76,13 @@ class DDQNWorker:
     action_dim: int = field(init=False)
     _fstack: Any = field(init=False, repr=False)
 
-    # State tracking - composed components (5)
+    # State tracking - composed components (6)
     metrics: MetricsTracker = field(init=False)
     episode: EpisodeState = field(init=False)
     weights: WeightSync = field(init=False)
     exploration: EpsilonGreedy = field(init=False)
     timing: TimingStats = field(init=False)
+    ui: UIReporter = field(init=False)
 
     # Remaining state (1)
     _current_state: Optional[np.ndarray] = field(init=False, default=None)
@@ -137,6 +139,7 @@ class DDQNWorker:
         self.metrics = MetricsTracker()
         self.episode = EpisodeState()
         self.timing = TimingStats()
+        self.ui = UIReporter(worker_id=self.config.worker_id, queue=self.ui_queue)
 
         # Create exploration policy from config
         exp = self.config.exploration
@@ -379,80 +382,39 @@ class DDQNWorker:
 
     def _send_ui_status(self, info: dict) -> None:
         """Send status to UI queue."""
-        if self.ui_queue is None:
-            return
-
-        try:
-            from mario_rl.training.training_ui import UIMessage
-            from mario_rl.training.training_ui import MessageType
-
-            level_str = self.base_env.current_level
-            snapshot_restores = self.snapshots.restore_count if self.snapshots else 0
-            restores_without_progress = self.snapshots.restores_without_progress if self.snapshots else 0
-            max_restores = self.snapshots.max_restores if self.snapshots else 3
-            current_epsilon = self.exploration.get_epsilon(self.metrics.total_steps)
-
-            msg = UIMessage(
-                msg_type=MessageType.WORKER_STATUS,
-                source_id=self.config.worker_id,
-                data={
-                    "episode": self.metrics.episode_count,
-                    "step": self.episode.length,
-                    "reward": self.episode.reward,
-                    "x_pos": info.get("x_pos", 0),
-                    "game_time": info.get("time", 0),
-                    "best_x": self.episode.best_x,
-                    "best_x_ever": self.metrics.best_x_ever,
-                    "deaths": self.metrics.deaths,
-                    "flags": self.metrics.flags,
-                    "epsilon": current_epsilon,
-                    "experiences": self.metrics.total_steps,
-                    "q_mean": 0.0,
-                    "q_max": 0.0,
-                    "weight_sync_count": self.weights.count,
-                    "gradients_sent": self.metrics.gradients_sent,
-                    "steps_per_sec": self.timing.steps_per_sec,
-                    "snapshot_restores": snapshot_restores,
-                    "restores_without_progress": restores_without_progress,
-                    "max_restores": max_restores,
-                    "current_level": level_str,
-                    "last_weight_sync": self.weights.last_sync,
-                    "rolling_avg_reward": self.metrics.avg_reward,
-                    "first_flag_time": self.metrics.avg_time_to_flag,
-                    "per_beta": self.buffer.current_beta,
-                    "avg_speed": self.metrics.avg_speed,
-                    "avg_x_at_death": self.metrics.avg_x_at_death,
-                    "avg_time_to_flag": self.metrics.avg_time_to_flag,
-                    "entropy": self.metrics.avg_entropy,
-                    "last_action_time": self.timing.last_action_time,
-                },
-            )
-            self.ui_queue.put_nowait(msg)
-        except Exception:
-            pass
-
-    def _log(self, text: str) -> None:
-        """Log message to UI queue or stdout."""
-        if self.ui_queue is not None:
-            try:
-                from mario_rl.training.training_ui import UIMessage
-                from mario_rl.training.training_ui import MessageType
-
-                msg = UIMessage(
-                    msg_type=MessageType.WORKER_LOG,
-                    source_id=self.config.worker_id,
-                    data={"text": text},
-                )
-                self.ui_queue.put_nowait(msg)
-            except Exception:
-                print(f"[W{self.config.worker_id}] {text}")
-        else:
-            print(f"[W{self.config.worker_id}] {text}")
+        self.ui.send_status(
+            episode=self.metrics.episode_count,
+            step=self.episode.length,
+            reward=self.episode.reward,
+            x_pos=info.get("x_pos", 0),
+            game_time=info.get("time", 0),
+            best_x=self.episode.best_x,
+            best_x_ever=self.metrics.best_x_ever,
+            deaths=self.metrics.deaths,
+            flags=self.metrics.flags,
+            experiences=self.metrics.total_steps,
+            gradients_sent=self.metrics.gradients_sent,
+            weight_sync_count=self.weights.count,
+            epsilon=self.exploration.get_epsilon(self.metrics.total_steps),
+            steps_per_sec=self.timing.steps_per_sec,
+            last_action_time=self.timing.last_action_time,
+            last_weight_sync=self.weights.last_sync,
+            snapshot_restores=self.snapshots.restore_count if self.snapshots else 0,
+            restores_without_progress=self.snapshots.restores_without_progress if self.snapshots else 0,
+            max_restores=self.snapshots.max_restores if self.snapshots else 3,
+            current_level=self.base_env.current_level,
+            rolling_avg_reward=self.metrics.avg_reward,
+            avg_speed=self.metrics.avg_speed,
+            avg_x_at_death=self.metrics.avg_x_at_death,
+            avg_time_to_flag=self.metrics.avg_time_to_flag,
+            entropy=self.metrics.avg_entropy,
+            per_beta=self.buffer.current_beta,
+        )
 
     def run(self) -> None:
         """Main training loop."""
         device = self.config.device or detect_device()
-        self._log(
+        self.ui.log(
             f"Worker {self.config.worker_id} started (level={self.config.level}, "
             f"device={device}, ε_end={self.config.exploration.epsilon_end:.4f}, PER)"
         )

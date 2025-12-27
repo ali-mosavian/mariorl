@@ -21,6 +21,7 @@ from mario_rl.core.config import SnapshotConfig
 from mario_rl.core.config import TrainingConfig
 from mario_rl.core.types import GradientMetrics
 from mario_rl.core.metrics import MetricsTracker
+from mario_rl.core.ui_reporter import UIReporter
 from mario_rl.core.weight_sync import WeightSync
 from mario_rl.core.config import ExplorationConfig
 from mario_rl.core.exploration import EpsilonGreedy
@@ -42,6 +43,7 @@ __all__ = [
     "WeightSync",
     "EpsilonGreedy",
     "TimingStats",
+    "UIReporter",
     # Types
     "Transition",
     "GameSnapshot",
