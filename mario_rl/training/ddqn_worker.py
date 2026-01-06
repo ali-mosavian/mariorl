@@ -177,6 +177,9 @@ class DDQNWorker:
         # Create UI reporter (generic sender)
         self.ui = UIReporter(worker_id=self.config.worker_id, queue=self.ui_queue)
 
+        # Diagnostic tracking
+        self._grads_sent = 0
+
     def _preprocess_state(self, state: np.ndarray) -> np.ndarray:
         """Convert state from (4, 64, 64, 1) to (4, 64, 64)."""
         if state.ndim == 4 and state.shape[-1] == 1:
@@ -398,8 +401,27 @@ class DDQNWorker:
         try:
             self.gradient_queue.put(gradient_packet, timeout=0.5)
             self.metrics.gradients_sent += 1
-        except Exception:
-            pass
+            self._grads_sent += 1
+
+            # Log occasionally
+            if self.metrics.total_steps % 500 == 0:
+                import sys
+
+                print(
+                    f"[W{self.config.worker_id}] Grad: loss={metrics['loss']:.4f}, "
+                    f"q={metrics['q_mean']:.2f}, td={metrics['td_error']:.4f}",
+                    file=sys.stderr,
+                    flush=True,
+                )
+        except Exception as e:
+            import sys
+
+            if self.metrics.total_steps % 1000 == 0:
+                print(
+                    f"[W{self.config.worker_id}] Failed to send gradient: {e}",
+                    file=sys.stderr,
+                    flush=True,
+                )
 
         return metrics
 
@@ -407,6 +429,25 @@ class DDQNWorker:
         """Send status to UI queue using collector pattern."""
         status = self.status_collector.collect(info)
         self.ui.send_status(status)
+
+    def get_diagnostics(self) -> dict:
+        """Get diagnostic information about worker state."""
+        current_epsilon = self.exploration.get_epsilon(self.metrics.total_steps)
+        buffer_fill_pct = len(self.buffer) / self.config.buffer.capacity * 100
+
+        return {
+            "worker_id": self.config.worker_id,
+            "total_steps": self.metrics.total_steps,
+            "episodes": self.metrics.episode_count,
+            "buffer_size": len(self.buffer),
+            "buffer_capacity": self.config.buffer.capacity,
+            "buffer_fill_pct": buffer_fill_pct,
+            "epsilon": current_epsilon,
+            "best_x": self.metrics.best_x_ever,
+            "weight_sync_count": self.metrics.weight_sync_count,
+            "grads_sent": self._grads_sent,
+            "can_train": len(self.buffer) >= self.config.buffer.batch_size,
+        }
 
     def run(self) -> None:
         """Main training loop."""
@@ -423,9 +464,19 @@ class DDQNWorker:
             if loop_count % 100 == 1:
                 import sys
 
+                # Get current epsilon
+                current_epsilon = self.exploration.get_epsilon(self.metrics.total_steps)
+                buffer_fill_pct = len(self.buffer) / self.config.buffer.capacity * 100
+
                 print(
                     f"[W{self.config.worker_id}] Loop {loop_count}: "
-                    f"buf={len(self.buffer)}, steps={self.metrics.total_steps}",
+                    f"buf={len(self.buffer)}/{self.config.buffer.capacity} "
+                    f"({buffer_fill_pct:.1f}%), "
+                    f"steps={self.metrics.total_steps:,}, "
+                    f"episodes={self.metrics.episode_count}, "
+                    f"ε={current_epsilon:.4f}, "
+                    f"best_x={self.metrics.best_x_ever}, "
+                    f"grads_sent={self._grads_sent}",
                     file=sys.stderr,
                     flush=True,
                 )
@@ -433,6 +484,13 @@ class DDQNWorker:
             # Sync weights if needed
             if self.weights.maybe_sync(self.net):
                 self.metrics.weight_sync_count = self.weights.count
+                import sys
+
+                print(
+                    f"[W{self.config.worker_id}] Synced weights v{self.weights.count}",
+                    file=sys.stderr,
+                    flush=True,
+                )
 
             self.collect_steps(self.config.steps_per_collection)
             self.timing.update_speed(self.config.steps_per_collection)
@@ -440,6 +498,26 @@ class DDQNWorker:
             if len(self.buffer) >= self.config.buffer.batch_size:
                 for _ in range(self.config.train_steps):
                     self.compute_and_send_gradients()
+
+            # Periodic diagnostic dump
+            if loop_count % 500 == 0:
+                import sys
+
+                diag = self.get_diagnostics()
+                print(
+                    f"[W{self.config.worker_id}] DIAG: "
+                    f"steps={diag['total_steps']:,}, "
+                    f"eps={diag['episodes']}, "
+                    f"buf={diag['buffer_size']}/{diag['buffer_capacity']} "
+                    f"({diag['buffer_fill_pct']:.1f}%), "
+                    f"ε={diag['epsilon']:.4f}, "
+                    f"best_x={diag['best_x']}, "
+                    f"can_train={diag['can_train']}, "
+                    f"wgt_sync={diag['weight_sync_count']}, "
+                    f"grads={diag['grads_sent']}",
+                    file=sys.stderr,
+                    flush=True,
+                )
 
 
 def run_ddqn_worker(

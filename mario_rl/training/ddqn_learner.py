@@ -557,9 +557,38 @@ class DDQNLearner:
                 # Apply gradients (will average if multiple)
                 self.apply_gradients(gradient_packets)
 
+                # Enhanced logging every 10 updates
+                if self.update_count % 10 == 0:
+                    current_lr = self.optimizer.param_groups[0]["lr"]
+                    try:
+                        queue_size_str = str(self.gradient_queue.qsize())
+                    except NotImplementedError:
+                        queue_size_str = "N/A (macOS)"
+                    self._log(
+                        f"Update {self.update_count}: "
+                        f"LR={current_lr:.6f}, "
+                        f"loss={self.last_loss:.4f}, "
+                        f"q_mean={self.last_q_mean:.2f}, "
+                        f"grads_received={self.gradients_received}, "
+                        f"timesteps={self.total_timesteps_collected:,}, "
+                        f"queue_size={queue_size_str}"
+                    )
+
             except Exception as e:
-                if "Empty" not in str(type(e).__name__):
+                if "Empty" not in str(type(e).__name__) and "timeout" not in str(e).lower():
                     self._log(f"Learner error: {e}")
+                # Log timeout occasionally
+                if ("Empty" in str(type(e).__name__) or "timeout" in str(e).lower()) and self.update_count % 50 == 0:
+                    try:
+                        queue_size_str = str(self.gradient_queue.qsize())
+                    except NotImplementedError:
+                        queue_size_str = "N/A (macOS)"
+                    self._log(
+                        f"No gradients received (timeout). "
+                        f"Queue size: {queue_size_str}, "
+                        f"Total updates: {self.update_count}, "
+                        f"Gradients received: {self.gradients_received}"
+                    )
                 continue
 
         # Final save
