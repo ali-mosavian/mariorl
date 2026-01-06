@@ -521,7 +521,7 @@ class TrainingUI:
 
     def _draw(self, stdscr):
         """Draw the entire UI."""
-        stdscr.clear()
+        stdscr.erase()
         height, width = stdscr.getmaxyx()
 
         # Check minimum terminal size
