@@ -533,6 +533,7 @@ class DDQNLearner:
         """
         self._log(f"DDQN Learner started on {self.device}")
         self._log(f"  LR: {self.learning_rate} → {self.lr_end}, Tau: {self.tau}")
+        self._log(f"  Accumulate grads: {self.accumulate_grads}")
         if self._resumed_from_checkpoint:
             self._log(f"  Resumed from v{self.weight_version}")
 
@@ -545,8 +546,16 @@ class DDQNLearner:
                 packet = self.gradient_queue.get(timeout=5.0)
                 gradient_packets.append(packet)
 
-                # Drain ALL available gradients from queue to prevent worker blocking
-                # This is critical because workers send multiple gradients per cycle
+                # Collect additional gradients up to accumulate_grads target
+                # Also drain any extra to prevent worker blocking
+                while len(gradient_packets) < self.accumulate_grads:
+                    try:
+                        packet = self.gradient_queue.get(timeout=0.1)
+                        gradient_packets.append(packet)
+                    except Exception:
+                        break
+
+                # Drain any remaining gradients to prevent worker blocking
                 while True:
                     try:
                         packet = self.gradient_queue.get_nowait()

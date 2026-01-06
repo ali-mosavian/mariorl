@@ -86,6 +86,11 @@ class WorkerStatus:
     avg_time_to_flag: float
     entropy: float
     last_action_time: float
+    # Buffer diagnostics
+    buffer_size: int = 0
+    buffer_capacity: int = 0
+    buffer_fill_pct: float = 0.0
+    can_train: bool = False
 
 
 @dataclass(frozen=True, slots=True)

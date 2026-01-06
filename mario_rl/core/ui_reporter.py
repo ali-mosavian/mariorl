@@ -79,6 +79,11 @@ class UIReporter:
                 "avg_time_to_flag": status.avg_time_to_flag,
                 "entropy": status.entropy,
                 "last_action_time": status.last_action_time,
+                # Buffer diagnostics
+                "buffer_size": status.buffer_size,
+                "buffer_capacity": status.buffer_capacity,
+                "buffer_fill_pct": status.buffer_fill_pct,
+                "can_train": status.can_train,
             }
 
             msg = self._UIMessage(

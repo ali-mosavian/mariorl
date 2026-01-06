@@ -628,7 +628,6 @@ class TrainingUI:
             loss = ls.get("loss", 0)
             avg_loss = ls.get("avg_loss", 0)
             buf_size = ls.get("buf_size", 0)
-            ls.get("pulled", 0)
             status = ls.get("status", "running")
             q_mean = ls.get("q_mean", 0)
             q_max = ls.get("q_max", 0)
@@ -638,6 +637,13 @@ class TrainingUI:
             steps_per_sec = ls.get("steps_per_sec", 0)
             queue_msgs_per_sec = ls.get("queue_msgs_per_sec", 0)
             queue_kb_per_sec = ls.get("queue_kb_per_sec", 0)
+            # New diagnostics from DDQN learner
+            lr = ls.get("lr", 0)
+            grads_per_sec = ls.get("grads_per_sec", 0)
+            gradients_received = ls.get("gradients_received", 0)
+            timesteps = ls.get("timesteps", 0)
+            total_episodes = ls.get("total_episodes", 0)
+            weight_version = ls.get("weight_version", 0)
 
             # Progress bar for steps
             max_steps = ls.get("max_steps", 1)
@@ -650,31 +656,61 @@ class TrainingUI:
                 stdscr.addstr(y + 1, 4, f"Progress: [{bar}] {pct}  ", curses.color_pair(4))
                 stdscr.addstr(f"({step:,} / {max_steps:,})  {steps_per_sec:.1f} sps")
             else:
-                stdscr.addstr(
-                    y + 1,
-                    4,
-                    f"Step: {step:,}  {steps_per_sec:.1f} sps",
-                    curses.color_pair(4),
-                )
+                # Show step count with grads/sec for distributed training
+                stdscr.addstr(y + 1, 4, f"Step: {step:,}", curses.color_pair(4))
+                if grads_per_sec > 0:
+                    stdscr.addstr(f"  {grads_per_sec:.1f} grads/s")
+                elif steps_per_sec > 0:
+                    stdscr.addstr(f"  {steps_per_sec:.1f} sps")
+                # Show timesteps and episodes if available (from distributed DDQN)
+                if timesteps > 0:
+                    stdscr.addstr(f"  Timesteps: {timesteps:,}")
+                if total_episodes > 0:
+                    stdscr.addstr(f"  Eps: {total_episodes:,}")
 
-            # Loss stats with queue throughput
+            # Loss stats - adapt based on available data
             stdscr.addstr(y + 2, 4, "Loss: ")
-            loss_color = curses.color_pair(1) if loss < avg_loss else curses.color_pair(3)
-            stdscr.addstr(f"{loss:.2f}", loss_color)
-            stdscr.addstr(
-                f"  Avg: {avg_loss:.2f}  Buffer: {buf_size:,}  Queue: {queue_msgs_per_sec:.0f} msg/s, {queue_kb_per_sec:.0f} KB/s"
-            )
+            loss_color = curses.color_pair(1) if avg_loss > 0 and loss < avg_loss else curses.A_NORMAL
+            stdscr.addstr(f"{loss:.4f}", loss_color)
+            if avg_loss > 0:
+                stdscr.addstr(f"  Avg: {avg_loss:.4f}")
+            if buf_size > 0:
+                stdscr.addstr(f"  Buffer: {buf_size:,}")
+            if queue_msgs_per_sec > 0:
+                stdscr.addstr(f"  Queue: {queue_msgs_per_sec:.0f} msg/s")
+            # Show gradients received for distributed training
+            if gradients_received > 0:
+                stdscr.addstr(f"  ↓{gradients_received:,} grads")
 
             # Q-value and gradient stats
-            stdscr.addstr(
-                y + 3,
-                4,
-                f"Q-value: μ={q_mean:.1f} max={q_max:.1f}  TD-err: {td_error:.2f}  ∇norm: {grad_norm:.1f}  r̄={reward_mean:.1f}",
-            )
+            stdscr.addstr(y + 3, 4, f"Q: μ={q_mean:.2f}")
+            if q_max > 0:
+                stdscr.addstr(f" max={q_max:.1f}")
+            stdscr.addstr(f"  TD={td_error:.4f}")
+            if grad_norm > 0:
+                stdscr.addstr(f"  ∇={grad_norm:.1f}")
+            if reward_mean != 0:
+                stdscr.addstr(f"  r̄={reward_mean:.1f}")
 
+            # Learning rate and weight version (diagnostic info)
+            stdscr.addstr(y + 4, 4, "")
+            if lr > 0:
+                stdscr.addstr("LR=")
+                # Color code LR - green if high, yellow if medium, red if very low
+                if lr >= 1e-4:
+                    lr_color = curses.color_pair(1)  # Green
+                elif lr >= 1e-5:
+                    lr_color = curses.color_pair(2)  # Yellow
+                else:
+                    lr_color = curses.color_pair(3)  # Red
+                stdscr.addstr(f"{lr:.2e}", lr_color)
+                stdscr.addstr("  ")
+            if weight_version > 0:
+                stdscr.addstr(f"Weights: v{weight_version}")
             # Status indicator
             status_color = curses.color_pair(1) if status == "training" else curses.color_pair(2)
-            stdscr.addstr(y + 4, 4, f"Status: {status}", status_color)
+            if status != "running":
+                stdscr.addstr(f"  Status: {status}", status_color)
 
             # Loss chart
             if self.loss_history:
@@ -897,6 +933,10 @@ class TrainingUI:
             avg_x_at_death = ws.get("avg_x_at_death", 0)
             avg_time_to_flag = ws.get("avg_time_to_flag", 0)
 
+            # Buffer diagnostics
+            buffer_fill_pct = ws.get("buffer_fill_pct", 0)
+            can_train = ws.get("can_train", False)
+
             stdscr.addstr(y + 3, 4, "r̄=")
             stdscr.addstr(f"{rolling_avg_reward:6.0f}", avg_color)
             stdscr.addstr(f"  BestX={best_x_ever:4d}")
@@ -909,6 +949,22 @@ class TrainingUI:
             else:
                 stdscr.addstr("  🏁T̄=", curses.A_DIM)
                 stdscr.addstr("---", curses.A_DIM)
+
+            # Buffer fill indicator with color coding
+            stdscr.addstr("  Buf=")
+            if buffer_fill_pct >= 50:
+                buf_color = curses.color_pair(1)  # Green
+            elif buffer_fill_pct >= 10:
+                buf_color = curses.color_pair(2)  # Yellow
+            else:
+                buf_color = curses.color_pair(3)  # Red
+            stdscr.addstr(f"{buffer_fill_pct:4.1f}%", buf_color)
+
+            # Training indicator
+            if can_train:
+                stdscr.addstr(" ✓", curses.color_pair(1))
+            else:
+                stdscr.addstr(" ✗", curses.color_pair(3) | curses.A_DIM)
 
             # Show seconds since last action (for stuck detection)
             last_action_time = ws.get("last_action_time", 0)

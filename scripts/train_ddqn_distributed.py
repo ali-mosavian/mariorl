@@ -212,6 +212,7 @@ def run_learner_silent(
 @click.option("--resume", is_flag=True, help="Resume from latest checkpoint")
 @click.option("--restore-snapshot", type=str, default=None, help="Restore from specific snapshot file")
 @click.option("--no-game-snapshots", is_flag=True, help="Disable game state snapshots (save/restore on death)")
+@click.option("--no-per", is_flag=True, help="Disable Prioritized Experience Replay (use uniform sampling)")
 def main(
     workers: int,
     level: str,
@@ -235,6 +236,7 @@ def main(
     resume: bool,
     restore_snapshot: str | None,
     no_game_snapshots: bool,
+    no_per: bool,
 ) -> None:
     """Train Mario using Distributed DDQN with async gradient updates."""
     # Parse level
@@ -312,11 +314,13 @@ def main(
     learner_target = run_learner_silent if not no_ui else run_ddqn_learner
 
     # Create buffer config (shared by all workers)
+    # alpha=0 disables prioritization (uniform sampling)
     buffer_config = BufferConfig(
         capacity=local_buffer_size,
         batch_size=batch_size,
         n_step=n_step,
         gamma=gamma,
+        alpha=0.0 if no_per else 0.6,
     )
 
     # Create snapshot config

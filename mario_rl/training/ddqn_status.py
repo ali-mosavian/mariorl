@@ -33,9 +33,15 @@ class DDQNStatusCollector:
     buffer: PrioritizedReplayBuffer
     snapshots: Optional[SnapshotManager]
     get_level: Callable[[], str]
+    batch_size: int = 64  # Batch size for training (from config)
 
     def collect(self, info: dict[str, Any]) -> WorkerStatus:
         """Collect current status into WorkerStatus dataclass."""
+        buffer_size = len(self.buffer)
+        buffer_capacity = self.buffer.capacity
+        buffer_fill_pct = buffer_size / buffer_capacity * 100 if buffer_capacity > 0 else 0.0
+        can_train = buffer_size >= self.batch_size
+
         return WorkerStatus(
             worker_id=self.worker_id,
             episode=self.metrics.episode_count,
@@ -64,4 +70,9 @@ class DDQNStatusCollector:
             avg_time_to_flag=self.metrics.avg_time_to_flag,
             entropy=self.metrics.avg_entropy,
             last_action_time=self.timing.last_action_time,
+            # Buffer diagnostics
+            buffer_size=buffer_size,
+            buffer_capacity=buffer_capacity,
+            buffer_fill_pct=buffer_fill_pct,
+            can_train=can_train,
         )
