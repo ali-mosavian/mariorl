@@ -61,21 +61,22 @@ class Reward:
         
         Design principles:
         - Forward progress is the PRIMARY signal (+0.1 to +1 per frame)
-        - Death/flag are SMALL bonuses, not dominating (-1 to +1)
-        - No penalties for standing still (causes huge negative accumulation)
-        - Per-frame range: ~-1.5 to ~+1.5
-        - With frame skip=4: ~-6 to ~+6 per observed step
+        - Flag completion is a SIGNIFICANT bonus (+10) to incentivize finishing
+        - Death is meaningful (-5) but not overwhelming
+        - Per-frame range: ~-0.15 to ~+1.0 (normal movement)
+        - Terminal events: death=-5, flag=+10
         """
         # Forward progress: main learning signal
         # x_reward ranges -15 to +100, scale to -0.15 to +1.0
         progress = self.x_reward / 100.0
         
-        # Death penalty: small to avoid dominating learning
-        # Only -1 instead of -10 (was causing Q-value issues)
-        death = self.death_penalty / 1000.0  # -1 when dead
+        # Death penalty: meaningful but not overwhelming
+        # -5 makes death significant without dominating Q-values
+        death = self.death_penalty / 200.0  # -5 when dead
         
-        # Flag bonus: small to keep balanced with progress rewards
-        flag = self.finish_reward / 1000.0  # +1 when flag
+        # Flag bonus: significant reward to incentivize level completion
+        # +10 makes completing the level worth ~10x more than just moving
+        flag = self.finish_reward / 100.0  # +10 when flag
         
         # Powerup: small bonus/penalty
         powerup = self.powerup_reward / 200.0  # -0.5 to +1
@@ -87,7 +88,7 @@ class Reward:
 
 
 class MarioBrosLevel(SuperMarioBrosEnv):
-    reward_range = (-2, 2)  # Normalized: progress=-0.15 to +1, death=-1, flag=+1
+    reward_range = (-6, 12)  # Normal: -0.15 to +1.0, Terminal: death=-5, flag=+10
     _last_state: Optional[State] = None
 
     def __init__(
