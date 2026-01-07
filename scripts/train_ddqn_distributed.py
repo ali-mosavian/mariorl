@@ -139,6 +139,7 @@ def run_worker_silent(
     gradient_queue: "Queue[object]",
     ui_queue: "Queue[object] | None" = None,
     status_queue: "Queue[object] | None" = None,
+    crash_log_dir: Path | None = None,
 ) -> None:
     """Run worker with stdout/stderr suppressed (for UI mode)."""
     import os
@@ -154,7 +155,7 @@ def run_worker_silent(
     sys.stderr = devnull
 
     # Now run the actual worker
-    run_ddqn_worker(config, weights_path, gradient_queue, ui_queue, status_queue)
+    run_ddqn_worker(config, weights_path, gradient_queue, ui_queue, status_queue, crash_log_dir)
 
 
 def run_learner_silent(
@@ -197,9 +198,26 @@ def monitor_workers(
     ui_queue: Queue | None,
     worker_target,
     stop_event: threading.Event,
+    monitor_log_file: Path | None = None,
+    crash_log_dir: Path | None = None,
 ) -> None:
     """Monitor worker health and restart crashed/zombie workers."""
+    from datetime import datetime
+    
     last_heartbeat = {}
+    
+    def log_monitor(msg: str):
+        """Log to both stderr and file."""
+        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        log_line = f"[{timestamp}] [MONITOR] {msg}"
+        print(log_line, file=sys.stderr, flush=True)
+        if monitor_log_file is not None:
+            try:
+                with open(monitor_log_file, "a") as f:
+                    f.write(log_line + "\n")
+                    f.flush()
+            except Exception:
+                pass
     
     while not stop_event.is_set():
         # Process status messages from queue
@@ -224,10 +242,19 @@ def monitor_workers(
                         except Exception:
                             pass
                     
-                    # Log crashes
+                    # Log crashes with full details
                     if status.get("status") == "crashed":
                         error = status.get("error", "Unknown")
-                        print(f"[MONITOR] Worker {worker_id} crashed: {error}", file=sys.stderr, flush=True)
+                        error_type = status.get("error_type", "Exception")
+                        traceback_str = status.get("traceback", "No traceback available")
+                        
+                        log_monitor(f"Worker {worker_id} CRASHED")
+                        log_monitor(f"  Error Type: {error_type}")
+                        log_monitor(f"  Error Message: {error}")
+                        log_monitor(f"  Traceback:")
+                        for line in traceback_str.split('\n'):
+                            if line.strip():
+                                log_monitor(f"    {line}")
         except Exception:
             pass
         
@@ -238,48 +265,72 @@ def monitor_workers(
             
             # Check if process is dead (zombie or terminated)
             if not proc.is_alive():
-                print(f"[MONITOR] Worker {worker_id} is dead (exit code: {proc.exitcode}). Restarting...", 
-                      file=sys.stderr, flush=True)
+                exit_code = proc.exitcode
+                exit_reason = {
+                    0: "normal exit",
+                    -1: "killed (SIGHUP)",
+                    -2: "interrupted (SIGINT)",
+                    -9: "killed (SIGKILL)",
+                    -11: "segmentation fault (SIGSEGV)",
+                    -15: "terminated (SIGTERM)",
+                }.get(exit_code, f"unknown (code {exit_code})")
+                
+                log_monitor(f"Worker {worker_id} is DEAD")
+                log_monitor(f"  Exit code: {exit_code} ({exit_reason})")
+                log_monitor(f"  Restarting worker {worker_id}...")
                 
                 # Start a new worker process
                 new_proc = Process(
                     target=worker_target,
                     args=(config, weights_path, gradient_queue),
-                    kwargs={"ui_queue": ui_queue, "status_queue": status_queue},
+                    kwargs={"ui_queue": ui_queue, "status_queue": status_queue, "crash_log_dir": crash_log_dir},
                     daemon=True,
                 )
                 new_proc.start()
                 worker_list[i] = (new_proc, config)
                 last_heartbeat[worker_id] = current_time
-                print(f"[MONITOR] Worker {worker_id} restarted (PID: {new_proc.pid})", 
-                      file=sys.stderr, flush=True)
+                log_monitor(f"  Worker {worker_id} restarted with PID {new_proc.pid}")
                 continue
             
             # Check for stalled workers (no heartbeat in 120 seconds)
             if worker_id in last_heartbeat:
                 time_since_heartbeat = current_time - last_heartbeat[worker_id]
                 if time_since_heartbeat > 120:
-                    print(f"[MONITOR] Worker {worker_id} stalled ({time_since_heartbeat:.0f}s no heartbeat). Restarting...",
-                          file=sys.stderr, flush=True)
+                    log_monitor(f"Worker {worker_id} is STALLED")
+                    log_monitor(f"  Last heartbeat: {time_since_heartbeat:.0f}s ago")
+                    log_monitor(f"  PID: {proc.pid}")
+                    
+                    # Send SIGUSR1 to trigger stack trace dump
+                    log_monitor(f"  Requesting stack trace dump...")
+                    try:
+                        import signal
+                        import os
+                        os.kill(proc.pid, signal.SIGUSR1)
+                        time.sleep(0.5)  # Give worker time to write trace
+                        log_monitor(f"  Stack trace requested (check worker_{worker_id}_stack.log)")
+                    except Exception as e:
+                        log_monitor(f"  Failed to request stack trace: {e}")
+                    
+                    log_monitor(f"  Terminating worker {worker_id}...")
                     
                     # Terminate and restart
                     proc.terminate()
                     proc.join(timeout=5)
                     if proc.is_alive():
+                        log_monitor(f"  Worker {worker_id} didn't terminate, forcing kill...")
                         proc.kill()
                     
                     # Start a new worker process
                     new_proc = Process(
                         target=worker_target,
                         args=(config, weights_path, gradient_queue),
-                        kwargs={"ui_queue": ui_queue, "status_queue": status_queue},
+                        kwargs={"ui_queue": ui_queue, "status_queue": status_queue, "crash_log_dir": crash_log_dir},
                         daemon=True,
                     )
                     new_proc.start()
                     worker_list[i] = (new_proc, config)
                     last_heartbeat[worker_id] = current_time
-                    print(f"[MONITOR] Worker {worker_id} restarted (PID: {new_proc.pid})",
-                          file=sys.stderr, flush=True)
+                    log_monitor(f"  Worker {worker_id} restarted with PID {new_proc.pid}")
         
         # Sleep before next check
         time.sleep(10)
@@ -384,6 +435,11 @@ def main(
     weights_path = run_dir / "weights.pt"
     logs_dir = run_dir / "logs"
     logs_dir.mkdir(exist_ok=True)
+    
+    # Create crash logs directory
+    crash_log_dir = run_dir / "crash_logs"
+    crash_log_dir.mkdir(exist_ok=True)
+    monitor_log_file = crash_log_dir / "monitor.log"
 
     # Print config (will be hidden by UI if enabled)
     if no_ui:
@@ -472,7 +528,7 @@ def main(
         p = Process(
             target=worker_target,
             args=(worker_config, weights_path, gradient_queue),
-            kwargs={"ui_queue": ui_queue, "status_queue": status_queue},
+            kwargs={"ui_queue": ui_queue, "status_queue": status_queue, "crash_log_dir": crash_log_dir},
             daemon=True,
         )
         p.start()
@@ -514,6 +570,8 @@ def main(
             ui_queue,
             worker_target,
             stop_monitor,
+            monitor_log_file,
+            crash_log_dir,
         ),
         daemon=True,
     )

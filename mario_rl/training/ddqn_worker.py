@@ -655,10 +655,47 @@ def run_ddqn_worker(
     gradient_queue: mp.Queue,
     ui_queue: Optional[mp.Queue] = None,
     status_queue: Optional[mp.Queue] = None,
+    crash_log_dir: Optional[Path] = None,
 ) -> None:
     """Entry point for worker process."""
     import sys
+    import signal
     import traceback
+    from datetime import datetime
+    
+    # Setup crash log file
+    crash_log_file = None
+    stack_trace_file = None
+    if crash_log_dir is not None:
+        crash_log_dir.mkdir(parents=True, exist_ok=True)
+        crash_log_file = crash_log_dir / f"worker_{config.worker_id}_crashes.log"
+        stack_trace_file = crash_log_dir / f"worker_{config.worker_id}_stack.log"
+    
+    # Setup signal handler to dump stack trace
+    def dump_stack_trace(signum, frame):
+        """Dump stack trace when receiving SIGUSR1."""
+        if stack_trace_file is not None:
+            try:
+                with open(stack_trace_file, "a") as f:
+                    f.write(f"\n{'=' * 80}\n")
+                    f.write(f"Stack trace dump at {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
+                    f.write(f"Worker {config.worker_id} (PID: {os.getpid()})\n")
+                    f.write(f"Signal: {signum}\n")
+                    f.write(f"{'=' * 80}\n\n")
+                    
+                    # Dump all thread stacks
+                    import threading
+                    for thread_id, frame_obj in sys._current_frames().items():
+                        f.write(f"\nThread {thread_id}:\n")
+                        f.write(''.join(traceback.format_stack(frame_obj)))
+                    
+                    f.write(f"\n{'=' * 80}\n")
+                    f.flush()
+            except Exception as e:
+                print(f"[W{config.worker_id}] Failed to dump stack trace: {e}", file=sys.stderr, flush=True)
+    
+    # Register signal handler (SIGUSR1)
+    signal.signal(signal.SIGUSR1, dump_stack_trace)
     
     # Send startup heartbeat
     if status_queue is not None:
@@ -705,7 +742,24 @@ def run_ddqn_worker(
         print(f"[W{config.worker_id}] Interrupted", file=sys.stderr, flush=True)
     except Exception as e:
         # Log crash with full traceback
+        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         error_msg = f"CRASH: {e}\n{traceback.format_exc()}"
+        
+        # Write to crash log file
+        if crash_log_file is not None:
+            try:
+                with open(crash_log_file, "a") as f:
+                    f.write(f"\n{'=' * 80}\n")
+                    f.write(f"Crash at {timestamp}\n")
+                    f.write(f"{'=' * 80}\n")
+                    f.write(f"Error: {e}\n")
+                    f.write(f"Type: {type(e).__name__}\n\n")
+                    f.write("Traceback:\n")
+                    f.write(traceback.format_exc())
+                    f.write("\n")
+                    f.flush()
+            except Exception as log_err:
+                print(f"[W{config.worker_id}] Failed to write crash log: {log_err}", file=sys.stderr, flush=True)
         
         # Send crash status
         if status_queue is not None:
@@ -714,6 +768,7 @@ def run_ddqn_worker(
                     "worker_id": config.worker_id,
                     "status": "crashed",
                     "error": str(e),
+                    "error_type": type(e).__name__,
                     "traceback": traceback.format_exc(),
                     "timestamp": time.time(),
                 })
