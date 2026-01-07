@@ -42,8 +42,11 @@ class Reward:
 
     @staticmethod
     def calc(c: State, last: State) -> "Reward":
+        # Use position DELTA (current - previous), not (current - max)
+        # This avoids huge negative rewards after death when x resets
+        x_delta = c.x_pos - last.x_pos
         return Reward(
-            x_reward=min(100, max(-15, c.x_pos - last.x_pos_max)),
+            x_reward=min(100, max(-15, x_delta)),
             time_penalty=min(0, c.time - last.time),
             death_penalty=(not c.is_alive) * -1000,
             coin_reward=min(3, max(0, c.coins - last.coins)),
