@@ -115,6 +115,8 @@ from torch.optim import AdamW
 from torch.optim.lr_scheduler import CosineAnnealingLR
 
 from mario_rl.agent.ddqn_net import DoubleDQN
+from mario_rl.training.shared_gradients import SharedGradientPool
+from mario_rl.training.shared_gradients import attach_worker_buffer
 
 
 def best_device() -> str:
@@ -140,7 +142,10 @@ class DDQNLearner:
     # Required fields
     weights_path: Path
     save_dir: Path
-    gradient_queue: mp.Queue
+    shm_paths: list[Path]  # Paths to shared memory files (created by main process)
+    
+    # Gradient pool - created in __post_init__
+    gradient_pool: Optional[SharedGradientPool] = field(init=False, default=None)
 
     # Hyperparameters
     learning_rate: float = 2.5e-4
@@ -196,6 +201,14 @@ class DDQNLearner:
 
     def __post_init__(self):
         """Initialize network and optimizer."""
+        # Create gradient pool by attaching to existing shared memory files
+        # (files were created by main process, we just attach to them)
+        self.gradient_pool = SharedGradientPool.__new__(SharedGradientPool)
+        self.gradient_pool.num_workers = len(self.shm_paths)
+        self.gradient_pool.buffers = [
+            attach_worker_buffer(i, path) for i, path in enumerate(self.shm_paths)
+        ]
+        
         if self.device is None:
             self.device = best_device()
 
@@ -597,81 +610,81 @@ class DDQNLearner:
         self._log(f"DDQN Learner started on {self.device}")
         self._log(f"  LR: {self.learning_rate} → {self.lr_end}, Tau: {self.tau}")
         self._log(f"  Accumulate grads: {self.accumulate_grads}")
+        self._log(f"  Gradient mode: shared_memory (non-blocking)")
         if self._resumed_from_checkpoint:
             self._log(f"  Resumed from v{self.weight_version}")
 
         while max_updates < 0 or self.update_count < max_updates:
-            # Collect gradients from workers
-            gradient_packets = []
-
             try:
-                # Wait for first gradient
-                packet = self.gradient_queue.get(timeout=5.0)
-                gradient_packets.append(packet)
+                # Collect gradients from shared memory (NON-BLOCKING, can't deadlock!)
+                gradient_packets = self._collect_gradients()
 
-                # Collect additional gradients up to accumulate_grads target
-                # Also drain any extra to prevent worker blocking
-                while len(gradient_packets) < self.accumulate_grads:
-                    try:
-                        packet = self.gradient_queue.get(timeout=0.1)
-                        gradient_packets.append(packet)
-                    except Exception:
-                        break
-
-                # Drain any remaining gradients to prevent worker blocking
-                while True:
-                    try:
-                        packet = self.gradient_queue.get_nowait()
-                        gradient_packets.append(packet)
-                    except Exception:
-                        break
+                if not gradient_packets:
+                    # No gradients available, wait briefly and retry
+                    time.sleep(0.01)
+                    continue
 
                 # Apply gradients (will average if multiple)
                 self.apply_gradients(gradient_packets)
 
                 # Enhanced logging every 10 updates
                 if self.update_count % 10 == 0:
-                    current_lr = self.optimizer.param_groups[0]["lr"]
-                    try:
-                        queue_size_str = str(self.gradient_queue.qsize())
-                    except NotImplementedError:
-                        queue_size_str = "N/A (macOS)"
-                    self._log(
-                        f"Update {self.update_count}: "
-                        f"LR={current_lr:.6f}, "
-                        f"loss={self.last_loss:.4f}, "
-                        f"q_mean={self.last_q_mean:.2f}, "
-                        f"grads_received={self.gradients_received}, "
-                        f"timesteps={self.total_timesteps_collected:,}, "
-                        f"queue_size={queue_size_str}"
-                    )
+                    self._log_status()
 
             except Exception as e:
-                if "Empty" not in str(type(e).__name__) and "timeout" not in str(e).lower():
-                    self._log(f"Learner error: {e}")
-                # Log timeout occasionally
-                if ("Empty" in str(type(e).__name__) or "timeout" in str(e).lower()) and self.update_count % 50 == 0:
-                    try:
-                        queue_size_str = str(self.gradient_queue.qsize())
-                    except NotImplementedError:
-                        queue_size_str = "N/A (macOS)"
-                    self._log(
-                        f"No gradients received (timeout). "
-                        f"Queue size: {queue_size_str}, "
-                        f"Total updates: {self.update_count}, "
-                        f"Gradients received: {self.gradients_received}"
-                    )
+                self._log(f"Learner error: {e}")
                 continue
 
         # Final save
         self.save_weights()
+
+    def _collect_gradients(self) -> list[dict]:
+        """
+        Collect gradients from shared memory pool (NON-BLOCKING).
+        
+        This method polls all worker buffers and collects any ready packets.
+        It CANNOT deadlock because there's no blocking I/O.
+        """
+        gradient_packets = []
+        
+        # Wait briefly for gradients to accumulate
+        wait_start = time.time()
+        while len(gradient_packets) < self.accumulate_grads:
+            # Poll all worker buffers (non-blocking)
+            new_packets = self.gradient_pool.collect_ready()
+            gradient_packets.extend(new_packets)
+            
+            # Timeout after 5 seconds of waiting
+            if time.time() - wait_start > 5.0:
+                break
+            
+            # Brief sleep to avoid busy-waiting
+            if not new_packets:
+                time.sleep(0.001)
+        
+        return gradient_packets
+
+    def _log_status(self) -> None:
+        """Log current training status."""
+        current_lr = self.optimizer.param_groups[0]["lr"]
+        ready_count = self.gradient_pool.count_ready()
+        
+        self._log(
+            f"Update {self.update_count}: "
+            f"LR={current_lr:.6f}, "
+            f"loss={self.last_loss:.4f}, "
+            f"q_mean={self.last_q_mean:.2f}, "
+            f"grads_received={self.gradients_received}, "
+            f"timesteps={self.total_timesteps_collected:,}, "
+            f"shm_ready={ready_count}"
+        )
         self._log(f"Training complete. Total updates: {self.update_count}")
 
 
 def run_ddqn_learner(
     weights_path: Path,
     save_dir: Path,
-    gradient_queue: mp.Queue,
+    shm_paths: list[Path],
     ui_queue: Optional[mp.Queue] = None,
     restore_snapshot: bool = False,
     snapshot_path: Optional[Path] = None,
@@ -718,7 +731,7 @@ def run_ddqn_learner(
         learner = DDQNLearner(
             weights_path=weights_path,
             save_dir=save_dir,
-            gradient_queue=gradient_queue,
+            shm_paths=shm_paths,
             ui_queue=ui_queue,
             **kwargs,
         )

@@ -47,6 +47,7 @@ from mario_rl.buffers import PrioritizedReplayBuffer
 from mario_rl.training.snapshot import SnapshotManager
 from mario_rl.training.ddqn_status import DDQNStatusCollector
 from mario_rl.core.reward_normalizer import RewardNormalizer
+from mario_rl.training.shared_gradients import SharedGradientBuffer
 
 
 @dataclass
@@ -64,12 +65,12 @@ class DDQNWorker:
     7. Periodically syncs weights from learner
     """
 
-    # Required fields (5)
+    # Required fields
     config: WorkerConfig
     weights_path: Path
-    gradient_queue: mp.Queue
+    gradient_buffer: SharedGradientBuffer  # Shared memory (non-blocking, can't deadlock)
     ui_queue: Optional[mp.Queue] = None
-    status_queue: Optional[mp.Queue] = None
+    heartbeats: Any = None  # SharedHeartbeats for monitoring (attached in worker process)
 
     # Components - initialized in __post_init__ (8)
     env: Any = field(init=False, repr=False)
@@ -98,14 +99,9 @@ class DDQNWorker:
 
     # CSV logging
     _episodes_csv: Path = field(init=False, repr=False)
-    
-    # Status queue for monitoring
-    _status_queue: Optional[mp.Queue] = field(init=False, default=None, repr=False)
 
     def __post_init__(self) -> None:
         """Initialize environment, network, and buffer."""
-        # Store status queue reference
-        self._status_queue = self.status_queue
         
         # Get device
         device = self.config.device or detect_device()
@@ -525,7 +521,7 @@ class DDQNWorker:
             "best_x_ever": self.metrics.best_x_ever,
         }
 
-        # Send gradients (grads serialized to bytes to avoid file descriptor blocking)
+        # Send gradients
         gradient_packet = {
             "grads_bytes": grads_bytes,  # Serialized bytes, not tensors
             "timesteps": self.config.buffer.batch_size,
@@ -535,20 +531,20 @@ class DDQNWorker:
             "metrics": metrics,
         }
 
-        try:
-            self.gradient_queue.put(gradient_packet, timeout=0.5)
+        # Write to shared memory (non-blocking, can't deadlock)
+        success = self.gradient_buffer.write(gradient_packet)
+        if success:
             self.metrics.gradients_sent += 1
             self._grads_sent += 1
+        elif self.metrics.total_steps % 1000 == 0:
+            self.ui.log("Shared memory buffer full or too small")
 
-            # Log occasionally to UI
-            if self.metrics.total_steps % 500 == 0:
-                self.ui.log(
-                    f"Grad: loss={metrics['loss']:.4f}, "
-                    f"q={metrics['q_mean']:.2f}, td={metrics['td_error']:.4f}"
-                )
-        except Exception as e:
-            if self.metrics.total_steps % 1000 == 0:
-                self.ui.log(f"Failed to send gradient: {e}")
+        # Log occasionally to UI
+        if self.metrics.total_steps % 500 == 0:
+            self.ui.log(
+                f"Grad: loss={metrics['loss']:.4f}, "
+                f"q={metrics['q_mean']:.2f}, td={metrics['td_error']:.4f}"
+            )
 
         return metrics
 
@@ -591,22 +587,14 @@ class DDQNWorker:
         while True:
             loop_count += 1
             
-            # Send periodic heartbeat (every 30 seconds)
+            # Send periodic heartbeat via shared memory (every 10 seconds)
             current_time = time.time()
-            if current_time - last_heartbeat >= 30.0:
-                if self._status_queue is not None:
+            if current_time - last_heartbeat >= 10.0:
+                if self.heartbeats is not None:
                     try:
-                        self._status_queue.put_nowait({
-                            "worker_id": self.config.worker_id,
-                            "status": "alive",
-                            "episodes": self.metrics.episode_count,
-                            "steps": self.metrics.total_steps,
-                            "buffer_size": len(self.buffer),
-                            "timestamp": current_time,
-                        })
+                        self.heartbeats.update(self.config.worker_id, current_time)
                         last_heartbeat = current_time
                     except Exception:
-                        # Don't fail if heartbeat queue is full
                         pass
 
             if loop_count % 100 == 1:
@@ -656,9 +644,9 @@ class DDQNWorker:
 def run_ddqn_worker(
     config: WorkerConfig,
     weights_path: Path,
-    gradient_queue: mp.Queue,
+    gradient_buffer_or_path: SharedGradientBuffer | Path,
     ui_queue: Optional[mp.Queue] = None,
-    status_queue: Optional[mp.Queue] = None,
+    heartbeat_path: Optional[Path] = None,
     crash_log_dir: Optional[Path] = None,
 ) -> None:
     """Entry point for worker process."""
@@ -666,6 +654,25 @@ def run_ddqn_worker(
     import signal
     import traceback
     from datetime import datetime
+    from mario_rl.training.shared_gradients import attach_worker_buffer, SharedHeartbeats
+    
+    # Accept either a buffer or a path to attach to
+    if isinstance(gradient_buffer_or_path, Path):
+        gradient_buffer = attach_worker_buffer(config.worker_id, gradient_buffer_or_path)
+    else:
+        gradient_buffer = gradient_buffer_or_path
+    
+    # Attach to shared heartbeats if path provided
+    heartbeats = None
+    if heartbeat_path is not None:
+        try:
+            heartbeats = SharedHeartbeats.__new__(SharedHeartbeats)
+            heartbeats.shm_path = heartbeat_path
+            heartbeats.num_workers = 32  # Max workers - actual count doesn't matter for update()
+            heartbeats.buffer_size = 32 * 8
+            heartbeats._attach()
+        except Exception:
+            heartbeats = None
     
     # Setup crash log file
     crash_log_file = None
@@ -701,14 +708,10 @@ def run_ddqn_worker(
     # Register signal handler (SIGUSR1)
     signal.signal(signal.SIGUSR1, dump_stack_trace)
     
-    # Send startup heartbeat
-    if status_queue is not None:
+    # Send startup heartbeat via shared memory
+    if heartbeats is not None:
         try:
-            status_queue.put_nowait({
-                "worker_id": config.worker_id,
-                "status": "starting",
-                "timestamp": time.time(),
-            })
+            heartbeats.update(config.worker_id)
         except Exception:
             pass
     
@@ -716,33 +719,21 @@ def run_ddqn_worker(
         worker = DDQNWorker(
             config=config,
             weights_path=weights_path,
-            gradient_queue=gradient_queue,
+            gradient_buffer=gradient_buffer,
             ui_queue=ui_queue,
+            heartbeats=heartbeats,
         )
         
         # Send ready heartbeat
-        if status_queue is not None:
+        if heartbeats is not None:
             try:
-                status_queue.put_nowait({
-                    "worker_id": config.worker_id,
-                    "status": "running",
-                    "timestamp": time.time(),
-                })
+                heartbeats.update(config.worker_id)
             except Exception:
                 pass
         
         worker.run()
     except KeyboardInterrupt:
         # Graceful shutdown
-        if status_queue is not None:
-            try:
-                status_queue.put_nowait({
-                    "worker_id": config.worker_id,
-                    "status": "stopped",
-                    "timestamp": time.time(),
-                })
-            except Exception:
-                pass
         print(f"[W{config.worker_id}] Interrupted", file=sys.stderr, flush=True)
     except Exception as e:
         # Log crash with full traceback
@@ -764,20 +755,6 @@ def run_ddqn_worker(
                     f.flush()
             except Exception as log_err:
                 print(f"[W{config.worker_id}] Failed to write crash log: {log_err}", file=sys.stderr, flush=True)
-        
-        # Send crash status
-        if status_queue is not None:
-            try:
-                status_queue.put_nowait({
-                    "worker_id": config.worker_id,
-                    "status": "crashed",
-                    "error": str(e),
-                    "error_type": type(e).__name__,
-                    "traceback": traceback.format_exc(),
-                    "timestamp": time.time(),
-                })
-            except Exception:
-                pass
         
         if ui_queue is not None:
             try:

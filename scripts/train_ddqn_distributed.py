@@ -85,12 +85,20 @@ Usage:
 import os
 import sys
 import time
+import atexit
+import shutil
 import signal
 import threading
+import multiprocessing as mp
 from typing import cast
 from pathlib import Path
 from typing import Literal
 from datetime import datetime
+
+# Use 'spawn' start method for cleaner CUDA handling (avoids fork issues)
+# Must be done before importing torch or creating any processes
+mp.set_start_method("spawn", force=True)
+
 from multiprocessing import Queue
 from multiprocessing import Process
 
@@ -110,6 +118,7 @@ from mario_rl.training.training_ui import TrainingUI
 from mario_rl.training.ddqn_worker import run_ddqn_worker
 from mario_rl.training.ddqn_learner import run_ddqn_learner
 from mario_rl.core.config import LevelType as ConfigLevelType
+from mario_rl.training.shared_gradients import SharedGradientPool, SharedHeartbeats
 
 LevelType = Literal["sequential", "random"] | tuple[int, int]
 
@@ -136,9 +145,9 @@ def run_training_ui(num_workers: int, ui_queue: Queue) -> None:
 def run_worker_silent(
     config: WorkerConfig,
     weights_path: Path,
-    gradient_queue: "Queue[object]",
+    shm_path: Path,
     ui_queue: "Queue[object] | None" = None,
-    status_queue: "Queue[object] | None" = None,
+    heartbeat_path: Path | None = None,
     crash_log_dir: Path | None = None,
 ) -> None:
     """Run worker with stdout/stderr suppressed (for UI mode)."""
@@ -154,14 +163,14 @@ def run_worker_silent(
     sys.stdout = devnull
     sys.stderr = devnull
 
-    # Now run the actual worker
-    run_ddqn_worker(config, weights_path, gradient_queue, ui_queue, status_queue, crash_log_dir)
+    # Pass shm_path directly - worker will attach internally
+    run_ddqn_worker(config, weights_path, shm_path, ui_queue, heartbeat_path, crash_log_dir)
 
 
 def run_learner_silent(
     weights_path: Path,
     save_dir: Path,
-    gradient_queue: Queue,
+    shm_paths: list[Path],
     restore_snapshot: bool = False,
     snapshot_path: Path | None = None,
     **kwargs,
@@ -185,7 +194,7 @@ def run_learner_silent(
         run_ddqn_learner(
             weights_path,
             save_dir,
-            gradient_queue,
+            shm_paths,
             restore_snapshot=restore_snapshot,
             snapshot_path=snapshot_path,
             **kwargs,
@@ -208,9 +217,9 @@ def run_learner_silent(
 
 def monitor_workers(
     worker_list: list[tuple[Process, WorkerConfig]],
-    status_queue: Queue,
+    heartbeats: SharedHeartbeats,
     weights_path: Path,
-    gradient_queue: Queue,
+    shm_paths: list[Path],
     ui_queue: Queue | None,
     worker_target,
     stop_event: threading.Event,
@@ -219,8 +228,6 @@ def monitor_workers(
 ) -> None:
     """Monitor worker health and restart crashed/zombie workers."""
     from datetime import datetime
-    
-    last_heartbeat = {}
     
     def log_monitor(msg: str):
         """Log to file and/or UI queue (avoid stderr when UI is active)."""
@@ -254,48 +261,29 @@ def monitor_workers(
             print(log_line, file=sys.stderr, flush=True)
     
     while not stop_event.is_set():
-        # Process status messages from queue
-        try:
-            while not status_queue.empty():
-                status = status_queue.get_nowait()
-                worker_id = status.get("worker_id")
-                if worker_id is not None:
-                    last_heartbeat[worker_id] = time.time()
-                    
-                    # Forward heartbeat to UI
-                    if status.get("status") == "alive" and ui_queue is not None:
-                        try:
-                            from mario_rl.training.training_ui import UIMessage, MessageType
-                            ui_queue.put_nowait(
-                                UIMessage(
-                                    msg_type=MessageType.WORKER_HEARTBEAT,
-                                    source_id=worker_id,
-                                    data=status,
-                                )
-                            )
-                        except Exception:
-                            pass
-                    
-                    # Log crashes with full details
-                    if status.get("status") == "crashed":
-                        error = status.get("error", "Unknown")
-                        error_type = status.get("error_type", "Exception")
-                        traceback_str = status.get("traceback", "No traceback available")
-                        
-                        log_monitor(f"Worker {worker_id} CRASHED")
-                        log_monitor(f"  Error Type: {error_type}")
-                        log_monitor(f"  Error Message: {error}")
-                        log_monitor(f"  Traceback:")
-                        for line in traceback_str.split('\n'):
-                            if line.strip():
-                                log_monitor(f"    {line}")
-        except Exception:
-            pass
-        
         # Check each worker process
         current_time = time.time()
+        
+        # Read all heartbeat timestamps from shared memory (no blocking!)
+        worker_heartbeats = heartbeats.get_all()
+        
         for i, (proc, config) in enumerate(worker_list):
             worker_id = config.worker_id
+            last_heartbeat = worker_heartbeats[worker_id]
+            
+            # Forward heartbeat to UI if recent (updated in last 30s)
+            if last_heartbeat > 0 and current_time - last_heartbeat < 30 and ui_queue is not None:
+                try:
+                    from mario_rl.training.training_ui import UIMessage, MessageType
+                    ui_queue.put_nowait(
+                        UIMessage(
+                            msg_type=MessageType.WORKER_HEARTBEAT,
+                            source_id=worker_id,
+                            data={"status": "alive", "worker_id": worker_id},
+                        )
+                    )
+                except Exception:
+                    pass
             
             # Check if process is dead (zombie or terminated)
             if not proc.is_alive():
@@ -316,19 +304,18 @@ def monitor_workers(
                 # Start a new worker process
                 new_proc = Process(
                     target=worker_target,
-                    args=(config, weights_path, gradient_queue),
-                    kwargs={"ui_queue": ui_queue, "status_queue": status_queue, "crash_log_dir": crash_log_dir},
+                    args=(config, weights_path, shm_paths[worker_id]),
+                    kwargs={"ui_queue": ui_queue, "heartbeat_path": heartbeats.shm_path, "crash_log_dir": crash_log_dir},
                     daemon=True,
                 )
                 new_proc.start()
                 worker_list[i] = (new_proc, config)
-                last_heartbeat[worker_id] = current_time
                 log_monitor(f"  Worker {worker_id} restarted with PID {new_proc.pid}")
                 continue
             
             # Check for stalled workers (no heartbeat in 120 seconds)
-            if worker_id in last_heartbeat:
-                time_since_heartbeat = current_time - last_heartbeat[worker_id]
+            if last_heartbeat > 0:
+                time_since_heartbeat = current_time - last_heartbeat
                 if time_since_heartbeat > 120:
                     log_monitor(f"Worker {worker_id} is STALLED")
                     log_monitor(f"  Last heartbeat: {time_since_heartbeat:.0f}s ago")
@@ -357,13 +344,12 @@ def monitor_workers(
                     # Start a new worker process
                     new_proc = Process(
                         target=worker_target,
-                        args=(config, weights_path, gradient_queue),
-                        kwargs={"ui_queue": ui_queue, "status_queue": status_queue, "crash_log_dir": crash_log_dir},
+                        args=(config, weights_path, shm_paths[worker_id]),
+                        kwargs={"ui_queue": ui_queue, "heartbeat_path": heartbeats.shm_path, "crash_log_dir": crash_log_dir},
                         daemon=True,
                     )
                     new_proc.start()
                     worker_list[i] = (new_proc, config)
-                    last_heartbeat[worker_id] = current_time
                     log_monitor(f"  Worker {worker_id} restarted with PID {new_proc.pid}")
         
         # Sleep before next check
@@ -493,13 +479,30 @@ def main(
         print(f"  Total steps: {total_steps:,}")
         print("=" * 70)
 
-    # Create queues
-    # Larger queue to reduce worker blocking
-    # Workers send train_steps (4) gradients per cycle, so need more buffer
-    # Increased to 32 per worker to handle learner stalls better
-    gradient_queue: Queue = Queue(maxsize=workers * 32)
+    # Create shared memory gradient pool in /dev/shm (RAM-backed, fast)
+    # Use unique subdir based on PID to avoid conflicts
+    shm_dir = Path("/dev/shm") / f"mario_ddqn_{os.getpid()}"
+    gradient_pool = SharedGradientPool(
+        num_workers=workers,
+        shm_dir=shm_dir,
+    )
+    shm_paths = gradient_pool.get_shm_paths()
+    
+    # Register cleanup handler to remove shm directory on exit
+    def cleanup_shm():
+        try:
+            if shm_dir.exists():
+                shutil.rmtree(shm_dir)
+        except Exception:
+            pass
+    atexit.register(cleanup_shm)
+    
+    # Create queues for UI (unbounded to prevent blocking)
     ui_queue: Queue | None = Queue() if not no_ui else None
-    status_queue: Queue = Queue(maxsize=workers * 10)  # For worker health monitoring
+    
+    # Create shared memory heartbeats (no queues = no deadlocks)
+    heartbeats = SharedHeartbeats(num_workers=workers, shm_dir=shm_dir, create=True)
+    atexit.register(heartbeats.unlink)
 
     # Start UI process
     ui_process = None
@@ -562,8 +565,8 @@ def main(
 
         p = Process(
             target=worker_target,
-            args=(worker_config, weights_path, gradient_queue),
-            kwargs={"ui_queue": ui_queue, "status_queue": status_queue, "crash_log_dir": crash_log_dir},
+            args=(worker_config, weights_path, shm_paths[i]),
+            kwargs={"ui_queue": ui_queue, "heartbeat_path": heartbeats.shm_path, "crash_log_dir": crash_log_dir},
             daemon=True,
         )
         p.start()
@@ -571,10 +574,10 @@ def main(
         if no_ui:
             print(f"Started worker {i} (ε_end = {worker_eps_end:.4f})")
 
-    # Start learner process
+    # Start learner process (pass paths, not pool - pool can't be pickled with spawn)
     learner_process = Process(
         target=learner_target,
-        args=(weights_path, run_dir, gradient_queue),
+        args=(weights_path, run_dir, shm_paths),
         kwargs={
             "learning_rate": lr,
             "lr_end": lr_end,
@@ -591,7 +594,7 @@ def main(
     )
     learner_process.start()
     if no_ui:
-        print("Started learner")
+        print("Started learner (shared memory mode)")
     
     # Start worker monitoring thread
     stop_monitor = threading.Event()
@@ -599,9 +602,9 @@ def main(
         target=monitor_workers,
         args=(
             worker_processes,
-            status_queue,
+            heartbeats,
             weights_path,
-            gradient_queue,
+            shm_paths,
             ui_queue,
             worker_target,
             stop_monitor,
@@ -628,6 +631,8 @@ def main(
             learner_process.terminate()
         if ui_process and ui_process.is_alive():
             ui_process.terminate()
+        # Clean up shared memory
+        gradient_pool.unlink()
 
     # Set up signal handler (only runs shutdown in main process)
     def signal_handler(sig, frame):
