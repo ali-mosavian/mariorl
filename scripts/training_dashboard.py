@@ -212,18 +212,37 @@ def render_learner_tab(df: pd.DataFrame) -> None:
 
 def render_workers_tab(workers: dict[int, pd.DataFrame]) -> None:
     """Render the workers tab."""
+    import time
+    
     if not workers:
         st.info("⏳ Waiting for worker data...")
         return
 
     # Summary table
     rows = []
+    current_time = time.time()
+    
     for wid, df in sorted(workers.items()):
         if len(df) == 0:
             continue
         latest = df.iloc[-1]
         best_x = latest["best_x_ever"]
+        
+        # Calculate heartbeat status based on last timestamp
+        last_timestamp = latest.get("timestamp", 0)
+        if last_timestamp > 0:
+            seconds_since = int(current_time - last_timestamp)
+            if seconds_since < 60:
+                heartbeat = "💚"  # Healthy
+            elif seconds_since < 120:
+                heartbeat = "💛"  # Warning
+            else:
+                heartbeat = "💔"  # Stale/crashed
+        else:
+            heartbeat = "⚪"  # No data
+        
         rows.append({
+            "Status": heartbeat,
             "Worker": f"W{wid}",
             "Level": latest.get("current_level", "?"),
             "Episodes": int(latest["episode"]),
@@ -237,7 +256,14 @@ def render_workers_tab(workers: dict[int, pd.DataFrame]) -> None:
         })
 
     if rows:
-        st.dataframe(pd.DataFrame(rows), hide_index=True, use_container_width=True)
+        st.dataframe(pd.DataFrame(rows), hide_index=True, use_container_width=True, 
+                     column_config={
+                         "Status": st.column_config.TextColumn(
+                             "Status",
+                             help="💚 Healthy (<60s) | 💛 Stale (60-120s) | 💔 Crashed (>120s)",
+                             width="small",
+                         ),
+                     })
 
     st.divider()
 
@@ -761,6 +787,34 @@ def main():
                 mod_time = datetime.fromtimestamp(learner_csv.stat().st_mtime)
                 st.caption(f"📁 {checkpoint_path.name}")
                 st.caption(f"🕐 {mod_time.strftime('%H:%M:%S')}")
+            
+            # Worker health summary
+            import time
+            workers = load_worker_episodes(checkpoint_dir)
+            if workers:
+                current_time = time.time()
+                healthy = 0
+                stale = 0
+                crashed = 0
+                
+                for wid, df in workers.items():
+                    if len(df) > 0:
+                        last_timestamp = df.iloc[-1].get("timestamp", 0)
+                        if last_timestamp > 0:
+                            seconds_since = int(current_time - last_timestamp)
+                            if seconds_since < 60:
+                                healthy += 1
+                            elif seconds_since < 120:
+                                stale += 1
+                            else:
+                                crashed += 1
+                
+                st.divider()
+                st.caption("WORKER HEALTH")
+                health_cols = st.columns(3)
+                health_cols[0].metric("💚", healthy, help="Healthy (<60s)")
+                health_cols[1].metric("💛", stale, help="Stale (60-120s)")
+                health_cols[2].metric("💔", crashed, help="Crashed (>120s)")
 
     # Check checkpoint
     if not Path(checkpoint_dir).exists():
