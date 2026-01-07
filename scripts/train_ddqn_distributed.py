@@ -207,10 +207,11 @@ def monitor_workers(
     last_heartbeat = {}
     
     def log_monitor(msg: str):
-        """Log to both stderr and file."""
+        """Log to file and/or UI queue (avoid stderr when UI is active)."""
         timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         log_line = f"[{timestamp}] [MONITOR] {msg}"
-        print(log_line, file=sys.stderr, flush=True)
+        
+        # Write to log file
         if monitor_log_file is not None:
             try:
                 with open(monitor_log_file, "a") as f:
@@ -218,6 +219,23 @@ def monitor_workers(
                     f.flush()
             except Exception:
                 pass
+        
+        # Send to UI queue if available, otherwise print to stderr
+        if ui_queue is not None:
+            try:
+                from mario_rl.training.training_ui import UIMessage, MessageType
+                ui_queue.put_nowait(
+                    UIMessage(
+                        msg_type=MessageType.SYSTEM_LOG,
+                        source_id=-1,
+                        data={"text": msg},
+                    )
+                )
+            except Exception:
+                pass
+        else:
+            # No UI - print to stderr
+            print(log_line, file=sys.stderr, flush=True)
     
     while not stop_event.is_set():
         # Process status messages from queue
