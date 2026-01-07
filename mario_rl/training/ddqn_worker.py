@@ -64,11 +64,12 @@ class DDQNWorker:
     7. Periodically syncs weights from learner
     """
 
-    # Required fields (4)
+    # Required fields (5)
     config: WorkerConfig
     weights_path: Path
     gradient_queue: mp.Queue
     ui_queue: Optional[mp.Queue] = None
+    status_queue: Optional[mp.Queue] = None
 
     # Components - initialized in __post_init__ (8)
     env: Any = field(init=False, repr=False)
@@ -97,9 +98,15 @@ class DDQNWorker:
 
     # CSV logging
     _episodes_csv: Path = field(init=False, repr=False)
+    
+    # Status queue for monitoring
+    _status_queue: Optional[mp.Queue] = field(init=False, default=None, repr=False)
 
     def __post_init__(self) -> None:
         """Initialize environment, network, and buffer."""
+        # Store status queue reference
+        self._status_queue = self.status_queue
+        
         # Get device
         device = self.config.device or detect_device()
 
@@ -307,10 +314,26 @@ class DDQNWorker:
             if self.metrics.total_steps % 10 == 0:
                 self.metrics.add_entropy(self.timing.last_entropy)
 
-            # Step environment
-            next_state, reward, terminated, truncated, info = self.env.step(action)
-            done = terminated or truncated
-            self.timing.record_action()
+            # Step environment with error recovery
+            try:
+                next_state, reward, terminated, truncated, info = self.env.step(action)
+                done = terminated or truncated
+                self.timing.record_action()
+            except Exception as e:
+                # Log error and reset environment
+                self.ui.log(f"ERROR during env.step: {e}. Resetting environment.")
+                try:
+                    # Try to reset environment
+                    state, _ = self.env.reset()
+                    self._current_state = state
+                    # Flush n-step buffer to prevent corruption
+                    self.n_step_buffer.reset()
+                    # Skip this step and continue
+                    continue
+                except Exception as reset_error:
+                    # If reset also fails, this is critical
+                    self.ui.log(f"CRITICAL: Environment reset failed: {reset_error}")
+                    raise
 
             is_dead = info.get("is_dead", False) or info.get("is_dying", False)
 
@@ -559,8 +582,28 @@ class DDQNWorker:
         )
 
         loop_count = 0
+        last_heartbeat = time.time()
+        
         while True:
             loop_count += 1
+            
+            # Send periodic heartbeat (every 30 seconds)
+            current_time = time.time()
+            if current_time - last_heartbeat >= 30.0:
+                if self._status_queue is not None:
+                    try:
+                        self._status_queue.put_nowait({
+                            "worker_id": self.config.worker_id,
+                            "status": "alive",
+                            "episodes": self.metrics.episode_count,
+                            "steps": self.metrics.total_steps,
+                            "buffer_size": len(self.buffer),
+                            "timestamp": current_time,
+                        })
+                        last_heartbeat = current_time
+                    except Exception:
+                        # Don't fail if heartbeat queue is full
+                        pass
 
             if loop_count % 100 == 1:
                 # Get current epsilon
@@ -611,8 +654,23 @@ def run_ddqn_worker(
     weights_path: Path,
     gradient_queue: mp.Queue,
     ui_queue: Optional[mp.Queue] = None,
+    status_queue: Optional[mp.Queue] = None,
 ) -> None:
     """Entry point for worker process."""
+    import sys
+    import traceback
+    
+    # Send startup heartbeat
+    if status_queue is not None:
+        try:
+            status_queue.put_nowait({
+                "worker_id": config.worker_id,
+                "status": "starting",
+                "timestamp": time.time(),
+            })
+        except Exception:
+            pass
+    
     try:
         worker = DDQNWorker(
             config=config,
@@ -620,11 +678,48 @@ def run_ddqn_worker(
             gradient_queue=gradient_queue,
             ui_queue=ui_queue,
         )
+        
+        # Send ready heartbeat
+        if status_queue is not None:
+            try:
+                status_queue.put_nowait({
+                    "worker_id": config.worker_id,
+                    "status": "running",
+                    "timestamp": time.time(),
+                })
+            except Exception:
+                pass
+        
         worker.run()
+    except KeyboardInterrupt:
+        # Graceful shutdown
+        if status_queue is not None:
+            try:
+                status_queue.put_nowait({
+                    "worker_id": config.worker_id,
+                    "status": "stopped",
+                    "timestamp": time.time(),
+                })
+            except Exception:
+                pass
+        print(f"[W{config.worker_id}] Interrupted", file=sys.stderr, flush=True)
     except Exception as e:
-        import sys
-        import traceback
-
+        # Log crash with full traceback
+        error_msg = f"CRASH: {e}\n{traceback.format_exc()}"
+        
+        # Send crash status
+        if status_queue is not None:
+            try:
+                status_queue.put_nowait({
+                    "worker_id": config.worker_id,
+                    "status": "crashed",
+                    "error": str(e),
+                    "traceback": traceback.format_exc(),
+                    "timestamp": time.time(),
+                })
+            except Exception:
+                pass
+        
         if ui_queue is not None:
             try:
                 from mario_rl.training.training_ui import UIMessage
@@ -634,12 +729,11 @@ def run_ddqn_worker(
                     UIMessage(
                         msg_type=MessageType.WORKER_LOG,
                         source_id=config.worker_id,
-                        data={"text": f"CRASH: {e}\n{traceback.format_exc()}"},
+                        data={"text": error_msg},
                     )
                 )
             except Exception:
                 pass
 
-        print(f"[W{config.worker_id}] CRASH: {e}", file=sys.stderr, flush=True)
-        traceback.print_exc(file=sys.stderr)
+        print(f"[W{config.worker_id}] {error_msg}", file=sys.stderr, flush=True)
         raise

@@ -82,7 +82,9 @@ Usage:
 
 import os
 import sys
+import time
 import signal
+import threading
 from typing import cast
 from pathlib import Path
 from typing import Literal
@@ -134,6 +136,7 @@ def run_worker_silent(
     weights_path: Path,
     gradient_queue: "Queue[object]",
     ui_queue: "Queue[object] | None" = None,
+    status_queue: "Queue[object] | None" = None,
 ) -> None:
     """Run worker with stdout/stderr suppressed (for UI mode)."""
     import os
@@ -149,7 +152,7 @@ def run_worker_silent(
     sys.stderr = devnull
 
     # Now run the actual worker
-    run_ddqn_worker(config, weights_path, gradient_queue, ui_queue)
+    run_ddqn_worker(config, weights_path, gradient_queue, ui_queue, status_queue)
 
 
 def run_learner_silent(
@@ -182,6 +185,88 @@ def run_learner_silent(
         snapshot_path=snapshot_path,
         **kwargs,
     )
+
+
+def monitor_workers(
+    worker_list: list[tuple[Process, WorkerConfig]],
+    status_queue: Queue,
+    weights_path: Path,
+    gradient_queue: Queue,
+    ui_queue: Queue | None,
+    worker_target,
+    stop_event: threading.Event,
+) -> None:
+    """Monitor worker health and restart crashed/zombie workers."""
+    last_heartbeat = {}
+    
+    while not stop_event.is_set():
+        # Process status messages from queue
+        try:
+            while not status_queue.empty():
+                status = status_queue.get_nowait()
+                worker_id = status.get("worker_id")
+                if worker_id is not None:
+                    last_heartbeat[worker_id] = time.time()
+                    
+                    # Log crashes
+                    if status.get("status") == "crashed":
+                        error = status.get("error", "Unknown")
+                        print(f"[MONITOR] Worker {worker_id} crashed: {error}", file=sys.stderr, flush=True)
+        except Exception:
+            pass
+        
+        # Check each worker process
+        current_time = time.time()
+        for i, (proc, config) in enumerate(worker_list):
+            worker_id = config.worker_id
+            
+            # Check if process is dead (zombie or terminated)
+            if not proc.is_alive():
+                print(f"[MONITOR] Worker {worker_id} is dead (exit code: {proc.exitcode}). Restarting...", 
+                      file=sys.stderr, flush=True)
+                
+                # Start a new worker process
+                new_proc = Process(
+                    target=worker_target,
+                    args=(config, weights_path, gradient_queue),
+                    kwargs={"ui_queue": ui_queue, "status_queue": status_queue},
+                    daemon=True,
+                )
+                new_proc.start()
+                worker_list[i] = (new_proc, config)
+                last_heartbeat[worker_id] = current_time
+                print(f"[MONITOR] Worker {worker_id} restarted (PID: {new_proc.pid})", 
+                      file=sys.stderr, flush=True)
+                continue
+            
+            # Check for stalled workers (no heartbeat in 120 seconds)
+            if worker_id in last_heartbeat:
+                time_since_heartbeat = current_time - last_heartbeat[worker_id]
+                if time_since_heartbeat > 120:
+                    print(f"[MONITOR] Worker {worker_id} stalled ({time_since_heartbeat:.0f}s no heartbeat). Restarting...",
+                          file=sys.stderr, flush=True)
+                    
+                    # Terminate and restart
+                    proc.terminate()
+                    proc.join(timeout=5)
+                    if proc.is_alive():
+                        proc.kill()
+                    
+                    # Start a new worker process
+                    new_proc = Process(
+                        target=worker_target,
+                        args=(config, weights_path, gradient_queue),
+                        kwargs={"ui_queue": ui_queue, "status_queue": status_queue},
+                        daemon=True,
+                    )
+                    new_proc.start()
+                    worker_list[i] = (new_proc, config)
+                    last_heartbeat[worker_id] = current_time
+                    print(f"[MONITOR] Worker {worker_id} restarted (PID: {new_proc.pid})",
+                          file=sys.stderr, flush=True)
+        
+        # Sleep before next check
+        time.sleep(10)
 
 
 @click.command()
@@ -307,6 +392,7 @@ def main(
     # Workers send train_steps (4) gradients per cycle, so need more buffer
     gradient_queue: Queue = Queue(maxsize=workers * 8)
     ui_queue: Queue | None = Queue() if not no_ui else None
+    status_queue: Queue = Queue(maxsize=workers * 10)  # For worker health monitoring
 
     # Start UI process
     ui_process = None
@@ -370,11 +456,11 @@ def main(
         p = Process(
             target=worker_target,
             args=(worker_config, weights_path, gradient_queue),
-            kwargs={"ui_queue": ui_queue},
+            kwargs={"ui_queue": ui_queue, "status_queue": status_queue},
             daemon=True,
         )
         p.start()
-        worker_processes.append(p)
+        worker_processes.append((p, worker_config))
         if no_ui:
             print(f"Started worker {i} (ε_end = {worker_eps_end:.4f})")
 
@@ -399,11 +485,31 @@ def main(
     learner_process.start()
     if no_ui:
         print("Started learner")
+    
+    # Start worker monitoring thread
+    stop_monitor = threading.Event()
+    monitor_thread = threading.Thread(
+        target=monitor_workers,
+        args=(
+            worker_processes,
+            status_queue,
+            weights_path,
+            gradient_queue,
+            ui_queue,
+            worker_target,
+            stop_monitor,
+        ),
+        daemon=True,
+    )
+    monitor_thread.start()
+    if no_ui:
+        print("Started worker monitor")
 
     # Shutdown function
     def shutdown():
         print("\nShutting down...")
-        for p in worker_processes:
+        stop_monitor.set()  # Stop monitoring thread
+        for p, _ in worker_processes:
             if p.is_alive():
                 p.terminate()
         if learner_process.is_alive():
