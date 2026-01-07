@@ -213,10 +213,10 @@ def run_learner_silent(
 @click.option("--restore-snapshot", type=str, default=None, help="Restore from specific snapshot file")
 @click.option("--no-game-snapshots", is_flag=True, help="Disable game state snapshots (save/restore on death)")
 @click.option("--no-per", is_flag=True, help="Disable Prioritized Experience Replay (use uniform sampling)")
-@click.option("--reward-norm", type=click.Choice(["scale", "running", "none"]), default="scale",
-              help="Reward normalization: 'scale' (fixed, recommended), 'running' (adaptive), 'none'")
-@click.option("--reward-scale", default=0.1, help="Scale factor when reward-norm=scale (default 0.1)")
-@click.option("--reward-clip", default=5.0, help="Clip scaled rewards to [-x, x] (default 5.0, 0 to disable)")
+@click.option("--reward-norm", type=click.Choice(["none", "scale", "running"]), default="none",
+              help="Reward normalization: 'none' (recommended - env normalizes), 'scale', 'running'")
+@click.option("--reward-scale", default=1.0, help="Scale factor when reward-norm=scale")
+@click.option("--reward-clip", default=0.0, help="Clip rewards to [-x, x] (0 to disable)")
 def main(
     workers: int,
     level: str,

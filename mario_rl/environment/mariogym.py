@@ -53,32 +53,38 @@ class Reward:
         )
 
     def total_reward(self) -> float:
-        # Normalize rewards to prevent gradient explosion
-        # Original range: ~-1100 to ~+1200 -> New range: ~-15 to ~+15
-
-        # Base rewards
-        base = (
-            self.x_reward / 10.0  # -1.5 to +10 (was -15 to +100)
-            + self.powerup_reward / 100.0  # -1 to +1 (was -100 to +100)
-            + self.death_penalty / 100.0  # -10 (was -1000)
-            + self.finish_reward / 100.0  # +10 (was +1000)
-        )
-
-        # Speed bonus: reward moving forward quickly
-        # More forward progress = more bonus (max ~0.5 per step)
-        speed_bonus = self.x_reward / 200.0 if self.x_reward > 0 else 0.0
-
-        # Standing still penalty: punish wasting time without progress
-        standing_penalty = -0.1 if self.x_reward <= 0 and self.time_penalty < 0 else 0.0
-
-        return base + speed_bonus + standing_penalty
+        """
+        Compute normalized reward for stable RL training.
+        
+        Design principles:
+        - Forward progress is the PRIMARY signal (+0.1 to +1 per frame)
+        - Death/flag are SMALL bonuses, not dominating (-1 to +1)
+        - No penalties for standing still (causes huge negative accumulation)
+        - Per-frame range: ~-1.5 to ~+1.5
+        - With frame skip=4: ~-6 to ~+6 per observed step
+        """
+        # Forward progress: main learning signal
+        # x_reward ranges -15 to +100, scale to -0.15 to +1.0
+        progress = self.x_reward / 100.0
+        
+        # Death penalty: small to avoid dominating learning
+        # Only -1 instead of -10 (was causing Q-value issues)
+        death = self.death_penalty / 1000.0  # -1 when dead
+        
+        # Flag bonus: small to keep balanced with progress rewards
+        flag = self.finish_reward / 1000.0  # +1 when flag
+        
+        # Powerup: small bonus/penalty
+        powerup = self.powerup_reward / 200.0  # -0.5 to +1
+        
+        return progress + death + flag + powerup
 
 
 # -
 
 
 class MarioBrosLevel(SuperMarioBrosEnv):
-    reward_range = (-15, 15)  # Normalized: death=-10, finish=+10, movement=-1.5 to +10
+    reward_range = (-2, 2)  # Normalized: progress=-0.15 to +1, death=-1, flag=+1
     _last_state: Optional[State] = None
 
     def __init__(

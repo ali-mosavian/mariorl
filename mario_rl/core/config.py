@@ -60,13 +60,13 @@ class WorkerConfig:
     weight_sync_interval: float = 5.0  # Seconds between weight syncs
     max_grad_norm: float = 10.0
 
-    # Reward normalization mode: "scale" (fixed), "running" (adaptive), or "none"
-    # - "scale": multiply by reward_scale factor (recommended for Mario)
+    # Reward normalization mode: "none" (use env rewards), "scale" (fixed), or "running"
+    # - "none": use environment rewards directly (recommended - env already normalizes)
+    # - "scale": multiply by reward_scale factor
     # - "running": normalize by running mean/std (unstable with sparse penalties)
-    # - "none": use raw rewards
-    reward_norm: str = "scale"  # Scale is more stable than running for Mario
-    reward_scale: float = 0.1  # Used when reward_norm="scale"
-    reward_clip: float = 5.0  # Clip scaled rewards (0 to disable)
+    reward_norm: str = "none"  # Env already normalizes to ~[-2, +2] per frame
+    reward_scale: float = 1.0  # Used when reward_norm="scale"
+    reward_clip: float = 0.0  # Clip rewards (0 to disable)
 
     # Device (None = auto-detect)
     device: str | None = None
