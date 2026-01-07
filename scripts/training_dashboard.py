@@ -45,41 +45,54 @@ COLORS = {
 }
 
 
-def find_latest_checkpoint(base_dir: Path = Path("checkpoints")) -> Path | None:
+@st.cache_data(ttl=2)
+def find_latest_checkpoint(base_dir: str = "checkpoints") -> str | None:
     """Find the most recent checkpoint directory."""
-    if not base_dir.exists():
+    base = Path(base_dir)
+    if not base.exists():
         return None
     ddqn_dirs = sorted(
-        [d for d in base_dir.iterdir() if d.is_dir() and d.name.startswith("ddqn_dist_")],
+        [d for d in base.iterdir() if d.is_dir() and d.name.startswith("ddqn_dist_")],
         key=lambda x: x.stat().st_mtime,
         reverse=True,
     )
-    return ddqn_dirs[0] if ddqn_dirs else None
+    return str(ddqn_dirs[0]) if ddqn_dirs else None
 
 
-def load_learner_metrics(checkpoint_dir: Path) -> pd.DataFrame | None:
+@st.cache_data(ttl=2)
+def load_learner_metrics(checkpoint_dir: str) -> pd.DataFrame | None:
     """Load learner metrics CSV."""
-    csv_path = checkpoint_dir / "ddqn_metrics.csv"
+    MAX_VALID_X = 10000  # No Mario level is longer than this
+    csv_path = Path(checkpoint_dir) / "ddqn_metrics.csv"
     if not csv_path.exists():
         return None
     try:
         df = pd.read_csv(csv_path)
         if "timestamp" in df.columns and len(df) > 0:
             df["elapsed_min"] = (df["timestamp"] - df["timestamp"].iloc[0]) / 60
+        # Replace invalid x positions with NaN (65535 is a RAM read glitch)
+        if "global_best_x" in df.columns:
+            df.loc[df["global_best_x"] > MAX_VALID_X, "global_best_x"] = pd.NA
         return df
     except Exception:
         return None
 
 
-def load_worker_episodes(checkpoint_dir: Path) -> dict[int, pd.DataFrame]:
+@st.cache_data(ttl=2)
+def load_worker_episodes(checkpoint_dir: str) -> dict[int, pd.DataFrame]:
     """Load all worker episode CSVs."""
+    MAX_VALID_X = 10000  # No Mario level is longer than this
     workers = {}
-    for csv_path in checkpoint_dir.glob("ddqn_worker_*_episodes.csv"):
+    for csv_path in Path(checkpoint_dir).glob("ddqn_worker_*_episodes.csv"):
         try:
             worker_id = int(csv_path.stem.split("_")[2])
             df = pd.read_csv(csv_path)
             if "timestamp" in df.columns and len(df) > 0:
                 df["elapsed_min"] = (df["timestamp"] - df["timestamp"].iloc[0]) / 60
+            # Replace invalid x positions with NaN (65535 is a RAM read glitch)
+            for col in ["best_x", "best_x_ever", "x_pos"]:
+                if col in df.columns:
+                    df.loc[df[col] > MAX_VALID_X, col] = pd.NA
             workers[worker_id] = df
         except Exception:
             pass
@@ -124,7 +137,8 @@ def render_learner_tab(df: pd.DataFrame) -> None:
     cols[0].metric("Updates", f"{int(latest['update']):,}")
     cols[1].metric("Timesteps", f"{int(latest['timesteps']):,}")
     cols[2].metric("Episodes", f"{int(latest.get('total_episodes', 0)):,}")
-    cols[3].metric("Best X", f"{int(latest.get('global_best_x', 0)):,}")
+    best_x = latest.get('global_best_x', 0)
+    cols[3].metric("Best X", f"{int(best_x):,}" if pd.notna(best_x) else "N/A")
     cols[4].metric("🏁 Flags", f"{int(latest.get('total_flags', 0))}")
     cols[5].metric("💀 Deaths", f"{int(latest.get('total_deaths', 0)):,}")
 
@@ -208,11 +222,12 @@ def render_workers_tab(workers: dict[int, pd.DataFrame]) -> None:
         if len(df) == 0:
             continue
         latest = df.iloc[-1]
+        best_x = latest["best_x_ever"]
         rows.append({
             "Worker": f"W{wid}",
             "Level": latest.get("current_level", "?"),
             "Episodes": int(latest["episode"]),
-            "Best X": int(latest["best_x_ever"]),
+            "Best X": int(best_x) if pd.notna(best_x) else 0,
             "Avg Reward": f"{latest['rolling_avg_reward']:.0f}",
             "Avg Speed": f"{latest.get('avg_speed', 0):.2f}",
             "ε": f"{latest['epsilon']:.3f}",
@@ -322,6 +337,271 @@ def render_workers_tab(workers: dict[int, pd.DataFrame]) -> None:
         st.plotly_chart(fig, use_container_width=True)
 
 
+def render_levels_tab(workers: dict[int, pd.DataFrame]) -> None:
+    """Render per-level breakdown tab."""
+    if not workers:
+        st.info("⏳ Waiting for worker data...")
+        return
+
+    # Combine all worker episodes
+    all_episodes = []
+    for wid, df in workers.items():
+        if len(df) > 0:
+            df_copy = df.copy()
+            df_copy["worker_id"] = wid
+            all_episodes.append(df_copy)
+    
+    if not all_episodes:
+        st.info("⏳ No episode data yet...")
+        return
+    
+    all_df = pd.concat(all_episodes, ignore_index=True)
+    
+    # Check if we have level data
+    if "current_level" not in all_df.columns:
+        st.warning("No level information in data (single-level training?)")
+        return
+    
+    # Aggregate by level
+    level_stats = all_df.groupby("current_level").agg({
+        "episode": "count",  # Number of episodes
+        "reward": ["mean", "std"],
+        "avg_speed": "mean",
+        "best_x": "max",
+        "x_pos": "mean",
+        "flag_get": "sum" if "flag_get" in all_df.columns else "count",
+        "steps": "mean",
+    }).round(2)
+    
+    # Flatten column names
+    level_stats.columns = ["Episodes", "Avg Reward", "Reward Std", "Avg Speed", "Best X", "Avg X", "Flags", "Avg Steps"]
+    level_stats = level_stats.reset_index().rename(columns={"current_level": "Level"})
+    
+    # Calculate success rate
+    if "flag_get" in all_df.columns:
+        flag_counts = all_df.groupby("current_level")["flag_get"].sum()
+        episode_counts = all_df.groupby("current_level")["episode"].count()
+        level_stats["Success %"] = (flag_counts.values / episode_counts.values * 100).round(1)
+    
+    # Sort by level name (world-stage order)
+    def level_sort_key(level: str) -> tuple:
+        """Sort levels by world then stage (e.g., 1-1, 1-2, 2-1, etc.)"""
+        try:
+            parts = level.split("-")
+            return (int(parts[0]), int(parts[1]))
+        except (ValueError, IndexError):
+            return (99, 99)  # Unknown levels go last
+    
+    level_stats["_sort"] = level_stats["Level"].apply(level_sort_key)
+    level_stats = level_stats.sort_values("_sort").drop(columns=["_sort"])
+    
+    # Summary metrics
+    unique_levels = all_df["current_level"].nunique()
+    total_episodes = len(all_df)
+    total_flags = all_df["flag_get"].sum() if "flag_get" in all_df.columns else 0
+    
+    st.caption("LEVEL OVERVIEW")
+    cols = st.columns(4)
+    cols[0].metric("Unique Levels", unique_levels)
+    cols[1].metric("Total Episodes", f"{total_episodes:,}")
+    cols[2].metric("Total Flags", int(total_flags))
+    cols[3].metric("Overall Success", f"{total_flags/total_episodes*100:.1f}%" if total_episodes > 0 else "0%")
+    
+    st.divider()
+    
+    # Per-level table
+    st.subheader("📊 Per-Level Statistics")
+    st.dataframe(
+        level_stats.style.format({
+            "Avg Reward": "{:.1f}",
+            "Reward Std": "{:.1f}",
+            "Avg Speed": "{:.2f}",
+            "Avg X": "{:.0f}",
+            "Avg Steps": "{:.0f}",
+            "Success %": "{:.1f}%",
+        }),
+        hide_index=True,
+        use_container_width=True,
+    )
+    
+    st.divider()
+    
+    # Charts
+    col1, col2 = st.columns(2)
+    
+    with col1:
+        # Average reward by level
+        fig = go.Figure()
+        fig.add_trace(go.Bar(
+            x=level_stats["Level"],
+            y=level_stats["Avg Reward"],
+            marker_color=COLORS["green"],
+            error_y=dict(type="data", array=level_stats["Reward Std"], visible=True),
+        ))
+        fig.update_layout(
+            title="Average Reward by Level",
+            height=300,
+            margin=dict(l=0, r=0, t=40, b=0),
+            template="plotly_dark",
+            paper_bgcolor="rgba(0,0,0,0)",
+            plot_bgcolor="rgba(0,0,0,0)",
+            xaxis=dict(title="Level", gridcolor="#313244", categoryorder="array", categoryarray=level_stats["Level"].tolist()),
+            yaxis=dict(title="Avg Reward", gridcolor="#313244"),
+        )
+        st.plotly_chart(fig, use_container_width=True)
+    
+    with col2:
+        # Average speed by level
+        fig = go.Figure()
+        fig.add_trace(go.Bar(
+            x=level_stats["Level"],
+            y=level_stats["Avg Speed"],
+            marker_color=COLORS["teal"],
+        ))
+        fig.update_layout(
+            title="Average Speed by Level",
+            height=300,
+            margin=dict(l=0, r=0, t=40, b=0),
+            template="plotly_dark",
+            paper_bgcolor="rgba(0,0,0,0)",
+            plot_bgcolor="rgba(0,0,0,0)",
+            xaxis=dict(title="Level", gridcolor="#313244", categoryorder="array", categoryarray=level_stats["Level"].tolist()),
+            yaxis=dict(title="Avg Speed", gridcolor="#313244"),
+        )
+        st.plotly_chart(fig, use_container_width=True)
+    
+    col3, col4 = st.columns(2)
+    
+    with col3:
+        # Best X by level
+        fig = go.Figure()
+        fig.add_trace(go.Bar(
+            x=level_stats["Level"],
+            y=level_stats["Best X"],
+            marker_color=COLORS["blue"],
+        ))
+        fig.update_layout(
+            title="Best X Position by Level",
+            height=300,
+            margin=dict(l=0, r=0, t=40, b=0),
+            template="plotly_dark",
+            paper_bgcolor="rgba(0,0,0,0)",
+            plot_bgcolor="rgba(0,0,0,0)",
+            xaxis=dict(title="Level", gridcolor="#313244", categoryorder="array", categoryarray=level_stats["Level"].tolist()),
+            yaxis=dict(title="Best X", gridcolor="#313244"),
+        )
+        st.plotly_chart(fig, use_container_width=True)
+    
+    with col4:
+        # Episode count by level (training distribution)
+        fig = go.Figure()
+        fig.add_trace(go.Bar(
+            x=level_stats["Level"],
+            y=level_stats["Episodes"],
+            marker_color=COLORS["mauve"],
+        ))
+        fig.update_layout(
+            title="Episodes per Level (Training Distribution)",
+            height=300,
+            margin=dict(l=0, r=0, t=40, b=0),
+            template="plotly_dark",
+            paper_bgcolor="rgba(0,0,0,0)",
+            plot_bgcolor="rgba(0,0,0,0)",
+            xaxis=dict(title="Level", gridcolor="#313244", categoryorder="array", categoryarray=level_stats["Level"].tolist()),
+            yaxis=dict(title="Episodes", gridcolor="#313244"),
+        )
+        st.plotly_chart(fig, use_container_width=True)
+    
+    # Detailed level selector
+    st.divider()
+    st.subheader("🔍 Level Deep Dive")
+    
+    selected_level = st.selectbox(
+        "Select a level to analyze",
+        options=sorted(all_df["current_level"].unique()),
+    )
+    
+    if selected_level:
+        level_df = all_df[all_df["current_level"] == selected_level].copy()
+        level_df = level_df.sort_values("timestamp")
+        
+        # Add episode index within level
+        level_df["level_episode"] = range(1, len(level_df) + 1)
+        
+        lcol1, lcol2, lcol3, lcol4 = st.columns(4)
+        lcol1.metric("Episodes", len(level_df))
+        lcol2.metric("Avg Reward", f"{level_df['reward'].mean():.1f}")
+        best_x = level_df['best_x'].max()
+        lcol3.metric("Best X", f"{best_x:.0f}" if pd.notna(best_x) else "N/A")
+        flags = level_df["flag_get"].sum() if "flag_get" in level_df.columns else 0
+        lcol4.metric("Flags", int(flags))
+        
+        # Rolling reward over episodes for this level
+        if len(level_df) >= 3:
+            level_df["rolling_reward"] = level_df["reward"].rolling(window=min(10, len(level_df)), min_periods=1).mean()
+            level_df["rolling_speed"] = level_df["avg_speed"].rolling(window=min(10, len(level_df)), min_periods=1).mean()
+            
+            col_a, col_b = st.columns(2)
+            
+            with col_a:
+                fig = go.Figure()
+                fig.add_trace(go.Scatter(
+                    x=level_df["level_episode"],
+                    y=level_df["rolling_reward"],
+                    mode="lines",
+                    line=dict(color=COLORS["green"], width=2),
+                    name="Rolling Avg",
+                ))
+                fig.add_trace(go.Scatter(
+                    x=level_df["level_episode"],
+                    y=level_df["reward"],
+                    mode="markers",
+                    marker=dict(color=COLORS["green"], size=4, opacity=0.3),
+                    name="Episode",
+                ))
+                fig.update_layout(
+                    title=f"Reward on {selected_level} (over time)",
+                    height=280,
+                    margin=dict(l=0, r=0, t=40, b=0),
+                    template="plotly_dark",
+                    paper_bgcolor="rgba(0,0,0,0)",
+                    plot_bgcolor="rgba(0,0,0,0)",
+                    xaxis=dict(title="Episode on Level", gridcolor="#313244"),
+                    yaxis=dict(title="Reward", gridcolor="#313244"),
+                    showlegend=False,
+                )
+                st.plotly_chart(fig, use_container_width=True)
+            
+            with col_b:
+                fig = go.Figure()
+                fig.add_trace(go.Scatter(
+                    x=level_df["level_episode"],
+                    y=level_df["rolling_speed"],
+                    mode="lines",
+                    line=dict(color=COLORS["teal"], width=2),
+                    name="Rolling Avg",
+                ))
+                fig.add_trace(go.Scatter(
+                    x=level_df["level_episode"],
+                    y=level_df["avg_speed"],
+                    mode="markers",
+                    marker=dict(color=COLORS["teal"], size=4, opacity=0.3),
+                    name="Episode",
+                ))
+                fig.update_layout(
+                    title=f"Speed on {selected_level} (over time)",
+                    height=280,
+                    margin=dict(l=0, r=0, t=40, b=0),
+                    template="plotly_dark",
+                    paper_bgcolor="rgba(0,0,0,0)",
+                    plot_bgcolor="rgba(0,0,0,0)",
+                    xaxis=dict(title="Episode on Level", gridcolor="#313244"),
+                    yaxis=dict(title="Avg Speed", gridcolor="#313244"),
+                    showlegend=False,
+                )
+                st.plotly_chart(fig, use_container_width=True)
+
+
 def render_analysis_tab(df: pd.DataFrame, workers: dict[int, pd.DataFrame]) -> None:
     """Render analysis/debugging tab."""
     if df is None or len(df) < 2:
@@ -403,6 +683,36 @@ def render_analysis_tab(df: pd.DataFrame, workers: dict[int, pd.DataFrame]) -> N
         st.plotly_chart(fig, use_container_width=True)
 
 
+def render_dashboard_content(checkpoint_dir: str) -> None:
+    """Render the main dashboard content (tabs and charts)."""
+    # Clear cache to get fresh data
+    load_learner_metrics.clear()
+    load_worker_episodes.clear()
+    
+    # Load fresh data
+    learner_df = load_learner_metrics(checkpoint_dir)
+    workers = load_worker_episodes(checkpoint_dir)
+
+    # Show last update time
+    if learner_df is not None and len(learner_df) > 0:
+        st.caption(f"🔄 Last update: {datetime.now().strftime('%H:%M:%S')} • {len(learner_df)} updates logged")
+
+    # Tabs
+    tab1, tab2, tab3, tab4 = st.tabs(["📊 Learner", "👷 Workers", "🗺️ Levels", "🔍 Analysis"])
+
+    with tab1:
+        render_learner_tab(learner_df)
+
+    with tab2:
+        render_workers_tab(workers)
+
+    with tab3:
+        render_levels_tab(workers)
+
+    with tab4:
+        render_analysis_tab(learner_df, workers)
+
+
 def main():
     """Main dashboard."""
     # Header
@@ -415,9 +725,9 @@ def main():
         default_checkpoint = find_latest_checkpoint()
         checkpoint_input = st.text_input(
             "Checkpoint",
-            value=str(default_checkpoint) if default_checkpoint else "checkpoints/",
+            value=default_checkpoint if default_checkpoint else "checkpoints/",
         )
-        checkpoint_dir = Path(checkpoint_input)
+        checkpoint_dir = checkpoint_input
 
         auto_refresh = st.toggle("Auto Refresh", value=True)
         if auto_refresh:
@@ -425,43 +735,32 @@ def main():
 
         st.divider()
 
-        if st.button("🔄 Refresh", use_container_width=True):
+        if st.button("🔄 Manual Refresh", use_container_width=True):
+            st.cache_data.clear()
             st.rerun()
 
         # Status
-        if checkpoint_dir.exists():
-            learner_csv = checkpoint_dir / "ddqn_metrics.csv"
+        checkpoint_path = Path(checkpoint_dir)
+        if checkpoint_path.exists():
+            learner_csv = checkpoint_path / "ddqn_metrics.csv"
             if learner_csv.exists():
                 mod_time = datetime.fromtimestamp(learner_csv.stat().st_mtime)
-                st.caption(f"📁 {checkpoint_dir.name}")
+                st.caption(f"📁 {checkpoint_path.name}")
                 st.caption(f"🕐 {mod_time.strftime('%H:%M:%S')}")
 
     # Check checkpoint
-    if not checkpoint_dir.exists():
+    if not Path(checkpoint_dir).exists():
         st.error(f"Directory not found: {checkpoint_dir}")
         return
 
-    # Load data
-    learner_df = load_learner_metrics(checkpoint_dir)
-    workers = load_worker_episodes(checkpoint_dir)
-
-    # Tabs
-    tab1, tab2, tab3 = st.tabs(["📊 Learner", "👷 Workers", "🔍 Analysis"])
-
-    with tab1:
-        render_learner_tab(learner_df)
-
-    with tab2:
-        render_workers_tab(workers)
-
-    with tab3:
-        render_analysis_tab(learner_df, workers)
-
-    # Auto-refresh
+    # Render content - with or without auto-refresh
     if auto_refresh:
-        import time
-        time.sleep(refresh_sec)
-        st.rerun()
+        @st.fragment(run_every=refresh_sec)
+        def auto_refresh_wrapper():
+            render_dashboard_content(checkpoint_dir)
+        auto_refresh_wrapper()
+    else:
+        render_dashboard_content(checkpoint_dir)
 
 
 if __name__ == "__main__":

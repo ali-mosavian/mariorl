@@ -455,7 +455,16 @@ class DDQNWorker:
 
         td_errors = (current_q_selected - target_q).detach()
         element_wise_loss = torch.nn.functional.huber_loss(current_q_selected, target_q, reduction="none", delta=1.0)
-        loss = (weights_t * element_wise_loss).mean()
+        td_loss = (weights_t * element_wise_loss).mean()
+
+        # Entropy regularization: encourage exploration by penalizing low entropy
+        # Convert Q-values to policy using softmax, then compute entropy
+        policy = torch.nn.functional.softmax(current_q, dim=1)
+        log_policy = torch.nn.functional.log_softmax(current_q, dim=1)
+        entropy = -(policy * log_policy).sum(dim=1).mean()
+
+        # Total loss: TD loss - entropy bonus (we want to maximize entropy)
+        loss = td_loss - self.config.entropy_coef * entropy
 
         # Backward
         self.net.online.zero_grad()
@@ -475,11 +484,12 @@ class DDQNWorker:
         # Metrics
         metrics = {
             "loss": loss.item(),
+            "td_loss": td_loss.item(),
             "q_mean": current_q_selected.mean().item(),
             "q_max": current_q_selected.max().item(),
             "td_error": td_errors.abs().mean().item(),
             "per_beta": self.buffer.current_beta,
-            "entropy": self.metrics.avg_entropy,
+            "entropy": entropy.item(),  # Policy entropy from Q-values
             "avg_reward": self.metrics.avg_reward,
             "avg_speed": self.metrics.avg_speed,
             "avg_time_to_flag": self.metrics.avg_time_to_flag,

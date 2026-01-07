@@ -217,6 +217,7 @@ def run_learner_silent(
               help="Reward normalization: 'none' (recommended - env normalizes), 'scale', 'running'")
 @click.option("--reward-scale", default=1.0, help="Scale factor when reward-norm=scale")
 @click.option("--reward-clip", default=0.0, help="Clip rewards to [-x, x] (0 to disable)")
+@click.option("--entropy-coef", default=0.01, help="Entropy regularization coefficient (encourages exploration)")
 def main(
     workers: int,
     level: str,
@@ -244,6 +245,7 @@ def main(
     reward_norm: str,
     reward_scale: float,
     reward_clip: float,
+    entropy_coef: float,
 ) -> None:
     """Train Mario using Distributed DDQN with async gradient updates."""
     # Parse level
@@ -292,7 +294,7 @@ def main(
         print(f"  Save dir: {run_dir}")
         print(f"  LR: {lr} → {lr_end} (cosine)")
         print(f"  Gamma: {gamma}, N-step: {n_step}")
-        print(f"  Tau: {tau}")
+        print(f"  Tau: {tau}, Entropy coef: {entropy_coef}")
         print(f"  Local buffer: {local_buffer_size:,}, Batch: {batch_size}")
         print(f"  Collect steps: {collect_steps}, Train steps: {train_steps}")
         print(f"  Accumulate grads: {accumulate_grads}")
@@ -359,6 +361,7 @@ def main(
             reward_norm=reward_norm,
             reward_scale=reward_scale,
             reward_clip=reward_clip,
+            entropy_coef=entropy_coef,
             buffer=buffer_config,
             exploration=exploration_config,
             snapshot=snapshot_config,

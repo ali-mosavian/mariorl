@@ -68,6 +68,9 @@ class WorkerConfig:
     reward_scale: float = 1.0  # Used when reward_norm="scale"
     reward_clip: float = 0.0  # Clip rewards (0 to disable)
 
+    # Entropy regularization (encourages exploration, prevents policy collapse)
+    entropy_coef: float = 0.01  # Coefficient for entropy bonus in loss
+
     # Device (None = auto-detect)
     device: str | None = None
 
@@ -89,6 +92,7 @@ class WorkerConfig:
             reward_norm=self.reward_norm,
             reward_scale=self.reward_scale,
             reward_clip=self.reward_clip,
+            entropy_coef=self.entropy_coef,
             device=self.device,
             buffer=self.buffer,
             exploration=ExplorationConfig(
