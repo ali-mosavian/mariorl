@@ -19,6 +19,7 @@ class MessageType(Enum):
     LEARNER_LOG = "learner_log"
     WORKER_STATUS = "worker_status"
     WORKER_LOG = "worker_log"
+    WORKER_HEARTBEAT = "worker_heartbeat"
     SYSTEM_LOG = "system_log"
     WORLD_MODEL_STATUS = "world_model_status"
     PPO_STATUS = "ppo_status"
@@ -218,6 +219,17 @@ class TrainingUI:
                             self.flag_history.pop(0)
                 elif msg.msg_type == MessageType.WORKER_LOG:
                     self._add_log(f"[W{msg.source_id}] {msg.data.get('text', '')}")
+                elif msg.msg_type == MessageType.WORKER_HEARTBEAT:
+                    # Update heartbeat timestamp for this worker
+                    worker_id = msg.source_id
+                    if worker_id not in self.worker_statuses:
+                        self.worker_statuses[worker_id] = {}
+                    self.worker_statuses[worker_id]["last_heartbeat"] = msg.data.get("timestamp", time.time())
+                    # Also update some stats if provided
+                    if "episodes" in msg.data:
+                        self.worker_statuses[worker_id]["heartbeat_episodes"] = msg.data["episodes"]
+                    if "steps" in msg.data:
+                        self.worker_statuses[worker_id]["heartbeat_steps"] = msg.data["steps"]
                 elif msg.msg_type == MessageType.SYSTEM_LOG:
                     self._add_log(f"[SYSTEM] {msg.data.get('text', '')}")
                 elif msg.msg_type == MessageType.WORLD_MODEL_STATUS:
@@ -1059,14 +1071,33 @@ class TrainingUI:
         # Header with worker ID and level
         current_level = ws.get("current_level", "?") if ws else "?"
         header = f"W{worker_id}[{current_level}]"
+        
+        # Calculate heartbeat status
+        last_heartbeat = ws.get("last_heartbeat", 0) if ws else 0
+        if last_heartbeat > 0:
+            seconds_since_heartbeat = int(time.time() - last_heartbeat)
+            if seconds_since_heartbeat < 60:
+                heartbeat_status = "💚"  # Recent heartbeat (green)
+                heartbeat_attr = curses.color_pair(1)  # Green
+            elif seconds_since_heartbeat < 120:
+                heartbeat_status = "💛"  # Stale heartbeat (yellow)
+                heartbeat_attr = curses.color_pair(2)  # Yellow
+            else:
+                heartbeat_status = "💔"  # No heartbeat (red)
+                heartbeat_attr = curses.color_pair(3)  # Red
+        else:
+            heartbeat_status = "⚪"  # No heartbeat data yet
+            heartbeat_attr = curses.A_DIM
+        
         try:
             stdscr.addstr(y, x, header, curses.A_BOLD | curses.color_pair(5))
+            stdscr.addstr(y, x + len(header), heartbeat_status, heartbeat_attr)
         except curses.error:
             return
 
         if not ws:
             try:
-                stdscr.addstr(y, x + len(header) + 1, "Starting...", curses.A_DIM)
+                stdscr.addstr(y, x + len(header) + 2, "Starting...", curses.A_DIM)
             except curses.error:
                 pass
             return
@@ -1097,9 +1128,10 @@ class TrainingUI:
             sync_str = "-"
 
         try:
-            # Line 1: header + Ep, Step, X, Time, sps
+            # Line 1: header + heartbeat + Ep, Step, X, Time, sps
             line1 = f" Ep:{episode:3d} St:{step:3d} X:{x_pos:4d} ⏱ {game_time:3d} {steps_per_sec:2.0f}sps"
-            stdscr.addstr(y, x + len(header), line1[: width - len(header) - 1])
+            header_length = len(header) + 1  # +1 for heartbeat emoji
+            stdscr.addstr(y, x + header_length, line1[: width - header_length - 1])
 
             # Line 2: reward, deaths, flags, restores, epsilon
             stdscr.addstr(y + 1, x, f"r={reward:6.0f} 💀 ")

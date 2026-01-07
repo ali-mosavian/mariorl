@@ -210,6 +210,20 @@ def monitor_workers(
                 if worker_id is not None:
                     last_heartbeat[worker_id] = time.time()
                     
+                    # Forward heartbeat to UI
+                    if status.get("status") == "alive" and ui_queue is not None:
+                        try:
+                            from mario_rl.training.training_ui import UIMessage, MessageType
+                            ui_queue.put_nowait(
+                                UIMessage(
+                                    msg_type=MessageType.WORKER_HEARTBEAT,
+                                    source_id=worker_id,
+                                    data=status,
+                                )
+                            )
+                        except Exception:
+                            pass
+                    
                     # Log crashes
                     if status.get("status") == "crashed":
                         error = status.get("error", "Unknown")
