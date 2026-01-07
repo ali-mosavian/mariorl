@@ -249,9 +249,28 @@ class DDQNWorker:
                 writer = csv.writer(f)
                 writer.writerow(csv_headers)
         else:
-            # Check if file has data (not just headers)
+            # Check if file has data and load last episode number for continuity
             csv_size = self._episodes_csv.stat().st_size
             self._csv_had_data = csv_size > 200  # Headers are ~150 bytes
+            if self._csv_had_data:
+                # Read last episode number from CSV for graph continuity
+                try:
+                    with open(self._episodes_csv, "r") as f:
+                        # Read last line efficiently
+                        f.seek(0, 2)  # Go to end
+                        pos = f.tell()
+                        # Read backwards to find last newline
+                        while pos > 0:
+                            pos -= 1
+                            f.seek(pos)
+                            if f.read(1) == '\n' and pos < f.seek(0, 2) - 1:
+                                break
+                        last_line = f.readline().strip()
+                        if last_line and not last_line.startswith("timestamp"):
+                            last_episode = int(last_line.split(",")[1])
+                            self.metrics.episode_count = last_episode
+                except Exception:
+                    pass  # Keep default episode_count = 0
 
     def _preprocess_state(self, state: np.ndarray) -> np.ndarray:
         """Convert state from (4, 64, 64, 1) to (4, 64, 64)."""
@@ -628,7 +647,7 @@ class DDQNWorker:
             f"device={device}, ε_end={self.config.exploration.epsilon_end:.4f}, {per_mode})"
         )
         if self._csv_had_data:
-            self.ui.log(f"Worker {self.config.worker_id} resuming - CSV has existing data")
+            self.ui.log(f"Worker {self.config.worker_id} resuming from episode {self.metrics.episode_count}")
         elif self._episodes_csv.exists():
             self.ui.log(f"Worker {self.config.worker_id} WARNING: CSV exists but appears empty")
 
