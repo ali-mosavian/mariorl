@@ -189,6 +189,9 @@ class TrainingUI:
                 elif msg.msg_type == MessageType.WORKER_STATUS:
                     old_data = self.worker_statuses.get(msg.source_id, {})
                     new_data = msg.data
+                    # Preserve last_heartbeat when updating status
+                    if "last_heartbeat" in old_data and "last_heartbeat" not in new_data:
+                        new_data["last_heartbeat"] = old_data["last_heartbeat"]
                     self.worker_statuses[msg.source_id] = new_data
 
                     # Track global convergence metrics when episode ends

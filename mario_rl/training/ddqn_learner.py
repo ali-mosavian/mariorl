@@ -115,8 +115,8 @@ from torch.optim import AdamW
 from torch.optim.lr_scheduler import CosineAnnealingLR
 
 from mario_rl.agent.ddqn_net import DoubleDQN
-from mario_rl.training.shared_gradients import SharedGradientPool
-from mario_rl.training.shared_gradients import attach_worker_buffer
+from mario_rl.training.shared_gradient_tensor import SharedGradientTensorPool
+from mario_rl.training.shared_gradient_tensor import GradientPacket
 
 
 def best_device() -> str:
@@ -142,10 +142,11 @@ class DDQNLearner:
     # Required fields
     weights_path: Path
     save_dir: Path
-    shm_paths: list[Path]  # Paths to shared memory files (created by main process)
+    shm_dir: Path  # Directory containing SharedGradientTensor files
+    num_workers: int = 1  # Number of workers (for creating tensor pool)
     
-    # Gradient pool - created in __post_init__
-    gradient_pool: Optional[SharedGradientPool] = field(init=False, default=None)
+    # Gradient pool - created in __post_init__ (after network)
+    gradient_pool: Optional[SharedGradientTensorPool] = field(init=False, default=None)
 
     # Hyperparameters
     learning_rate: float = 2.5e-4
@@ -201,18 +202,10 @@ class DDQNLearner:
 
     def __post_init__(self):
         """Initialize network and optimizer."""
-        # Create gradient pool by attaching to existing shared memory files
-        # (files were created by main process, we just attach to them)
-        self.gradient_pool = SharedGradientPool.__new__(SharedGradientPool)
-        self.gradient_pool.num_workers = len(self.shm_paths)
-        self.gradient_pool.buffers = [
-            attach_worker_buffer(i, path) for i, path in enumerate(self.shm_paths)
-        ]
-        
         if self.device is None:
             self.device = best_device()
 
-        # Create network
+        # Create network first (needed for gradient tensor pool)
         state_dim = (4, 64, 64)
         action_dim = 12  # COMPLEX_MOVEMENT
         self.net = DoubleDQN(
@@ -222,6 +215,16 @@ class DDQNLearner:
             hidden_dim=256,
             dropout=0.1,
         ).to(self.device)
+
+        # Create gradient pool by attaching to existing shared memory files
+        # (files were created by main process, we just attach to them)
+        self.gradient_pool = SharedGradientTensorPool(
+            num_workers=self.num_workers,
+            model=self.net.online,
+            shm_dir=self.shm_dir,
+            num_slots=8,  # 8 slots per worker for good async buffering
+            create=False,  # Attach to existing files
+        )
 
         self.optimizer = AdamW(
             self.net.online.parameters(),
@@ -244,12 +247,14 @@ class DDQNLearner:
         self._last_time = time.time()
 
         # Load existing weights or save initial
+        self._weights_loaded_version: int | None = None
         if self.weights_path.exists():
             try:
                 checkpoint = torch.load(self.weights_path, map_location=self.device, weights_only=True)
                 if isinstance(checkpoint, dict) and "state_dict" in checkpoint:
                     self.net.load_state_dict(checkpoint["state_dict"])
                     self.weight_version = checkpoint.get("version", 0)
+                    self._weights_loaded_version = self.weight_version
                 else:
                     self.net.load_state_dict(checkpoint)
                 # Log will be sent in run() after _log is available
@@ -264,34 +269,39 @@ class DDQNLearner:
         # Initialize snapshot path
         self._snapshot_path = self.save_dir / "snapshot.pt"
 
-        # Initialize CSV logging
+        # Initialize CSV logging - NEVER truncate existing data
         self._metrics_csv = self.save_dir / "ddqn_metrics.csv"
+        csv_headers = [
+            "timestamp",
+            "update",
+            "timesteps",
+            "total_episodes",
+            "loss",
+            "q_mean",
+            "q_max",
+            "td_error",
+            "grad_norm",
+            "lr",
+            "grads_per_sec",
+            "gradients_received",
+            "weight_version",
+            "num_packets",
+            "avg_reward",
+            "avg_speed",
+            "avg_time_to_flag",
+            "avg_entropy",
+            "total_deaths",
+            "total_flags",
+            "global_best_x",
+        ]
         if not self._metrics_csv.exists():
             with open(self._metrics_csv, "w", newline="") as f:
                 writer = csv.writer(f)
-                writer.writerow([
-                    "timestamp",
-                    "update",
-                    "timesteps",
-                    "total_episodes",
-                    "loss",
-                    "q_mean",
-                    "q_max",
-                    "td_error",
-                    "grad_norm",
-                    "lr",
-                    "grads_per_sec",
-                    "gradients_received",
-                    "weight_version",
-                    "num_packets",
-                    "avg_reward",
-                    "avg_speed",
-                    "avg_time_to_flag",
-                    "avg_entropy",
-                    "total_deaths",
-                    "total_flags",
-                    "global_best_x",
-                ])
+                writer.writerow(csv_headers)
+        else:
+            # Check if file has data (not just headers) - warn if resuming with empty CSV
+            csv_size = self._metrics_csv.stat().st_size
+            self._csv_had_data = csv_size > 200  # Headers are ~150 bytes
 
     def save_weights(self) -> None:
         """Save network weights with version for workers to sync."""
@@ -363,7 +373,7 @@ class DDQNLearner:
             self.weight_version = snapshot["weight_version"]
             self.gradients_received = snapshot.get("gradients_received", 0)
 
-            self._log(f"Restored from snapshot: step={self.update_count}, timesteps={self.total_timesteps_collected:,}")
+            self._log(f"Restored from snapshot: step={self.update_count}, v{self.weight_version}, timesteps={self.total_timesteps_collected:,}")
 
             # Save weights for workers to sync
             self.save_weights()
@@ -373,12 +383,12 @@ class DDQNLearner:
             self._log(f"Failed to restore snapshot: {e}")
             return False
 
-    def apply_gradients(self, gradient_packets: List[Dict]) -> Dict[str, float]:
+    def apply_gradients(self, gradient_packets: List[GradientPacket]) -> Dict[str, float]:
         """
         Apply accumulated gradients to the network.
 
         Args:
-            gradient_packets: List of gradient packets from workers
+            gradient_packets: List of GradientPacket instances from workers
 
         Returns:
             Dictionary of metrics
@@ -389,17 +399,11 @@ class DDQNLearner:
         # Zero gradients
         self.optimizer.zero_grad()
 
-        # Accumulate gradients from all workers
-        import io
+        # Accumulate gradients from all workers (zero-copy from shared memory)
         for packet in gradient_packets:
-            # Deserialize gradients from bytes (avoids multiprocessing file descriptor issues)
-            grads_bytes = packet["grads_bytes"]
-            grads_buffer = io.BytesIO(grads_bytes)
-            grads = torch.load(grads_buffer, map_location="cpu", weights_only=True)
-            
             for name, param in self.net.online.named_parameters():
-                if name in grads:
-                    grad = grads[name].to(self.device)
+                if name in packet.grads:
+                    grad = packet.grads[name].to(self.device)
                     if param.grad is None:
                         param.grad = grad.clone()
                     else:
@@ -426,39 +430,11 @@ class DDQNLearner:
         self.update_count += 1
         self.gradients_received += num_packets
         for packet in gradient_packets:
-            self.total_timesteps_collected += packet["timesteps"]
-            worker_id = packet.get("worker_id", 0)
-            episodes = packet.get("episodes", 0)
-            self.worker_episodes[worker_id] = episodes
+            self.total_timesteps_collected += packet.timesteps
+            self.worker_episodes[packet.worker_id] = packet.episodes
 
-            # Extract worker metrics for aggregation
-            metrics = packet.get("metrics", {})
-            if "avg_reward" in metrics:
-                self._worker_avg_rewards[worker_id] = metrics["avg_reward"]
-            if "avg_speed" in metrics:
-                self._worker_avg_speeds[worker_id] = metrics["avg_speed"]
-            if "avg_time_to_flag" in metrics:
-                self._worker_avg_time_to_flag[worker_id] = metrics["avg_time_to_flag"]
-            if "total_deaths" in metrics:
-                self._worker_deaths[worker_id] = metrics["total_deaths"]
-            if "total_flags" in metrics:
-                self._worker_flags[worker_id] = metrics["total_flags"]
-            if "best_x_ever" in metrics:
-                self._worker_best_x[worker_id] = metrics["best_x_ever"]
-            if "entropy" in metrics:
-                self._worker_entropy[worker_id] = metrics["entropy"]
-
-        # Average metrics from workers
-        avg_metrics = {}
-        for key in ["loss", "q_mean", "q_max", "td_error"]:
-            values = [p["metrics"].get(key, 0.0) for p in gradient_packets if "metrics" in p]
-            avg_metrics[key] = np.mean(values) if values else 0.0
-
-        # Update tracking
-        self.last_loss = avg_metrics.get("loss", 0.0)
-        self.last_q_mean = avg_metrics.get("q_mean", 0.0)
-        self.last_q_max = avg_metrics.get("q_max", 0.0)
-        self.last_td_error = avg_metrics.get("td_error", 0.0)
+        # Note: Worker metrics (loss, q_mean, etc.) are now tracked via UI queue,
+        # not in gradient packets. The learner computes its own grad_norm.
         self.last_grad_norm = grad_norm.item() if isinstance(grad_norm, torch.Tensor) else grad_norm
         self.last_num_packets = num_packets
 
@@ -611,8 +587,11 @@ class DDQNLearner:
         self._log(f"  LR: {self.learning_rate} → {self.lr_end}, Tau: {self.tau}")
         self._log(f"  Accumulate grads: {self.accumulate_grads}")
         self._log(f"  Gradient mode: shared_memory (non-blocking)")
-        if self._resumed_from_checkpoint:
-            self._log(f"  Resumed from v{self.weight_version}")
+        if self._weights_loaded_version is not None:
+            self._log(f"  Loaded weights.pt v{self._weights_loaded_version}")
+        self._log(f"  Current state: v{self.weight_version}, update={self.update_count}, timesteps={self.total_timesteps_collected:,}")
+        if hasattr(self, "_csv_had_data") and not self._csv_had_data:
+            self._log(f"  WARNING: CSV file exists but appears empty - previous data may have been lost")
 
         while max_updates < 0 or self.update_count < max_updates:
             try:
@@ -638,20 +617,20 @@ class DDQNLearner:
         # Final save
         self.save_weights()
 
-    def _collect_gradients(self) -> list[dict]:
+    def _collect_gradients(self) -> list[GradientPacket]:
         """
         Collect gradients from shared memory pool (NON-BLOCKING).
         
         This method polls all worker buffers and collects any ready packets.
         It CANNOT deadlock because there's no blocking I/O.
         """
-        gradient_packets = []
+        gradient_packets: list[GradientPacket] = []
         
         # Wait briefly for gradients to accumulate
         wait_start = time.time()
         while len(gradient_packets) < self.accumulate_grads:
-            # Poll all worker buffers (non-blocking)
-            new_packets = self.gradient_pool.collect_ready()
+            # Poll all worker buffers (non-blocking, zero-copy)
+            new_packets = self.gradient_pool.read_all_available()
             gradient_packets.extend(new_packets)
             
             # Timeout after 5 seconds of waiting
@@ -667,7 +646,7 @@ class DDQNLearner:
     def _log_status(self) -> None:
         """Log current training status."""
         current_lr = self.optimizer.param_groups[0]["lr"]
-        ready_count = self.gradient_pool.count_ready()
+        ready_count = self.gradient_pool.count_total_ready()
         
         self._log(
             f"Update {self.update_count}: "
@@ -684,7 +663,8 @@ class DDQNLearner:
 def run_ddqn_learner(
     weights_path: Path,
     save_dir: Path,
-    shm_paths: list[Path],
+    shm_dir: Path,
+    num_workers: int,
     ui_queue: Optional[mp.Queue] = None,
     restore_snapshot: bool = False,
     snapshot_path: Optional[Path] = None,
@@ -731,7 +711,8 @@ def run_ddqn_learner(
         learner = DDQNLearner(
             weights_path=weights_path,
             save_dir=save_dir,
-            shm_paths=shm_paths,
+            shm_dir=shm_dir,
+            num_workers=num_workers,
             ui_queue=ui_queue,
             **kwargs,
         )

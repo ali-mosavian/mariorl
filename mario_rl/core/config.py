@@ -74,6 +74,9 @@ class WorkerConfig:
     # Device (None = auto-detect)
     device: str | None = None
 
+    # Resume support: initial step count for epsilon decay
+    initial_steps: int = 0  # Steps already collected (for --resume)
+
     # Sub-configs
     buffer: BufferConfig = BufferConfig()
     exploration: ExplorationConfig = ExplorationConfig()
@@ -94,6 +97,7 @@ class WorkerConfig:
             reward_clip=self.reward_clip,
             entropy_coef=self.entropy_coef,
             device=self.device,
+            initial_steps=self.initial_steps,
             buffer=self.buffer,
             exploration=ExplorationConfig(
                 epsilon_start=self.exploration.epsilon_start,
@@ -161,6 +165,7 @@ class TrainingConfig:
                 reward_scale=self.worker.reward_scale,
                 reward_clip=self.worker.reward_clip,
                 device=self.worker.device,
+                initial_steps=self.worker.initial_steps,
                 buffer=self.worker.buffer,
                 exploration=ExplorationConfig(
                     epsilon_start=self.worker.exploration.epsilon_start,

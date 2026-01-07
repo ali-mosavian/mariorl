@@ -118,7 +118,9 @@ from mario_rl.training.training_ui import TrainingUI
 from mario_rl.training.ddqn_worker import run_ddqn_worker
 from mario_rl.training.ddqn_learner import run_ddqn_learner
 from mario_rl.core.config import LevelType as ConfigLevelType
-from mario_rl.training.shared_gradients import SharedGradientPool, SharedHeartbeats
+from mario_rl.training.shared_gradients import SharedHeartbeats
+from mario_rl.training.shared_gradient_tensor import SharedGradientTensorPool
+from mario_rl.agent.ddqn_net import DoubleDQN
 
 LevelType = Literal["sequential", "random"] | tuple[int, int]
 
@@ -170,7 +172,8 @@ def run_worker_silent(
 def run_learner_silent(
     weights_path: Path,
     save_dir: Path,
-    shm_paths: list[Path],
+    shm_dir: Path,
+    num_workers: int,
     restore_snapshot: bool = False,
     snapshot_path: Path | None = None,
     **kwargs,
@@ -194,7 +197,8 @@ def run_learner_silent(
         run_ddqn_learner(
             weights_path,
             save_dir,
-            shm_paths,
+            shm_dir,
+            num_workers,
             restore_snapshot=restore_snapshot,
             snapshot_path=snapshot_path,
             **kwargs,
@@ -440,16 +444,42 @@ def main(
 
     # Check for resume (only if not restoring from specific snapshot)
     elif resume:
-        checkpoints = list(Path(save_dir).glob("ddqn_dist_*/weights.pt"))
-        if checkpoints:
-            latest = max(checkpoints, key=lambda p: p.stat().st_mtime)
-            run_dir = latest.parent
+        # Find all checkpoint directories (sort by name which contains timestamp)
+        checkpoint_dirs = sorted(Path(save_dir).glob("ddqn_dist_*"), key=lambda p: p.name, reverse=True)
+        
+        # Prefer directories that have both weights.pt AND snapshot.pt
+        best_checkpoint = None
+        for ckpt_dir in checkpoint_dirs:
+            if (ckpt_dir / "weights.pt").exists():
+                if (ckpt_dir / "snapshot.pt").exists():
+                    best_checkpoint = ckpt_dir
+                    break  # Found one with snapshot, use it
+                elif best_checkpoint is None:
+                    best_checkpoint = ckpt_dir  # Fallback to weights-only if no better option
+        
+        if best_checkpoint:
+            run_dir = best_checkpoint
+            print(f"Found checkpoint: {run_dir}")
+            print(f"  Available checkpoints: {[d.name for d in checkpoint_dirs[:5]]}")  # Show top 5
             # Check if snapshot exists
             if (run_dir / "snapshot.pt").exists():
                 snapshot_path = run_dir / "snapshot.pt"
-                print(f"Resuming from snapshot: {snapshot_path}")
+                snapshot_size = snapshot_path.stat().st_size / 1024 / 1024
+                print(f"  → Snapshot found: {snapshot_path.name} ({snapshot_size:.1f}MB)")
             else:
-                print(f"Resuming from: {run_dir}")
+                print(f"  → WARNING: No snapshot.pt found, will only load weights")
+                print(f"    (Training state like update_count will reset to 0)")
+
+    # Load initial_steps from snapshot if resuming
+    initial_steps = 0
+    if snapshot_path is not None and snapshot_path.exists():
+        try:
+            import torch
+            snapshot = torch.load(snapshot_path, map_location="cpu", weights_only=False)
+            initial_steps = snapshot.get("total_timesteps_collected", 0)
+            print(f"Resuming from timestep: {initial_steps:,}")
+        except Exception as e:
+            print(f"Warning: Could not load initial_steps from snapshot: {e}")
 
     run_dir.mkdir(parents=True, exist_ok=True)
     weights_path = run_dir / "weights.pt"
@@ -482,14 +512,28 @@ def main(
     # Create shared memory gradient pool in /dev/shm (RAM-backed, fast)
     # Use unique subdir based on PID to avoid conflicts
     shm_dir = Path("/dev/shm") / f"mario_ddqn_{os.getpid()}"
-    gradient_pool = SharedGradientPool(
+    shm_dir.mkdir(parents=True, exist_ok=True)
+    
+    # Create a temporary model for gradient pool layout (same architecture as workers)
+    state_dim = (4, 64, 64)
+    action_dim = 12  # COMPLEX_MOVEMENT
+    temp_model = DoubleDQN(input_shape=state_dim, num_actions=action_dim)
+    
+    gradient_pool = SharedGradientTensorPool(
         num_workers=workers,
+        model=temp_model.online,
         shm_dir=shm_dir,
+        num_slots=8,  # 8 slots per worker for good async buffering
+        create=True,
     )
     shm_paths = gradient_pool.get_shm_paths()
     
     # Register cleanup handler to remove shm directory on exit
     def cleanup_shm():
+        try:
+            gradient_pool.unlink()
+        except Exception:
+            pass
         try:
             if shm_dir.exists():
                 shutil.rmtree(shm_dir)
@@ -558,6 +602,7 @@ def main(
             reward_scale=reward_scale,
             reward_clip=reward_clip,
             entropy_coef=entropy_coef,
+            initial_steps=initial_steps,  # Resume from correct timestep for epsilon decay
             buffer=buffer_config,
             exploration=exploration_config,
             snapshot=snapshot_config,
@@ -574,10 +619,10 @@ def main(
         if no_ui:
             print(f"Started worker {i} (ε_end = {worker_eps_end:.4f})")
 
-    # Start learner process (pass paths, not pool - pool can't be pickled with spawn)
+    # Start learner process (pass dir and count, not pool - pool can't be pickled with spawn)
     learner_process = Process(
         target=learner_target,
-        args=(weights_path, run_dir, shm_paths),
+        args=(weights_path, run_dir, shm_dir, workers),
         kwargs={
             "learning_rate": lr,
             "lr_end": lr_end,

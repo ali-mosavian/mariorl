@@ -20,6 +20,7 @@ import torch
 import torch.nn as nn
 
 from mario_rl.training.shared_gradient_tensor import SharedGradientTensor
+from mario_rl.training.shared_gradient_tensor import GradientPacket
 
 
 class SimpleModel(nn.Module):
@@ -245,8 +246,8 @@ def test_read_returns_gradients(
     result = buffer.read()
 
     assert result is not None
-    assert isinstance(result, dict)
-    assert len(result) == len(grads)
+    assert isinstance(result, GradientPacket)
+    assert len(result.grads) == len(grads)
 
     buffer.unlink()
 
@@ -269,8 +270,8 @@ def test_read_returns_correct_values(
     result = buffer.read()
 
     for name, expected_grad in grads.items():
-        assert name in result
-        assert torch.allclose(result[name], expected_grad)
+        assert name in result.grads
+        assert torch.allclose(result.grads[name], expected_grad)
 
     buffer.unlink()
 
@@ -293,7 +294,7 @@ def test_read_returns_correct_shapes(
     result = buffer.read()
 
     for name, expected_grad in grads.items():
-        assert result[name].shape == expected_grad.shape
+        assert result.grads[name].shape == expected_grad.shape
 
     buffer.unlink()
 
@@ -378,17 +379,15 @@ def test_read_detects_concurrent_write(
 
     # Simulate concurrent write by changing seq after _read_slot_header
     # but before the final seq check
-    original_read = buffer.read
-
-    def mock_read() -> dict | None:
+    def mock_read() -> GradientPacket | None:
         # First seq check passes
-        seq1, ready, version = buffer._read_slot_header(slot_idx)
+        seq1, ready, version, worker_id, timesteps, episodes = buffer._read_slot_header(slot_idx)
         if ready != 1 or (seq1 % 2) == 1:
             return None
 
         # Read the data
         slot_array = buffer._slot_arrays[slot_idx]
-        grads_result = {}
+        grads_result: dict[str, torch.Tensor] = {}
         offset = 0
         for name, numel, shape in buffer.param_layout:
             grad_flat = torch.from_numpy(slot_array[offset : offset + numel].copy())
@@ -403,7 +402,13 @@ def test_read_detects_concurrent_write(
         if seq1 != seq2:
             return None
 
-        return grads_result
+        return GradientPacket(
+            grads=grads_result,
+            version=version,
+            worker_id=worker_id,
+            timesteps=timesteps,
+            episodes=episodes,
+        )
 
     result = mock_read()
     assert result is None  # Should detect the concurrent write
@@ -440,7 +445,7 @@ def test_multiple_write_read_cycles(
 
         assert result is not None
         for name, expected in grads.items():
-            assert torch.allclose(result[name], expected), f"Mismatch on cycle {i}"
+            assert torch.allclose(result.grads[name], expected), f"Mismatch on cycle {i}"
 
     buffer.unlink()
 
@@ -474,7 +479,7 @@ def test_writer_reader_separate_instances(
 
     assert result is not None
     for name, expected in grads.items():
-        assert torch.allclose(result[name], expected)
+        assert torch.allclose(result.grads[name], expected)
 
     reader.unlink()
 
@@ -504,11 +509,11 @@ def test_write_gpu_gradients(temp_shm_path: Path) -> None:
     result = buffer.write(grads)
     assert result is True
 
-    read_grads = buffer.read()
-    assert read_grads is not None
+    result = buffer.read()
+    assert result is not None
 
     # Read gradients should be on CPU
-    for name, grad in read_grads.items():
+    for name, grad in result.grads.items():
         assert grad.device.type == "cpu"
         # Values should match (compare on same device)
         assert torch.allclose(grad, grads[name].cpu())
@@ -548,7 +553,7 @@ def test_ring_buffer_multiple_writes_before_read(
         result = buffer.read()
         assert result is not None
         for name, expected in all_grads[i].items():
-            assert torch.allclose(result[name], expected), f"Mismatch on read {i}"
+            assert torch.allclose(result.grads[name], expected), f"Mismatch on read {i}"
 
     buffer.unlink()
 
@@ -613,7 +618,7 @@ def test_ring_buffer_read_latest(
     assert result is not None
 
     for name, expected in last_grads.items():
-        assert torch.allclose(result[name], expected)
+        assert torch.allclose(result.grads[name], expected)
 
     # After read_latest, read() should return None (all caught up)
     assert buffer.read() is None

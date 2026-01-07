@@ -47,7 +47,8 @@ from mario_rl.buffers import PrioritizedReplayBuffer
 from mario_rl.training.snapshot import SnapshotManager
 from mario_rl.training.ddqn_status import DDQNStatusCollector
 from mario_rl.core.reward_normalizer import RewardNormalizer
-from mario_rl.training.shared_gradients import SharedGradientBuffer
+from mario_rl.training.shared_gradient_tensor import SharedGradientTensor
+from mario_rl.training.shared_gradient_tensor import attach_tensor_buffer
 
 
 @dataclass
@@ -68,9 +69,12 @@ class DDQNWorker:
     # Required fields
     config: WorkerConfig
     weights_path: Path
-    gradient_buffer: SharedGradientBuffer  # Shared memory (non-blocking, can't deadlock)
+    gradient_tensor_path: Path  # Path to SharedGradientTensor file
     ui_queue: Optional[mp.Queue] = None
     heartbeats: Any = None  # SharedHeartbeats for monitoring (attached in worker process)
+    
+    # Gradient tensor - created after model init in __post_init__
+    gradient_tensor: SharedGradientTensor = field(init=False, repr=False)
 
     # Components - initialized in __post_init__ (8)
     env: Any = field(init=False, repr=False)
@@ -120,6 +124,14 @@ class DDQNWorker:
             num_actions=self.action_dim,
         ).to(device)
 
+        # Attach to SharedGradientTensor (must be after model creation)
+        self.gradient_tensor = attach_tensor_buffer(
+            worker_id=self.config.worker_id,
+            model=self.net.online,
+            shm_path=self.gradient_tensor_path,
+            num_slots=8,  # 8 slots per worker for good async buffering
+        )
+
         # Create buffers using config
         buf = self.config.buffer
         self.buffer = PrioritizedReplayBuffer(
@@ -151,8 +163,12 @@ class DDQNWorker:
 
         # Initialize state trackers
         self.metrics = MetricsTracker()
+        self.metrics.total_steps = self.config.initial_steps  # Resume support
         self.episode = EpisodeState()
         self.timing = TimingStats()
+        
+        # Heartbeat tracking for inner loops
+        self._last_heartbeat = time.time()
 
         # Create exploration policy from config
         exp = self.config.exploration
@@ -197,39 +213,45 @@ class DDQNWorker:
         if self.config.reward_norm == "running":
             self._reward_normalizer = RewardNormalizer(clip=self.config.reward_clip)
 
-        # Initialize CSV logging for episode metrics
+        # Initialize CSV logging for episode metrics - NEVER truncate existing data
         save_dir = self.weights_path.parent
         self._episodes_csv = save_dir / f"ddqn_worker_{self.config.worker_id}_episodes.csv"
+        self._csv_had_data = False
+        csv_headers = [
+            "timestamp",
+            "episode",
+            "steps",
+            "reward",
+            "x_pos",
+            "best_x",
+            "best_x_ever",
+            "deaths",
+            "flags",
+            "epsilon",
+            "weight_version",
+            "weight_sync_count",
+            "gradients_sent",
+            "steps_per_sec",
+            "rolling_avg_reward",
+            "avg_speed",
+            "avg_x_at_death",
+            "entropy",
+            "buffer_size",
+            "buffer_fill_pct",
+            "per_beta",
+            "snapshot_restores",
+            "current_level",
+            "game_time",
+            "flag_get",
+        ]
         if not self._episodes_csv.exists():
             with open(self._episodes_csv, "w", newline="") as f:
                 writer = csv.writer(f)
-                writer.writerow([
-                    "timestamp",
-                    "episode",
-                    "steps",
-                    "reward",
-                    "x_pos",
-                    "best_x",
-                    "best_x_ever",
-                    "deaths",
-                    "flags",
-                    "epsilon",
-                    "weight_version",
-                    "weight_sync_count",
-                    "gradients_sent",
-                    "steps_per_sec",
-                    "rolling_avg_reward",
-                    "avg_speed",
-                    "avg_x_at_death",
-                    "entropy",
-                    "buffer_size",
-                    "buffer_fill_pct",
-                    "per_beta",
-                    "snapshot_restores",
-                    "current_level",
-                    "game_time",
-                    "flag_get",
-                ])
+                writer.writerow(csv_headers)
+        else:
+            # Check if file has data (not just headers)
+            csv_size = self._episodes_csv.stat().st_size
+            self._csv_had_data = csv_size > 200  # Headers are ~150 bytes
 
     def _preprocess_state(self, state: np.ndarray) -> np.ndarray:
         """Convert state from (4, 64, 64, 1) to (4, 64, 64)."""
@@ -290,6 +312,37 @@ class DDQNWorker:
 
         return int(q_values.argmax(dim=1).item())
 
+    def _maybe_heartbeat(self) -> None:
+        """Send heartbeat if enough time has passed (called from inner loops)."""
+        current_time = time.time()
+        if current_time - self._last_heartbeat < 5.0:  # Check every 5 seconds
+            return
+            
+        self._last_heartbeat = current_time
+        
+        # Update shared memory heartbeat (for monitor thread)
+        if self.heartbeats is not None:
+            try:
+                self.heartbeats.update(self.config.worker_id, current_time)
+            except Exception:
+                pass
+        
+        # Also send to UI queue (for text UI heartbeat display)
+        if self.ui_queue is not None:
+            try:
+                from mario_rl.training.training_ui import UIMessage, MessageType
+                self.ui_queue.put_nowait(UIMessage(
+                    msg_type=MessageType.WORKER_HEARTBEAT,
+                    source_id=self.config.worker_id,
+                    data={
+                        "timestamp": current_time,
+                        "episodes": self.metrics.episode_count,
+                        "steps": self.metrics.total_steps,
+                    },
+                ))
+            except Exception:
+                pass  # Queue full or other error - don't block
+
     def collect_steps(self, num_steps: int) -> int:
         """Collect experiences for num_steps and store in local PER buffer."""
         episodes_completed = 0
@@ -303,7 +356,11 @@ class DDQNWorker:
         else:
             state = self._current_state
 
-        for _ in range(num_steps):
+        for step_idx in range(num_steps):
+            # Send heartbeat every 16 steps to avoid stall detection during long collect
+            if step_idx % 16 == 0:
+                self._maybe_heartbeat()
+            
             action = self._get_action(state)
 
             # Track entropy
@@ -493,18 +550,14 @@ class DDQNWorker:
         # Update priorities
         self.buffer.update_priorities(batch.indices, td_errors.abs().cpu().numpy())
 
-        # Extract gradients and serialize to bytes (avoids multiprocessing file descriptor issues)
-        import io
+        # Extract gradients (no serialization - zero-copy via shared memory)
         grads = {
-            name: param.grad.cpu().clone()
+            name: param.grad
             for name, param in self.net.online.named_parameters()
             if param.grad is not None
         }
-        grads_buffer = io.BytesIO()
-        torch.save(grads, grads_buffer)
-        grads_bytes = grads_buffer.getvalue()
 
-        # Metrics
+        # Metrics (stored locally for now, TODO: send via separate channel if needed)
         metrics = {
             "loss": loss.item(),
             "td_loss": td_loss.item(),
@@ -521,23 +574,17 @@ class DDQNWorker:
             "best_x_ever": self.metrics.best_x_ever,
         }
 
-        # Send gradients
-        gradient_packet = {
-            "grads_bytes": grads_bytes,  # Serialized bytes, not tensors
-            "timesteps": self.config.buffer.batch_size,
-            "episodes": self.metrics.episode_count,
-            "worker_id": self.config.worker_id,
-            "weight_version": self.weights.version,
-            "metrics": metrics,
-        }
-
-        # Write to shared memory (non-blocking, can't deadlock)
-        success = self.gradient_buffer.write(gradient_packet)
+        # Write gradients to shared memory (zero-copy, non-blocking)
+        success = self.gradient_tensor.write(
+            grads=grads,
+            version=self.weights.version,
+            worker_id=self.config.worker_id,
+            timesteps=self.config.buffer.batch_size,
+            episodes=self.metrics.episode_count,
+        )
         if success:
             self.metrics.gradients_sent += 1
             self._grads_sent += 1
-        elif self.metrics.total_steps % 1000 == 0:
-            self.ui.log("Shared memory buffer full or too small")
 
         # Log occasionally to UI
         if self.metrics.total_steps % 500 == 0:
@@ -580,22 +627,18 @@ class DDQNWorker:
             f"Worker {self.config.worker_id} started (level={self.config.level}, "
             f"device={device}, ε_end={self.config.exploration.epsilon_end:.4f}, {per_mode})"
         )
+        if self._csv_had_data:
+            self.ui.log(f"Worker {self.config.worker_id} resuming - CSV has existing data")
+        elif self._episodes_csv.exists():
+            self.ui.log(f"Worker {self.config.worker_id} WARNING: CSV exists but appears empty")
 
         loop_count = 0
-        last_heartbeat = time.time()
         
         while True:
             loop_count += 1
             
-            # Send periodic heartbeat via shared memory (every 10 seconds)
-            current_time = time.time()
-            if current_time - last_heartbeat >= 10.0:
-                if self.heartbeats is not None:
-                    try:
-                        self.heartbeats.update(self.config.worker_id, current_time)
-                        last_heartbeat = current_time
-                    except Exception:
-                        pass
+            # Send heartbeat at start of each outer loop iteration
+            self._maybe_heartbeat()
 
             if loop_count % 100 == 1:
                 # Get current epsilon
@@ -616,7 +659,7 @@ class DDQNWorker:
             # Sync weights if needed
             if self.weights.maybe_sync(self.net):
                 self.metrics.weight_sync_count = self.weights.count
-                self.ui.log(f"Synced weights v{self.weights.count}")
+                self.ui.log(f"Synced weights v{self.weights.version}")
 
             self.collect_steps(self.config.steps_per_collection)
             self.timing.update_speed(self.config.steps_per_collection)
@@ -624,6 +667,7 @@ class DDQNWorker:
             if len(self.buffer) >= self.config.buffer.batch_size:
                 for _ in range(self.config.train_steps):
                     self.compute_and_send_gradients()
+                    self._maybe_heartbeat()  # Heartbeat after each gradient
 
             # Periodic diagnostic dump
             if loop_count % 500 == 0:
@@ -644,7 +688,7 @@ class DDQNWorker:
 def run_ddqn_worker(
     config: WorkerConfig,
     weights_path: Path,
-    gradient_buffer_or_path: SharedGradientBuffer | Path,
+    gradient_tensor_path: Path,
     ui_queue: Optional[mp.Queue] = None,
     heartbeat_path: Optional[Path] = None,
     crash_log_dir: Optional[Path] = None,
@@ -654,13 +698,7 @@ def run_ddqn_worker(
     import signal
     import traceback
     from datetime import datetime
-    from mario_rl.training.shared_gradients import attach_worker_buffer, SharedHeartbeats
-    
-    # Accept either a buffer or a path to attach to
-    if isinstance(gradient_buffer_or_path, Path):
-        gradient_buffer = attach_worker_buffer(config.worker_id, gradient_buffer_or_path)
-    else:
-        gradient_buffer = gradient_buffer_or_path
+    from mario_rl.training.shared_gradients import SharedHeartbeats
     
     # Attach to shared heartbeats if path provided
     heartbeats = None
@@ -719,7 +757,7 @@ def run_ddqn_worker(
         worker = DDQNWorker(
             config=config,
             weights_path=weights_path,
-            gradient_buffer=gradient_buffer,
+            gradient_tensor_path=gradient_tensor_path,
             ui_queue=ui_queue,
             heartbeats=heartbeats,
         )
