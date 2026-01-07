@@ -91,8 +91,11 @@ This reduces noise while maintaining async benefits.
 """
 
 import os
+import sys
 import csv
 import time
+import signal
+import traceback
 import multiprocessing as mp
 
 os.environ["KMP_DUPLICATE_LIB_OK"] = "True"
@@ -374,8 +377,13 @@ class DDQNLearner:
         self.optimizer.zero_grad()
 
         # Accumulate gradients from all workers
+        import io
         for packet in gradient_packets:
-            grads = packet["grads"]
+            # Deserialize gradients from bytes (avoids multiprocessing file descriptor issues)
+            grads_bytes = packet["grads_bytes"]
+            grads_buffer = io.BytesIO(grads_bytes)
+            grads = torch.load(grads_buffer, map_location="cpu", weights_only=True)
+            
             for name, param in self.net.online.named_parameters():
                 if name in grads:
                     grad = grads[name].to(self.device)
@@ -670,16 +678,64 @@ def run_ddqn_learner(
     **kwargs,
 ) -> None:
     """Entry point for learner process."""
-    learner = DDQNLearner(
-        weights_path=weights_path,
-        save_dir=save_dir,
-        gradient_queue=gradient_queue,
-        ui_queue=ui_queue,
-        **kwargs,
-    )
+    from datetime import datetime
+    
+    # Set up crash log directory
+    crash_log_dir = save_dir / "crash_logs"
+    crash_log_dir.mkdir(parents=True, exist_ok=True)
+    stack_trace_file = crash_log_dir / "learner_stack.log"
+    
+    def dump_stack_trace(signum, frame):
+        """Dump stack trace when receiving SIGUSR1."""
+        try:
+            with open(stack_trace_file, "a") as f:
+                f.write(f"\n{'=' * 80}\n")
+                f.write(f"Stack trace dump at {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
+                f.write(f"LEARNER (PID: {os.getpid()})\n")
+                f.write(f"Signal: {signum}\n")
+                f.write(f"{'=' * 80}\n\n")
+                
+                # Dump all thread stacks
+                import threading
+                for thread_id, frame_obj in sys._current_frames().items():
+                    thread_name = "Unknown"
+                    for t in threading.enumerate():
+                        if t.ident == thread_id:
+                            thread_name = t.name
+                            break
+                    f.write(f"\nThread {thread_id} ({thread_name}):\n")
+                    f.write(''.join(traceback.format_stack(frame_obj)))
+                
+                f.write(f"\n{'=' * 80}\n")
+                f.flush()
+        except Exception as e:
+            print(f"[LEARNER] Failed to dump stack trace: {e}", file=sys.stderr, flush=True)
+    
+    # Register signal handler (SIGUSR1)
+    signal.signal(signal.SIGUSR1, dump_stack_trace)
+    
+    try:
+        learner = DDQNLearner(
+            weights_path=weights_path,
+            save_dir=save_dir,
+            gradient_queue=gradient_queue,
+            ui_queue=ui_queue,
+            **kwargs,
+        )
 
-    # Optionally restore from snapshot
-    if restore_snapshot:
-        learner.restore_snapshot(snapshot_path)
+        # Optionally restore from snapshot
+        if restore_snapshot:
+            learner.restore_snapshot(snapshot_path)
 
-    learner.run()
+        learner.run()
+    except Exception as e:
+        # Log crash to file
+        crash_log_path = crash_log_dir / "learner_crash.log"
+        with open(crash_log_path, "w") as f:
+            f.write(f"LEARNER CRASHED\n")
+            f.write(f"Error: {e}\n")
+            f.write(f"Type: {type(e).__name__}\n")
+            f.write(f"\nFull traceback:\n")
+            f.write(traceback.format_exc())
+        print(f"[LEARNER] CRASHED: {e}", file=sys.stderr, flush=True)
+        raise

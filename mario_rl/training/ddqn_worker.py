@@ -497,12 +497,16 @@ class DDQNWorker:
         # Update priorities
         self.buffer.update_priorities(batch.indices, td_errors.abs().cpu().numpy())
 
-        # Extract gradients
+        # Extract gradients and serialize to bytes (avoids multiprocessing file descriptor issues)
+        import io
         grads = {
             name: param.grad.cpu().clone()
             for name, param in self.net.online.named_parameters()
             if param.grad is not None
         }
+        grads_buffer = io.BytesIO()
+        torch.save(grads, grads_buffer)
+        grads_bytes = grads_buffer.getvalue()
 
         # Metrics
         metrics = {
@@ -521,9 +525,9 @@ class DDQNWorker:
             "best_x_ever": self.metrics.best_x_ever,
         }
 
-        # Send gradients
+        # Send gradients (grads serialized to bytes to avoid file descriptor blocking)
         gradient_packet = {
-            "grads": grads,
+            "grads_bytes": grads_bytes,  # Serialized bytes, not tensors
             "timesteps": self.config.buffer.batch_size,
             "episodes": self.metrics.episode_count,
             "worker_id": self.config.worker_id,

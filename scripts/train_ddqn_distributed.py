@@ -170,6 +170,7 @@ def run_learner_silent(
     import os
     import sys
     import warnings
+    import traceback
 
     # Suppress all warnings
     warnings.filterwarnings("ignore")
@@ -179,15 +180,30 @@ def run_learner_silent(
     sys.stdout = devnull
     sys.stderr = devnull
 
-    # Now run the actual learner
-    run_ddqn_learner(
-        weights_path,
-        save_dir,
-        gradient_queue,
-        restore_snapshot=restore_snapshot,
-        snapshot_path=snapshot_path,
-        **kwargs,
-    )
+    # Now run the actual learner with crash logging
+    try:
+        run_ddqn_learner(
+            weights_path,
+            save_dir,
+            gradient_queue,
+            restore_snapshot=restore_snapshot,
+            snapshot_path=snapshot_path,
+            **kwargs,
+        )
+    except Exception as e:
+        # Log crash to file (stdout/stderr are /dev/null)
+        crash_log_path = save_dir / "crash_logs" / "learner_crash.log"
+        crash_log_path.parent.mkdir(parents=True, exist_ok=True)
+        
+        with open(crash_log_path, "w") as f:
+            f.write(f"LEARNER CRASHED\n")
+            f.write(f"Error: {e}\n")
+            f.write(f"Type: {type(e).__name__}\n")
+            f.write(f"\nFull traceback:\n")
+            f.write(traceback.format_exc())
+        
+        # Re-raise to exit process
+        raise
 
 
 def monitor_workers(
