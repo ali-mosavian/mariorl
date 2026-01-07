@@ -169,7 +169,10 @@ class DDQNLearner:
     # Tracking
     last_loss: float = field(init=False, default=0.0)
     last_q_mean: float = field(init=False, default=0.0)
+    last_q_max: float = field(init=False, default=0.0)
     last_td_error: float = field(init=False, default=0.0)
+    last_grad_norm: float = field(init=False, default=0.0)
+    last_num_packets: int = field(init=False, default=0)
     grads_per_sec: float = field(init=False, default=0.0)
     gradients_received: int = field(init=False, default=0)
     _last_time: float = field(init=False, default=0.0)
@@ -249,18 +252,28 @@ class DDQNLearner:
         if not self._metrics_csv.exists():
             with open(self._metrics_csv, "w", newline="") as f:
                 writer = csv.writer(f)
-                writer.writerow(
-                    [
-                        "timestamp",
-                        "update",
-                        "timesteps",
-                        "loss",
-                        "q_mean",
-                        "td_error",
-                        "lr",
-                        "grads_per_sec",
-                    ]
-                )
+                writer.writerow([
+                    "timestamp",
+                    "update",
+                    "timesteps",
+                    "total_episodes",
+                    "loss",
+                    "q_mean",
+                    "q_max",
+                    "td_error",
+                    "grad_norm",
+                    "lr",
+                    "grads_per_sec",
+                    "gradients_received",
+                    "weight_version",
+                    "num_packets",
+                    "avg_reward",
+                    "avg_speed",
+                    "avg_entropy",
+                    "total_deaths",
+                    "total_flags",
+                    "global_best_x",
+                ])
 
     def save_weights(self) -> None:
         """Save network weights with version for workers to sync."""
@@ -405,14 +418,17 @@ class DDQNLearner:
 
         # Average metrics from workers
         avg_metrics = {}
-        for key in ["loss", "q_mean", "td_error"]:
+        for key in ["loss", "q_mean", "q_max", "td_error"]:
             values = [p["metrics"].get(key, 0.0) for p in gradient_packets if "metrics" in p]
             avg_metrics[key] = np.mean(values) if values else 0.0
 
         # Update tracking
         self.last_loss = avg_metrics.get("loss", 0.0)
         self.last_q_mean = avg_metrics.get("q_mean", 0.0)
+        self.last_q_max = avg_metrics.get("q_max", 0.0)
         self.last_td_error = avg_metrics.get("td_error", 0.0)
+        self.last_grad_norm = grad_norm.item() if isinstance(grad_norm, torch.Tensor) else grad_norm
+        self.last_num_packets = num_packets
 
         # Calculate speed
         now = time.time()
@@ -445,20 +461,38 @@ class DDQNLearner:
 
     def _log_metrics(self, lr: float) -> None:
         """Log metrics to CSV."""
+        total_episodes = sum(self.worker_episodes.values())
+        avg_reward = np.mean(list(self._worker_avg_rewards.values())) if self._worker_avg_rewards else 0.0
+        avg_speed = np.mean(list(self._worker_avg_speeds.values())) if self._worker_avg_speeds else 0.0
+        avg_entropy = np.mean(list(self._worker_entropy.values())) if self._worker_entropy else 0.0
+        total_deaths = sum(self._worker_deaths.values())
+        total_flags = sum(self._worker_flags.values())
+        global_best_x = max(self._worker_best_x.values()) if self._worker_best_x else 0
+
         with open(self._metrics_csv, "a", newline="") as f:
             writer = csv.writer(f)
-            writer.writerow(
-                [
-                    time.time(),
-                    self.update_count,
-                    self.total_timesteps_collected,
-                    self.last_loss,
-                    self.last_q_mean,
-                    self.last_td_error,
-                    lr,
-                    self.grads_per_sec,
-                ]
-            )
+            writer.writerow([
+                time.time(),
+                self.update_count,
+                self.total_timesteps_collected,
+                total_episodes,
+                self.last_loss,
+                self.last_q_mean,
+                self.last_q_max,
+                self.last_td_error,
+                self.last_grad_norm,
+                lr,
+                self.grads_per_sec,
+                self.gradients_received,
+                self.weight_version,
+                self.last_num_packets,
+                avg_reward,
+                avg_speed,
+                avg_entropy,
+                total_deaths,
+                total_flags,
+                global_best_x,
+            ])
 
     def _send_ui_status(self, lr: float) -> None:
         """Send status to UI queue."""

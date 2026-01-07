@@ -13,6 +13,8 @@ Features
 """
 
 import os
+import csv
+import time
 import multiprocessing as mp
 
 os.environ["KMP_DUPLICATE_LIB_OK"] = "True"
@@ -88,6 +90,9 @@ class DDQNWorker:
 
     # Remaining state (1)
     _current_state: Optional[np.ndarray] = field(init=False, default=None)
+
+    # CSV logging
+    _episodes_csv: Path = field(init=False, repr=False)
 
     def __post_init__(self) -> None:
         """Initialize environment, network, and buffer."""
@@ -181,11 +186,79 @@ class DDQNWorker:
         # Diagnostic tracking
         self._grads_sent = 0
 
+        # Initialize CSV logging for episode metrics
+        save_dir = self.weights_path.parent
+        self._episodes_csv = save_dir / f"ddqn_worker_{self.config.worker_id}_episodes.csv"
+        if not self._episodes_csv.exists():
+            with open(self._episodes_csv, "w", newline="") as f:
+                writer = csv.writer(f)
+                writer.writerow([
+                    "timestamp",
+                    "episode",
+                    "steps",
+                    "reward",
+                    "x_pos",
+                    "best_x",
+                    "best_x_ever",
+                    "deaths",
+                    "flags",
+                    "epsilon",
+                    "weight_version",
+                    "weight_sync_count",
+                    "gradients_sent",
+                    "steps_per_sec",
+                    "rolling_avg_reward",
+                    "avg_speed",
+                    "avg_x_at_death",
+                    "entropy",
+                    "buffer_size",
+                    "buffer_fill_pct",
+                    "per_beta",
+                    "snapshot_restores",
+                    "current_level",
+                    "game_time",
+                    "flag_get",
+                ])
+
     def _preprocess_state(self, state: np.ndarray) -> np.ndarray:
         """Convert state from (4, 64, 64, 1) to (4, 64, 64)."""
         if state.ndim == 4 and state.shape[-1] == 1:
             state = np.squeeze(state, axis=-1)
         return state
+
+    def _log_episode(self, info: dict) -> None:
+        """Log episode metrics to CSV."""
+        buffer_fill_pct = len(self.buffer) / self.config.buffer.capacity * 100
+
+        with open(self._episodes_csv, "a", newline="") as f:
+            writer = csv.writer(f)
+            writer.writerow([
+                time.time(),
+                self.metrics.episode_count,
+                self.episode.length,
+                self.episode.reward,
+                info.get("x_pos", 0),
+                self.episode.best_x,
+                self.metrics.best_x_ever,
+                self.metrics.deaths,
+                self.metrics.flags,
+                self.exploration.get_epsilon(self.metrics.total_steps),
+                self.weights.version,
+                self.weights.count,
+                self.metrics.gradients_sent,
+                self.timing.steps_per_sec,
+                self.metrics.avg_reward,
+                self.metrics.avg_speed,
+                self.metrics.avg_x_at_death,
+                self.metrics.avg_entropy,
+                len(self.buffer),
+                buffer_fill_pct,
+                self.buffer.current_beta,
+                self.snapshots.restore_count if self.snapshots else 0,
+                self.base_env.current_level,
+                info.get("time", 0),
+                info.get("flag_get", False),
+            ])
 
     @torch.no_grad()
     def _get_action(self, state: np.ndarray) -> int:
@@ -311,6 +384,9 @@ class DDQNWorker:
                     self.metrics.add_flag(game_time)
                 elif is_dead:
                     self.metrics.add_death(x_pos)
+
+                # Log episode to CSV
+                self._log_episode(info)
 
                 self._send_ui_status(info)
 
