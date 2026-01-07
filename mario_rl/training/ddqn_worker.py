@@ -122,6 +122,7 @@ class DDQNWorker:
         self.net = DoubleDQN(
             input_shape=state_dim,
             num_actions=self.action_dim,
+            q_clip=self.config.q_clip,
         ).to(device)
 
         # Attach to SharedGradientTensor (must be after model creation)
@@ -534,6 +535,19 @@ class DDQNWorker:
         current_q = self.net.online(states_t)
         current_q_selected = current_q.gather(1, actions_t.unsqueeze(1)).squeeze(1)
 
+        # Monitor Q-values for instability
+        q_mean = current_q_selected.mean().item()
+        q_max = current_q_selected.max().item()
+        
+        # Warn if Q-values are getting unreasonable (>100 is suspicious for Mario)
+        if abs(q_mean) > 100 or abs(q_max) > 200:
+            self.ui.log(f"WARNING: Q-values high: mean={q_mean:.1f}, max={q_max:.1f}")
+        
+        # Detect NaN in Q-values
+        if torch.isnan(current_q).any() or torch.isinf(current_q).any():
+            self.ui.log("WARNING: NaN/Inf in Q-values, skipping gradient update")
+            return {"loss": 0.0, "q_mean": 0.0, "td_error": 0.0, "entropy": 0.0, "skipped": True}
+
         with torch.no_grad():
             next_q_online = self.net.online(next_states_t)
             best_actions = next_q_online.argmax(dim=1)
@@ -553,6 +567,16 @@ class DDQNWorker:
 
         # Total loss: TD loss - entropy bonus (we want to maximize entropy)
         loss = td_loss - self.config.entropy_coef * entropy
+        
+        # Detect NaN or exploded loss
+        if torch.isnan(loss) or torch.isinf(loss):
+            self.ui.log("WARNING: Loss is NaN/Inf, skipping gradient update")
+            return {"loss": 0.0, "q_mean": q_mean, "td_error": 0.0, "entropy": 0.0, "skipped": True}
+        
+        # Detect loss explosion
+        if loss.item() > self.config.loss_threshold:
+            self.ui.log(f"WARNING: Loss exploded to {loss.item():.1f}, skipping gradient")
+            return {"loss": loss.item(), "q_mean": q_mean, "td_error": 0.0, "entropy": entropy.item(), "skipped": True}
 
         # Backward
         self.net.online.zero_grad()
@@ -573,8 +597,8 @@ class DDQNWorker:
         metrics = {
             "loss": loss.item(),
             "td_loss": td_loss.item(),
-            "q_mean": current_q_selected.mean().item(),
-            "q_max": current_q_selected.max().item(),
+            "q_mean": q_mean,  # Already computed above
+            "q_max": q_max,    # Already computed above
             "td_error": td_errors.abs().mean().item(),
             "per_beta": self.buffer.current_beta,
             "entropy": entropy.item(),  # Policy entropy from Q-values

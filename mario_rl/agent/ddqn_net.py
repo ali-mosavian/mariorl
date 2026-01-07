@@ -169,6 +169,7 @@ class DDQNNet(nn.Module):
     - Nature DQN-style CNN backbone with modern improvements
     - Dueling architecture (separate value and advantage streams)
     - GELU activation, LayerNorm, Dropout, Orthogonal init
+    - Optional Q-value clipping to prevent runaway estimates
     """
 
     def __init__(
@@ -178,11 +179,13 @@ class DDQNNet(nn.Module):
         feature_dim: int = 512,
         hidden_dim: int = 256,
         dropout: float = 0.1,
+        q_clip: float = 0.0,
     ):
         super().__init__()
         self.backbone = DDQNBackbone(input_shape, feature_dim, dropout)
         self.head = DuelingHead(feature_dim, num_actions, hidden_dim)
         self.num_actions = num_actions
+        self.q_clip = q_clip  # 0 = disabled, >0 = clip Q to [-q_clip, q_clip]
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """
@@ -195,7 +198,13 @@ class DDQNNet(nn.Module):
             q_values: Q-values for each action (N, num_actions)
         """
         features = self.backbone(x)
-        return self.head(features)
+        q_values = self.head(features)
+        
+        # Clip Q-values to prevent runaway estimates during training instability
+        if self.q_clip > 0:
+            q_values = torch.clamp(q_values, -self.q_clip, self.q_clip)
+        
+        return q_values
 
     def get_action(self, x: torch.Tensor, epsilon: float = 0.0) -> torch.Tensor:
         """
@@ -232,6 +241,9 @@ class DoubleDQN(nn.Module):
     Target network is updated via:
     - Soft update (polyak averaging): θ_target = τ * θ_online + (1-τ) * θ_target
     - Hard sync: copy online weights to target every N steps
+    
+    Stability features:
+    - Optional Q-value clipping to prevent runaway estimates
     """
 
     def __init__(
@@ -241,11 +253,13 @@ class DoubleDQN(nn.Module):
         feature_dim: int = 512,
         hidden_dim: int = 256,
         dropout: float = 0.1,
+        q_clip: float = 0.0,
     ):
         super().__init__()
-        self.online = DDQNNet(input_shape, num_actions, feature_dim, hidden_dim, dropout)
-        self.target = DDQNNet(input_shape, num_actions, feature_dim, hidden_dim, dropout)
+        self.online = DDQNNet(input_shape, num_actions, feature_dim, hidden_dim, dropout, q_clip)
+        self.target = DDQNNet(input_shape, num_actions, feature_dim, hidden_dim, dropout, q_clip)
         self.num_actions = num_actions
+        self.q_clip = q_clip
 
         # Copy online weights to target and freeze target
         self.sync_target()

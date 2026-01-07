@@ -155,6 +155,9 @@ class DDQNLearner:
     max_grad_norm: float = 10.0
     weight_decay: float = 1e-4
     accumulate_grads: int = 1  # Number of gradients to accumulate before update
+    
+    # Stability settings
+    q_clip: float = 0.0  # Clip Q-values to [-q_clip, q_clip], 0 to disable
 
     # Scheduling
     total_timesteps: int = 2_000_000
@@ -214,6 +217,7 @@ class DDQNLearner:
             feature_dim=512,
             hidden_dim=256,
             dropout=0.1,
+            q_clip=self.q_clip,
         ).to(self.device)
 
         # Create gradient pool by attaching to existing shared memory files

@@ -369,7 +369,7 @@ def monitor_workers(
 @click.option("--lr-end", default=1e-5, help="Final learning rate")
 @click.option("--gamma", default=0.99, help="Discount factor")
 @click.option("--n-step", default=3, help="N-step returns")
-@click.option("--tau", default=0.005, help="Soft update coefficient")
+@click.option("--tau", default=0.001, help="Soft update coefficient (lower = more stable)")
 # Worker settings
 @click.option("--local-buffer-size", default=10_000, help="Local replay buffer per worker")
 @click.option("--batch-size", default=32, help="Training batch size per worker")
@@ -380,6 +380,9 @@ def monitor_workers(
 # Epsilon settings (per worker)
 @click.option("--eps-base", default=0.4, help="Base for per-worker epsilon (ε = base^(1+i/N))")
 @click.option("--eps-decay-steps", default=100_000, help="Steps for epsilon decay per worker")
+# Stability settings
+@click.option("--q-clip", default=100.0, help="Clip Q-values to [-x, x] to prevent explosion (0 to disable)")
+@click.option("--loss-threshold", default=1000.0, help="Skip gradient if loss exceeds this threshold")
 # Other
 @click.option("--total-steps", default=2_000_000, help="Total training steps (for LR schedule)")
 @click.option("--max-grad-norm", default=10.0, help="Maximum gradient norm")
@@ -392,7 +395,7 @@ def monitor_workers(
 @click.option("--reward-norm", type=click.Choice(["none", "scale", "running"]), default="none",
               help="Reward normalization: 'none' (recommended - env normalizes), 'scale', 'running'")
 @click.option("--reward-scale", default=1.0, help="Scale factor when reward-norm=scale")
-@click.option("--reward-clip", default=0.0, help="Clip rewards to [-x, x] (0 to disable)")
+@click.option("--reward-clip", default=5.0, help="Clip rewards to [-x, x] to prevent instability (0 to disable)")
 @click.option("--entropy-coef", default=0.01, help="Entropy regularization coefficient (encourages exploration)")
 def main(
     workers: int,
@@ -410,6 +413,8 @@ def main(
     accumulate_grads: int,
     eps_base: float,
     eps_decay_steps: int,
+    q_clip: float,
+    loss_threshold: float,
     total_steps: int,
     max_grad_norm: float,
     weight_decay: float,
@@ -502,6 +507,7 @@ def main(
         print(f"  LR: {lr} → {lr_end} (cosine)")
         print(f"  Gamma: {gamma}, N-step: {n_step}")
         print(f"  Tau: {tau}, Entropy coef: {entropy_coef}")
+        print(f"  Q-clip: {q_clip}, Loss threshold: {loss_threshold}, Reward clip: {reward_clip}")
         print(f"  Local buffer: {local_buffer_size:,}, Batch: {batch_size}")
         print(f"  Collect steps: {collect_steps}, Train steps: {train_steps}")
         print(f"  Accumulate grads: {accumulate_grads}")
@@ -602,6 +608,8 @@ def main(
             reward_scale=reward_scale,
             reward_clip=reward_clip,
             entropy_coef=entropy_coef,
+            q_clip=q_clip,
+            loss_threshold=loss_threshold,
             initial_steps=initial_steps,  # Resume from correct timestep for epsilon decay
             buffer=buffer_config,
             exploration=exploration_config,
@@ -631,6 +639,7 @@ def main(
             "accumulate_grads": accumulate_grads,
             "max_grad_norm": max_grad_norm,
             "weight_decay": weight_decay,
+            "q_clip": q_clip,
             "ui_queue": ui_queue,
             "restore_snapshot": snapshot_path is not None,
             "snapshot_path": snapshot_path,
