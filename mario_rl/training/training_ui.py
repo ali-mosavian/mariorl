@@ -1097,25 +1097,25 @@ class TrainingUI:
             sync_str = "-"
 
         try:
-            # Line 1: header + Ep, Step, X, Time, sps (ASCII for reliable display)
-            line1 = f" Ep:{episode:3d} St:{step:3d} X:{x_pos:4d} T:{game_time:3d} {steps_per_sec:2.0f}sps"
+            # Line 1: header + Ep, Step, X, Time, sps
+            line1 = f" Ep:{episode:3d} St:{step:3d} X:{x_pos:4d} ⏱ {game_time:3d} {steps_per_sec:2.0f}sps"
             stdscr.addstr(y, x + len(header), line1[: width - len(header) - 1])
 
-            # Line 2: reward, deaths, flags, restores, epsilon (ASCII for reliable display)
-            stdscr.addstr(y + 1, x, f"r={reward:6.0f} D:")
+            # Line 2: reward, deaths, flags, restores, epsilon
+            stdscr.addstr(y + 1, x, f"r={reward:6.0f} 💀 ")
 
             death_color = curses.color_pair(3) if deaths > 0 else curses.A_DIM
             stdscr.addstr(f"{deaths:2d}", death_color)
 
             flag_color = curses.color_pair(1) if flags > 0 else curses.A_DIM
-            stdscr.addstr(" F:")
+            stdscr.addstr(" 🏁 ")
             stdscr.addstr(f"{flags}", flag_color)
 
-            stdscr.addstr(f" R:{snapshot_restores}")
-            stdscr.addstr(f" e={epsilon:.2f}")
+            stdscr.addstr(f" ⏮ {snapshot_restores}")
+            stdscr.addstr(f" ε={epsilon:.2f}")
 
-            # Line 3: avg reward, BestX, Spd, Buf%, sync (ASCII for reliable display)
-            stdscr.addstr(y + 2, x, "Avg:")
+            # Line 3: avg reward, BestX, Spd, Buf%, sync
+            stdscr.addstr(y + 2, x, "r̄=")
             avg_color = curses.color_pair(1) if rolling_avg_reward > 0 else curses.color_pair(3)
             stdscr.addstr(f"{rolling_avg_reward:5.0f}", avg_color)
 
