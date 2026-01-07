@@ -46,6 +46,7 @@ from mario_rl.environment.factory import create_env
 from mario_rl.buffers import PrioritizedReplayBuffer
 from mario_rl.training.snapshot import SnapshotManager
 from mario_rl.training.ddqn_status import DDQNStatusCollector
+from mario_rl.core.reward_normalizer import RewardNormalizer
 
 
 @dataclass
@@ -90,6 +91,9 @@ class DDQNWorker:
 
     # Remaining state (1)
     _current_state: Optional[np.ndarray] = field(init=False, default=None)
+
+    # Reward normalization
+    _reward_normalizer: Optional[RewardNormalizer] = field(init=False, default=None)
 
     # CSV logging
     _episodes_csv: Path = field(init=False, repr=False)
@@ -185,6 +189,10 @@ class DDQNWorker:
 
         # Diagnostic tracking
         self._grads_sent = 0
+
+        # Initialize reward normalizer if using running normalization
+        if self.config.reward_norm == "running":
+            self._reward_normalizer = RewardNormalizer(clip=self.config.reward_clip)
 
         # Initialize CSV logging for episode metrics
         save_dir = self.weights_path.parent
@@ -307,22 +315,28 @@ class DDQNWorker:
             is_dead = info.get("is_dead", False) or info.get("is_dying", False)
 
             # Normalize reward to prevent Q-value explosion
-            # 1. Scale (preserves relative magnitudes - preferred)
-            # 2. Optionally clip (loses magnitude info - use sparingly)
             raw_reward = reward
-            scaled_reward = reward * self.config.reward_scale
-            if self.config.reward_clip > 0:
-                scaled_reward = float(np.clip(scaled_reward, -self.config.reward_clip, self.config.reward_clip))
+            if self.config.reward_norm == "running" and self._reward_normalizer is not None:
+                # Running normalization: (r - mean) / std
+                normalized_reward = self._reward_normalizer.normalize(reward)
+            elif self.config.reward_norm == "scale":
+                # Fixed scaling
+                normalized_reward = reward * self.config.reward_scale
+                if self.config.reward_clip > 0:
+                    normalized_reward = float(np.clip(normalized_reward, -self.config.reward_clip, self.config.reward_clip))
+            else:
+                # No normalization
+                normalized_reward = reward
 
             # Process states
             state_processed = self._preprocess_state(state)
             next_state_processed = self._preprocess_state(next_state)
 
-            # Add to buffers using scaled reward for training
+            # Add to buffers using normalized reward for training
             transition = Transition(
                 state=state_processed,
                 action=action,
-                reward=scaled_reward,
+                reward=normalized_reward,
                 next_state=next_state_processed,
                 done=done,
             )

@@ -213,8 +213,10 @@ def run_learner_silent(
 @click.option("--restore-snapshot", type=str, default=None, help="Restore from specific snapshot file")
 @click.option("--no-game-snapshots", is_flag=True, help="Disable game state snapshots (save/restore on death)")
 @click.option("--no-per", is_flag=True, help="Disable Prioritized Experience Replay (use uniform sampling)")
-@click.option("--reward-scale", default=0.1, help="Scale rewards by this factor (default 0.1, like APPO)")
-@click.option("--reward-clip", default=0.0, help="Clip rewards to [-x, x] after scaling (0 to disable)")
+@click.option("--reward-norm", type=click.Choice(["running", "scale", "none"]), default="running",
+              help="Reward normalization: 'running' (adaptive), 'scale' (fixed), 'none'")
+@click.option("--reward-scale", default=0.1, help="Scale factor when reward-norm=scale (default 0.1)")
+@click.option("--reward-clip", default=10.0, help="Clip normalized rewards to [-x, x] (default 10.0, 0 to disable)")
 def main(
     workers: int,
     level: str,
@@ -239,6 +241,7 @@ def main(
     restore_snapshot: str | None,
     no_game_snapshots: bool,
     no_per: bool,
+    reward_norm: str,
     reward_scale: float,
     reward_clip: float,
 ) -> None:
@@ -353,6 +356,7 @@ def main(
             steps_per_collection=collect_steps,
             train_steps=train_steps,
             max_grad_norm=max_grad_norm,
+            reward_norm=reward_norm,
             reward_scale=reward_scale,
             reward_clip=reward_clip,
             buffer=buffer_config,
