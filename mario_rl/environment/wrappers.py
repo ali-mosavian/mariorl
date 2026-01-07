@@ -1,12 +1,14 @@
 from typing import Tuple
 
+import cv2
 import numpy as np
 import gymnasium as gym
-from skimage import transform
 from gymnasium.spaces import Box
 
 
 class ResizeObservation(gym.ObservationWrapper):
+    """Resize observations using OpenCV (much faster than skimage)."""
+    
     def __init__(self, env, shape):
         super().__init__(env)
         if isinstance(shape, int):
@@ -18,11 +20,9 @@ class ResizeObservation(gym.ObservationWrapper):
         self.observation_space = Box(low=0, high=255, shape=obs_shape, dtype=np.uint8)
 
     def observation(self, observation):
-        resize_obs = transform.resize(observation, self.shape)
-        # cast float back to uint8
-        resize_obs *= 255
-        resize_obs = resize_obs.astype(np.uint8)
-        return resize_obs
+        # cv2.resize is ~10x faster than skimage.transform.resize
+        # INTER_AREA is best for downscaling (avoids aliasing)
+        return cv2.resize(observation, self.shape, interpolation=cv2.INTER_AREA)
 
 
 class SkipFrame(gym.Wrapper):

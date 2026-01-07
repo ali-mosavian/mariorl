@@ -683,34 +683,50 @@ def render_analysis_tab(df: pd.DataFrame, workers: dict[int, pd.DataFrame]) -> N
         st.plotly_chart(fig, use_container_width=True)
 
 
-def render_dashboard_content(checkpoint_dir: str) -> None:
+def render_dashboard_content(checkpoint_dir: str, refresh_sec: int) -> None:
     """Render the main dashboard content (tabs and charts)."""
-    # Clear cache to get fresh data
-    load_learner_metrics.clear()
-    load_worker_episodes.clear()
     
-    # Load fresh data
-    learner_df = load_learner_metrics(checkpoint_dir)
-    workers = load_worker_episodes(checkpoint_dir)
-
-    # Show last update time
-    if learner_df is not None and len(learner_df) > 0:
-        st.caption(f"🔄 Last update: {datetime.now().strftime('%H:%M:%S')} • {len(learner_df)} updates logged")
-
-    # Tabs
+    # Tabs (created outside fragments so they persist)
     tab1, tab2, tab3, tab4 = st.tabs(["📊 Learner", "👷 Workers", "🗺️ Levels", "🔍 Analysis"])
 
     with tab1:
-        render_learner_tab(learner_df)
+        @st.fragment(run_every=refresh_sec)
+        def learner_fragment():
+            load_learner_metrics.clear()
+            df = load_learner_metrics(checkpoint_dir)
+            if df is not None and len(df) > 0:
+                st.caption(f"🔄 {datetime.now().strftime('%H:%M:%S')} • {len(df)} updates")
+            render_learner_tab(df)
+        learner_fragment()
 
     with tab2:
-        render_workers_tab(workers)
+        @st.fragment(run_every=refresh_sec)
+        def workers_fragment():
+            load_worker_episodes.clear()
+            workers = load_worker_episodes(checkpoint_dir)
+            st.caption(f"🔄 {datetime.now().strftime('%H:%M:%S')}")
+            render_workers_tab(workers)
+        workers_fragment()
 
     with tab3:
-        render_levels_tab(workers)
+        @st.fragment(run_every=refresh_sec)
+        def levels_fragment():
+            load_worker_episodes.clear()
+            workers = load_worker_episodes(checkpoint_dir)
+            st.caption(f"🔄 {datetime.now().strftime('%H:%M:%S')}")
+            render_levels_tab(workers)
+        levels_fragment()
 
     with tab4:
-        render_analysis_tab(learner_df, workers)
+        @st.fragment(run_every=refresh_sec)
+        def analysis_fragment():
+            load_learner_metrics.clear()
+            load_worker_episodes.clear()
+            df = load_learner_metrics(checkpoint_dir)
+            workers = load_worker_episodes(checkpoint_dir)
+            st.caption(f"🔄 {datetime.now().strftime('%H:%M:%S')}")
+            render_analysis_tab(df, workers)
+        analysis_fragment()
 
 
 def main():
@@ -729,9 +745,7 @@ def main():
         )
         checkpoint_dir = checkpoint_input
 
-        auto_refresh = st.toggle("Auto Refresh", value=True)
-        if auto_refresh:
-            refresh_sec = st.slider("Interval (sec)", 2, 30, 5)
+        refresh_sec = st.slider("Refresh interval (sec)", 2, 30, 5)
 
         st.divider()
 
@@ -753,14 +767,8 @@ def main():
         st.error(f"Directory not found: {checkpoint_dir}")
         return
 
-    # Render content - with or without auto-refresh
-    if auto_refresh:
-        @st.fragment(run_every=refresh_sec)
-        def auto_refresh_wrapper():
-            render_dashboard_content(checkpoint_dir)
-        auto_refresh_wrapper()
-    else:
-        render_dashboard_content(checkpoint_dir)
+    # Render content - each tab has its own fragment for independent refresh
+    render_dashboard_content(checkpoint_dir, refresh_sec)
 
 
 if __name__ == "__main__":
