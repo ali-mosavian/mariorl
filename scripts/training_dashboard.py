@@ -118,7 +118,8 @@ def render_learner_tab(df: pd.DataFrame) -> None:
 
     latest = df.iloc[-1]
 
-    # Key metrics row
+    # Key metrics - row 1: Progress
+    st.caption("PROGRESS")
     cols = st.columns(6)
     cols[0].metric("Updates", f"{int(latest['update']):,}")
     cols[1].metric("Timesteps", f"{int(latest['timesteps']):,}")
@@ -127,9 +128,19 @@ def render_learner_tab(df: pd.DataFrame) -> None:
     cols[4].metric("🏁 Flags", f"{int(latest.get('total_flags', 0))}")
     cols[5].metric("💀 Deaths", f"{int(latest.get('total_deaths', 0)):,}")
 
+    # Key metrics - row 2: Performance
+    st.caption("PERFORMANCE (rolling averages)")
+    cols2 = st.columns(4)
+    avg_reward = latest.get('avg_reward', 0)
+    reward_color = "normal" if avg_reward >= 0 else "inverse"
+    cols2[0].metric("Avg Reward", f"{avg_reward:,.0f}")
+    cols2[1].metric("Avg Speed", f"{latest.get('avg_speed', 0):.2f}")
+    cols2[2].metric("Entropy", f"{latest.get('avg_entropy', 0):.3f}")
+    cols2[3].metric("LR", f"{latest['lr']:.2e}")
+
     st.divider()
 
-    # Charts in 2x2 grid
+    # Charts - row 1: Training health
     col1, col2 = st.columns(2)
 
     with col1:
@@ -146,17 +157,33 @@ def render_learner_tab(df: pd.DataFrame) -> None:
         ], "Q-Values")
         st.plotly_chart(fig, use_container_width=True)
 
+    # Charts - row 2: Performance trends
     col3, col4 = st.columns(2)
 
     with col3:
+        fig = make_chart(df, [
+            ("avg_reward", "Avg Reward", "green"),
+        ], "Average Reward (across workers)")
+        st.plotly_chart(fig, use_container_width=True)
+
+    with col4:
+        fig = make_chart(df, [
+            ("avg_speed", "Avg Speed", "teal"),
+        ], "Average Speed (x-pos / game-time)")
+        st.plotly_chart(fig, use_container_width=True)
+
+    # Charts - row 3: Diagnostics
+    col5, col6 = st.columns(2)
+
+    with col5:
         fig = make_chart(df, [
             ("grad_norm", "Grad Norm", "yellow"),
         ], "Gradient Norm")
         st.plotly_chart(fig, use_container_width=True)
 
-    with col4:
+    with col6:
         fig = make_chart(df, [
-            ("grads_per_sec", "Grads/sec", "green"),
+            ("grads_per_sec", "Grads/sec", "mauve"),
         ], "Throughput")
         st.plotly_chart(fig, use_container_width=True)
 
@@ -165,8 +192,8 @@ def render_learner_tab(df: pd.DataFrame) -> None:
         dcols = st.columns(4)
         dcols[0].metric("Weight Version", f"{int(latest['weight_version'])}")
         dcols[1].metric("Gradients Received", f"{int(latest['gradients_received']):,}")
-        dcols[2].metric("Learning Rate", f"{latest['lr']:.2e}")
-        dcols[3].metric("Avg Reward", f"{latest.get('avg_reward', 0):.1f}")
+        dcols[2].metric("Grad Norm", f"{latest.get('grad_norm', 0):.2f}")
+        dcols[3].metric("Packets/Update", f"{int(latest.get('num_packets', 0))}")
 
 
 def render_workers_tab(workers: dict[int, pd.DataFrame]) -> None:
@@ -187,6 +214,7 @@ def render_workers_tab(workers: dict[int, pd.DataFrame]) -> None:
             "Episodes": int(latest["episode"]),
             "Best X": int(latest["best_x_ever"]),
             "Avg Reward": f"{latest['rolling_avg_reward']:.0f}",
+            "Avg Speed": f"{latest.get('avg_speed', 0):.2f}",
             "ε": f"{latest['epsilon']:.3f}",
             "Buffer %": f"{latest['buffer_fill_pct']:.0f}%",
             "Deaths": int(latest["deaths"]),
@@ -198,22 +226,22 @@ def render_workers_tab(workers: dict[int, pd.DataFrame]) -> None:
 
     st.divider()
 
-    # Comparison charts
+    # Comparison charts - row 1
     col1, col2 = st.columns(2)
+    colors = list(COLORS.values())
 
     with col1:
         fig = go.Figure()
-        colors = list(COLORS.values())
         for i, (wid, df) in enumerate(sorted(workers.items())):
             if len(df) > 0:
                 fig.add_trace(go.Scatter(
-                    x=df["episode"], y=df["reward"],
+                    x=df["episode"], y=df["rolling_avg_reward"],
                     name=f"W{wid}", line=dict(color=colors[i % len(colors)], width=1.5),
                     opacity=0.8,
                 ))
         fig.update_layout(
-            title="Episode Reward by Worker",
-            height=300,
+            title="Rolling Avg Reward by Worker",
+            height=280,
             margin=dict(l=0, r=0, t=30, b=0),
             template="plotly_dark",
             paper_bgcolor="rgba(0,0,0,0)",
@@ -229,13 +257,60 @@ def render_workers_tab(workers: dict[int, pd.DataFrame]) -> None:
         for i, (wid, df) in enumerate(sorted(workers.items())):
             if len(df) > 0:
                 fig.add_trace(go.Scatter(
+                    x=df["episode"], y=df["avg_speed"],
+                    name=f"W{wid}", line=dict(color=colors[i % len(colors)], width=1.5),
+                    opacity=0.8,
+                ))
+        fig.update_layout(
+            title="Rolling Avg Speed by Worker",
+            height=280,
+            margin=dict(l=0, r=0, t=30, b=0),
+            template="plotly_dark",
+            paper_bgcolor="rgba(0,0,0,0)",
+            plot_bgcolor="rgba(0,0,0,0)",
+            xaxis=dict(title="Episode", gridcolor="#313244"),
+            yaxis=dict(gridcolor="#313244"),
+            showlegend=False,
+        )
+        st.plotly_chart(fig, use_container_width=True)
+
+    # Comparison charts - row 2
+    col3, col4 = st.columns(2)
+
+    with col3:
+        fig = go.Figure()
+        for i, (wid, df) in enumerate(sorted(workers.items())):
+            if len(df) > 0:
+                fig.add_trace(go.Scatter(
                     x=df["episode"], y=df["best_x_ever"],
                     name=f"W{wid}", line=dict(color=colors[i % len(colors)], width=1.5),
                     opacity=0.8,
                 ))
         fig.update_layout(
             title="Best X Position by Worker",
-            height=300,
+            height=280,
+            margin=dict(l=0, r=0, t=30, b=0),
+            template="plotly_dark",
+            paper_bgcolor="rgba(0,0,0,0)",
+            plot_bgcolor="rgba(0,0,0,0)",
+            xaxis=dict(title="Episode", gridcolor="#313244"),
+            yaxis=dict(gridcolor="#313244"),
+            showlegend=False,
+        )
+        st.plotly_chart(fig, use_container_width=True)
+
+    with col4:
+        fig = go.Figure()
+        for i, (wid, df) in enumerate(sorted(workers.items())):
+            if len(df) > 0:
+                fig.add_trace(go.Scatter(
+                    x=df["episode"], y=df["epsilon"],
+                    name=f"W{wid}", line=dict(color=colors[i % len(colors)], width=1.5),
+                    opacity=0.8,
+                ))
+        fig.update_layout(
+            title="Epsilon Decay by Worker",
+            height=280,
             margin=dict(l=0, r=0, t=30, b=0),
             template="plotly_dark",
             paper_bgcolor="rgba(0,0,0,0)",

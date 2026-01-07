@@ -181,6 +181,7 @@ class DDQNLearner:
     # Aggregated worker metrics
     _worker_avg_rewards: Dict[int, float] = field(init=False, default_factory=dict)
     _worker_avg_speeds: Dict[int, float] = field(init=False, default_factory=dict)
+    _worker_avg_time_to_flag: Dict[int, float] = field(init=False, default_factory=dict)
     _worker_deaths: Dict[int, int] = field(init=False, default_factory=dict)
     _worker_flags: Dict[int, int] = field(init=False, default_factory=dict)
     _worker_best_x: Dict[int, int] = field(init=False, default_factory=dict)
@@ -269,6 +270,7 @@ class DDQNLearner:
                     "num_packets",
                     "avg_reward",
                     "avg_speed",
+                    "avg_time_to_flag",
                     "avg_entropy",
                     "total_deaths",
                     "total_flags",
@@ -407,6 +409,8 @@ class DDQNLearner:
                 self._worker_avg_rewards[worker_id] = metrics["avg_reward"]
             if "avg_speed" in metrics:
                 self._worker_avg_speeds[worker_id] = metrics["avg_speed"]
+            if "avg_time_to_flag" in metrics:
+                self._worker_avg_time_to_flag[worker_id] = metrics["avg_time_to_flag"]
             if "total_deaths" in metrics:
                 self._worker_deaths[worker_id] = metrics["total_deaths"]
             if "total_flags" in metrics:
@@ -464,6 +468,9 @@ class DDQNLearner:
         total_episodes = sum(self.worker_episodes.values())
         avg_reward = np.mean(list(self._worker_avg_rewards.values())) if self._worker_avg_rewards else 0.0
         avg_speed = np.mean(list(self._worker_avg_speeds.values())) if self._worker_avg_speeds else 0.0
+        # Only average non-zero values for time to flag (0 means no flags captured yet)
+        flag_times = [t for t in self._worker_avg_time_to_flag.values() if t > 0]
+        avg_time_to_flag = np.mean(flag_times) if flag_times else 0.0
         avg_entropy = np.mean(list(self._worker_entropy.values())) if self._worker_entropy else 0.0
         total_deaths = sum(self._worker_deaths.values())
         total_flags = sum(self._worker_flags.values())
@@ -488,6 +495,7 @@ class DDQNLearner:
                 self.last_num_packets,
                 avg_reward,
                 avg_speed,
+                avg_time_to_flag,
                 avg_entropy,
                 total_deaths,
                 total_flags,
@@ -508,6 +516,8 @@ class DDQNLearner:
             # Compute aggregated metrics from all workers
             avg_reward = np.mean(list(self._worker_avg_rewards.values())) if self._worker_avg_rewards else 0.0
             avg_speed = np.mean(list(self._worker_avg_speeds.values())) if self._worker_avg_speeds else 0.0
+            flag_times = [t for t in self._worker_avg_time_to_flag.values() if t > 0]
+            avg_time_to_flag = np.mean(flag_times) if flag_times else 0.0
             avg_entropy = np.mean(list(self._worker_entropy.values())) if self._worker_entropy else 0.0
             total_deaths = sum(self._worker_deaths.values())
             total_flags = sum(self._worker_flags.values())
@@ -530,6 +540,7 @@ class DDQNLearner:
                     # Aggregated worker metrics for graphs
                     "avg_reward": avg_reward,
                     "avg_speed": avg_speed,
+                    "avg_time_to_flag": avg_time_to_flag,
                     "avg_entropy": avg_entropy,
                     "total_deaths": total_deaths,
                     "total_flags": total_flags,

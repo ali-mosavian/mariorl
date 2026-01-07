@@ -460,6 +460,7 @@ class DDQNWorker:
             "entropy": self.metrics.avg_entropy,
             "avg_reward": self.metrics.avg_reward,
             "avg_speed": self.metrics.avg_speed,
+            "avg_time_to_flag": self.metrics.avg_time_to_flag,
             "total_deaths": self.metrics.deaths,
             "total_flags": self.metrics.flags,
             "best_x_ever": self.metrics.best_x_ever,
