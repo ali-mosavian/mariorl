@@ -90,11 +90,11 @@ class GrayScaleObservation(gym.ObservationWrapper):
         self.observation_space = Box(low=0, high=255, shape=new_shape, dtype=np.uint8)
 
     def observation(self, obs):
-        # RGB to grayscale conversion using standard weights
-        obs = np.dot(obs[..., :3], [0.299, 0.587, 0.114]).astype(np.uint8)
+        # cv2.cvtColor is much faster than np.dot for grayscale conversion
+        gray = cv2.cvtColor(obs, cv2.COLOR_RGB2GRAY)
         if self.keep_dim:
-            obs = np.expand_dims(obs, axis=-1)
-        return obs
+            gray = gray[:, :, np.newaxis]
+        return gray
 
 
 class FrameStack(gym.Wrapper):

@@ -9,16 +9,14 @@ from typing import Any
 from typing import Tuple
 
 import numpy as np
-from gymnasium.spaces import Box
 from nes_py.wrappers import JoypadSpace
-from gymnasium.wrappers import GrayscaleObservation
-from gymnasium.wrappers import TransformObservation
 from gymnasium.wrappers import FrameStackObservation
 from gym_super_mario_bros import actions as smb_actions
 
 from mario_rl.core.config import LevelType
 from mario_rl.environment.wrappers import SkipFrame
 from mario_rl.environment.wrappers import ResizeObservation
+from mario_rl.environment.wrappers import GrayScaleObservation
 from mario_rl.environment.mariogym import SuperMarioBrosMultiLevel
 
 
@@ -89,13 +87,10 @@ def create_mario_env(
     base_env = SuperMarioBrosMultiLevel(level=level)
     env = JoypadSpace(base_env, actions=smb_actions.COMPLEX_MOVEMENT)
     env = SkipFrame(env, skip=4, render_frames=render_frames)
-    env = GrayscaleObservation(env, keep_dim=True)
+    env = GrayScaleObservation(env, keep_dim=True)
     env = ResizeObservation(env, shape=64)
-    env = TransformObservation(
-        env,
-        func=lambda x: x / 255.0,
-        observation_space=Box(low=0.0, high=1.0, shape=(64, 64, 1), dtype=np.float32),
-    )
+    # Note: Normalization (x/255) is done in the neural network on GPU
+    # This keeps observations as uint8 (smaller memory, faster transfer)
     fstack = FrameStackObservation(env, stack_size=4)
 
     return MarioEnvironment(env=fstack, base_env=base_env, fstack=fstack)
