@@ -213,6 +213,7 @@ def run_learner_silent(
 @click.option("--restore-snapshot", type=str, default=None, help="Restore from specific snapshot file")
 @click.option("--no-game-snapshots", is_flag=True, help="Disable game state snapshots (save/restore on death)")
 @click.option("--no-per", is_flag=True, help="Disable Prioritized Experience Replay (use uniform sampling)")
+@click.option("--reward-clip", default=1.0, help="Clip rewards to [-x, x] (0 to disable, default 1.0 like DQN paper)")
 def main(
     workers: int,
     level: str,
@@ -237,6 +238,7 @@ def main(
     restore_snapshot: str | None,
     no_game_snapshots: bool,
     no_per: bool,
+    reward_clip: float,
 ) -> None:
     """Train Mario using Distributed DDQN with async gradient updates."""
     # Parse level
@@ -349,6 +351,7 @@ def main(
             steps_per_collection=collect_steps,
             train_steps=train_steps,
             max_grad_norm=max_grad_norm,
+            reward_clip=reward_clip,
             buffer=buffer_config,
             exploration=exploration_config,
             snapshot=snapshot_config,

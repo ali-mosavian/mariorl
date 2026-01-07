@@ -306,15 +306,22 @@ class DDQNWorker:
 
             is_dead = info.get("is_dead", False) or info.get("is_dying", False)
 
+            # Clip reward to prevent Q-value explosion (DQN paper uses [-1, 1])
+            raw_reward = reward
+            if self.config.reward_clip > 0:
+                clipped_reward = float(np.clip(reward, -self.config.reward_clip, self.config.reward_clip))
+            else:
+                clipped_reward = reward
+
             # Process states
             state_processed = self._preprocess_state(state)
             next_state_processed = self._preprocess_state(next_state)
 
-            # Add to buffers using Transition
+            # Add to buffers using clipped reward for training
             transition = Transition(
                 state=state_processed,
                 action=action,
-                reward=reward,
+                reward=clipped_reward,
                 next_state=next_state_processed,
                 done=done,
             )
@@ -322,9 +329,9 @@ class DDQNWorker:
             if n_step_transition is not None:
                 self.buffer.add(n_step_transition)
 
-            # Update tracking
+            # Update tracking with RAW reward (for logging/analysis)
             x_pos = info.get("x_pos", 0)
-            self.episode.step(reward, x_pos)
+            self.episode.step(raw_reward, x_pos)
             self.metrics.total_steps += 1
             self.metrics.update_best_x(x_pos)
 

@@ -60,6 +60,10 @@ class WorkerConfig:
     weight_sync_interval: float = 5.0  # Seconds between weight syncs
     max_grad_norm: float = 10.0
 
+    # Reward normalization (clips rewards to [-reward_clip, +reward_clip])
+    # Set to 0 to disable clipping. Default 1.0 matches DQN paper.
+    reward_clip: float = 1.0
+
     # Device (None = auto-detect)
     device: str | None = None
 
@@ -78,6 +82,7 @@ class WorkerConfig:
             train_steps=self.train_steps,
             weight_sync_interval=self.weight_sync_interval,
             max_grad_norm=self.max_grad_norm,
+            reward_clip=self.reward_clip,
             device=self.device,
             buffer=self.buffer,
             exploration=ExplorationConfig(
@@ -142,6 +147,7 @@ class TrainingConfig:
                 train_steps=self.worker.train_steps,
                 weight_sync_interval=self.worker.weight_sync_interval,
                 max_grad_norm=self.worker.max_grad_norm,
+                reward_clip=self.worker.reward_clip,
                 device=self.worker.device,
                 buffer=self.worker.buffer,
                 exploration=ExplorationConfig(
