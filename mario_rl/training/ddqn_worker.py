@@ -256,19 +256,12 @@ class DDQNWorker:
                 # Read last episode number from CSV for graph continuity
                 try:
                     with open(self._episodes_csv, "r") as f:
-                        # Read last line efficiently
-                        f.seek(0, 2)  # Go to end
-                        pos = f.tell()
-                        # Read backwards to find last newline
-                        while pos > 0:
-                            pos -= 1
-                            f.seek(pos)
-                            if f.read(1) == '\n' and pos < f.seek(0, 2) - 1:
-                                break
-                        last_line = f.readline().strip()
-                        if last_line and not last_line.startswith("timestamp"):
-                            last_episode = int(last_line.split(",")[1])
-                            self.metrics.episode_count = last_episode
+                        lines = f.readlines()
+                        if len(lines) > 1:  # Has data beyond header
+                            last_line = lines[-1].strip()
+                            if last_line:
+                                last_episode = int(last_line.split(",")[1])
+                                self.metrics.episode_count = last_episode
                 except Exception:
                     pass  # Keep default episode_count = 0
 
