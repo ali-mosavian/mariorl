@@ -433,8 +433,12 @@ class DDQNLearner:
             self.total_timesteps_collected += packet.timesteps
             self.worker_episodes[packet.worker_id] = packet.episodes
 
-        # Note: Worker metrics (loss, q_mean, etc.) are now tracked via UI queue,
-        # not in gradient packets. The learner computes its own grad_norm.
+        # Average worker-computed metrics from gradient packets
+        if gradient_packets:
+            self.last_loss = sum(p.loss for p in gradient_packets) / len(gradient_packets)
+            self.last_q_mean = sum(p.q_mean for p in gradient_packets) / len(gradient_packets)
+            self.last_td_error = sum(p.td_error for p in gradient_packets) / len(gradient_packets)
+
         self.last_grad_norm = grad_norm.item() if isinstance(grad_norm, torch.Tensor) else grad_norm
         self.last_num_packets = num_packets
 

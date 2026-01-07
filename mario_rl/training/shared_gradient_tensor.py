@@ -29,6 +29,10 @@ class GradientPacket:
     worker_id: int
     timesteps: int
     episodes: int
+    # Worker-computed metrics (optional, for learner display)
+    loss: float = 0.0
+    q_mean: float = 0.0
+    td_error: float = 0.0
 
 
 # Per-slot header layout (64 bytes):
@@ -38,7 +42,10 @@ class GradientPacket:
 # - worker_id: 4 bytes (uint32) - worker ID
 # - timesteps: 4 bytes (uint32) - timesteps in this gradient batch
 # - episodes: 4 bytes (uint32) - total episodes from worker
-# - padding: 43 bytes
+# - loss: 4 bytes (float32) - worker-computed loss
+# - q_mean: 4 bytes (float32) - worker-computed Q mean
+# - td_error: 4 bytes (float32) - worker-computed TD error
+# - padding: 31 bytes
 SLOT_HEADER_SIZE = 64
 SEQ_OFFSET = 0
 READY_OFFSET = 4
@@ -46,6 +53,9 @@ VERSION_OFFSET = 5
 WORKER_ID_OFFSET = 9
 TIMESTEPS_OFFSET = 13
 EPISODES_OFFSET = 17
+LOSS_OFFSET = 21
+Q_MEAN_OFFSET = 25
+TD_ERROR_OFFSET = 29
 
 # Global header (64 bytes at start of file):
 # - write_idx: 4 bytes (uint32) - next slot to write
@@ -202,8 +212,8 @@ class SharedGradientTensor:
         """Write global header."""
         self._mmap[0:8] = struct.pack("II", write_idx, read_idx)
 
-    def _read_slot_header(self, slot_idx: int) -> tuple[int, int, int, int, int, int]:
-        """Read slot header. Returns (seq, ready, version, worker_id, timesteps, episodes)."""
+    def _read_slot_header(self, slot_idx: int) -> tuple[int, int, int, int, int, int, float, float, float]:
+        """Read slot header. Returns (seq, ready, version, worker_id, timesteps, episodes, loss, q_mean, td_error)."""
         offset = self._slot_offset(slot_idx)
         seq = struct.unpack("I", self._mmap[offset : offset + 4])[0]
         ready = self._mmap[offset + READY_OFFSET]
@@ -211,7 +221,10 @@ class SharedGradientTensor:
         worker_id = struct.unpack("I", self._mmap[offset + WORKER_ID_OFFSET : offset + WORKER_ID_OFFSET + 4])[0]
         timesteps = struct.unpack("I", self._mmap[offset + TIMESTEPS_OFFSET : offset + TIMESTEPS_OFFSET + 4])[0]
         episodes = struct.unpack("I", self._mmap[offset + EPISODES_OFFSET : offset + EPISODES_OFFSET + 4])[0]
-        return seq, ready, version, worker_id, timesteps, episodes
+        loss = struct.unpack("f", self._mmap[offset + LOSS_OFFSET : offset + LOSS_OFFSET + 4])[0]
+        q_mean = struct.unpack("f", self._mmap[offset + Q_MEAN_OFFSET : offset + Q_MEAN_OFFSET + 4])[0]
+        td_error = struct.unpack("f", self._mmap[offset + TD_ERROR_OFFSET : offset + TD_ERROR_OFFSET + 4])[0]
+        return seq, ready, version, worker_id, timesteps, episodes, loss, q_mean, td_error
 
     def _write_slot_header(
         self,
@@ -222,6 +235,9 @@ class SharedGradientTensor:
         worker_id: int = 0,
         timesteps: int = 0,
         episodes: int = 0,
+        loss: float = 0.0,
+        q_mean: float = 0.0,
+        td_error: float = 0.0,
     ) -> None:
         """Write slot header."""
         offset = self._slot_offset(slot_idx)
@@ -229,6 +245,11 @@ class SharedGradientTensor:
         self._mmap[offset + READY_OFFSET] = ready
         self._mmap[offset + VERSION_OFFSET : offset + VERSION_OFFSET + 4] = struct.pack("I", version)
         self._mmap[offset + WORKER_ID_OFFSET : offset + WORKER_ID_OFFSET + 4] = struct.pack("I", worker_id)
+        self._mmap[offset + TIMESTEPS_OFFSET : offset + TIMESTEPS_OFFSET + 4] = struct.pack("I", timesteps)
+        self._mmap[offset + EPISODES_OFFSET : offset + EPISODES_OFFSET + 4] = struct.pack("I", episodes)
+        self._mmap[offset + LOSS_OFFSET : offset + LOSS_OFFSET + 4] = struct.pack("f", loss)
+        self._mmap[offset + Q_MEAN_OFFSET : offset + Q_MEAN_OFFSET + 4] = struct.pack("f", q_mean)
+        self._mmap[offset + TD_ERROR_OFFSET : offset + TD_ERROR_OFFSET + 4] = struct.pack("f", td_error)
         self._mmap[offset + TIMESTEPS_OFFSET : offset + TIMESTEPS_OFFSET + 4] = struct.pack("I", timesteps)
         self._mmap[offset + EPISODES_OFFSET : offset + EPISODES_OFFSET + 4] = struct.pack("I", episodes)
 
@@ -268,6 +289,9 @@ class SharedGradientTensor:
         worker_id: int = 0,
         timesteps: int = 0,
         episodes: int = 0,
+        loss: float = 0.0,
+        q_mean: float = 0.0,
+        td_error: float = 0.0,
     ) -> bool:
         """
         Write gradients to next slot in ring buffer.
@@ -278,6 +302,9 @@ class SharedGradientTensor:
             worker_id: Worker ID that computed these gradients
             timesteps: Number of timesteps in this gradient batch
             episodes: Total episodes from worker
+            loss: Worker-computed loss value
+            q_mean: Worker-computed mean Q value
+            td_error: Worker-computed TD error
 
         Returns:
             True if write succeeded
@@ -299,6 +326,9 @@ class SharedGradientTensor:
             worker_id=worker_id,
             timesteps=timesteps,
             episodes=episodes,
+            loss=loss,
+            q_mean=q_mean,
+            td_error=td_error,
         )
 
         # 2. Copy gradients to slot's numpy array
@@ -325,6 +355,9 @@ class SharedGradientTensor:
             worker_id=worker_id,
             timesteps=timesteps,
             episodes=episodes,
+            loss=loss,
+            q_mean=q_mean,
+            td_error=td_error,
         )
 
         # 4. Increment write index
@@ -349,7 +382,7 @@ class SharedGradientTensor:
         slot_idx = read_idx % self.num_slots
 
         # 1. Check ready and seq
-        seq1, ready, version, worker_id, timesteps, episodes = self._read_slot_header(slot_idx)
+        seq1, ready, version, worker_id, timesteps, episodes, loss, q_mean, td_error = self._read_slot_header(slot_idx)
 
         if ready != 1 or (seq1 % 2) == 1:
             return None  # Not ready or write in progress
@@ -381,6 +414,9 @@ class SharedGradientTensor:
             worker_id=worker_id,
             timesteps=timesteps,
             episodes=episodes,
+            loss=loss,
+            q_mean=q_mean,
+            td_error=td_error,
         )
 
     def read_latest(self) -> GradientPacket | None:
@@ -402,14 +438,14 @@ class SharedGradientTensor:
         slot_idx = latest_idx % self.num_slots
 
         # 1. Check ready and seq
-        seq1, ready, version, worker_id, timesteps, episodes = self._read_slot_header(slot_idx)
+        seq1, ready, version, worker_id, timesteps, episodes, loss, q_mean, td_error = self._read_slot_header(slot_idx)
 
         if ready != 1 or (seq1 % 2) == 1:
             # Latest not ready, try previous
             if latest_idx > read_idx:
                 latest_idx -= 1
                 slot_idx = latest_idx % self.num_slots
-                seq1, ready, version, worker_id, timesteps, episodes = self._read_slot_header(slot_idx)
+                seq1, ready, version, worker_id, timesteps, episodes, loss, q_mean, td_error = self._read_slot_header(slot_idx)
                 if ready != 1 or (seq1 % 2) == 1:
                     return None
             else:
@@ -442,6 +478,9 @@ class SharedGradientTensor:
             worker_id=worker_id,
             timesteps=timesteps,
             episodes=episodes,
+            loss=loss,
+            q_mean=q_mean,
+            td_error=td_error,
         )
 
     def close(self) -> None:

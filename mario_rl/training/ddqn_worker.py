@@ -593,6 +593,9 @@ class DDQNWorker:
             worker_id=self.config.worker_id,
             timesteps=self.config.buffer.batch_size,
             episodes=self.metrics.episode_count,
+            loss=metrics["loss"],
+            q_mean=metrics["q_mean"],
+            td_error=metrics["td_error"],
         )
         if success:
             self.metrics.gradients_sent += 1
