@@ -387,29 +387,36 @@ def main(
     if no_ui:
         print("Started learner")
 
-    # Set up signal handler
-    def signal_handler(sig, frame):
+    # Shutdown function
+    def shutdown():
         print("\nShutting down...")
         for p in worker_processes:
-            p.terminate()
-        learner_process.terminate()
-        if ui_process:
+            if p.is_alive():
+                p.terminate()
+        if learner_process.is_alive():
+            learner_process.terminate()
+        if ui_process and ui_process.is_alive():
             ui_process.terminate()
+
+    # Set up signal handler
+    def signal_handler(sig, frame):
+        shutdown()
         sys.exit(0)
 
     signal.signal(signal.SIGINT, signal_handler)
     signal.signal(signal.SIGTERM, signal_handler)
 
-    # Wait for processes
+    # Wait for processes - UI controls lifetime when enabled
     try:
-        learner_process.join()
-    except KeyboardInterrupt:
-        print("\nShutting down...")
-        for p in worker_processes:
-            p.terminate()
-        learner_process.terminate()
         if ui_process:
-            ui_process.terminate()
+            # When UI exits (user pressed 'q'), shut everything down
+            ui_process.join()
+            shutdown()
+        else:
+            # No UI - wait for learner
+            learner_process.join()
+    except KeyboardInterrupt:
+        shutdown()
 
 
 if __name__ == "__main__":
