@@ -306,22 +306,23 @@ class DDQNWorker:
 
             is_dead = info.get("is_dead", False) or info.get("is_dying", False)
 
-            # Clip reward to prevent Q-value explosion (DQN paper uses [-1, 1])
+            # Normalize reward to prevent Q-value explosion
+            # 1. Scale (preserves relative magnitudes - preferred)
+            # 2. Optionally clip (loses magnitude info - use sparingly)
             raw_reward = reward
+            scaled_reward = reward * self.config.reward_scale
             if self.config.reward_clip > 0:
-                clipped_reward = float(np.clip(reward, -self.config.reward_clip, self.config.reward_clip))
-            else:
-                clipped_reward = reward
+                scaled_reward = float(np.clip(scaled_reward, -self.config.reward_clip, self.config.reward_clip))
 
             # Process states
             state_processed = self._preprocess_state(state)
             next_state_processed = self._preprocess_state(next_state)
 
-            # Add to buffers using clipped reward for training
+            # Add to buffers using scaled reward for training
             transition = Transition(
                 state=state_processed,
                 action=action,
-                reward=clipped_reward,
+                reward=scaled_reward,
                 next_state=next_state_processed,
                 done=done,
             )
