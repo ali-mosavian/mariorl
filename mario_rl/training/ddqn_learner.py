@@ -279,12 +279,16 @@ class DDQNLearner:
 
     def save_weights(self) -> None:
         """Save network weights with version for workers to sync."""
-        self.weight_version += 1
-        checkpoint = {
-            "state_dict": self.net.state_dict(),
-            "version": self.weight_version,
-        }
-        torch.save(checkpoint, self.weights_path)
+        try:
+            self.weight_version += 1
+            checkpoint = {
+                "state_dict": self.net.state_dict(),
+                "version": self.weight_version,
+            }
+            torch.save(checkpoint, self.weights_path)
+        except Exception as e:
+            self._log(f"ERROR saving weights: {e}")
+            self.weight_version -= 1  # Rollback version on failure
 
     def save_snapshot(self) -> None:
         """
@@ -292,21 +296,24 @@ class DDQNLearner:
 
         Includes: network, optimizer, scheduler, training state.
         """
-        snapshot = {
-            "net_state_dict": self.net.state_dict(),
-            "optimizer_state_dict": self.optimizer.state_dict(),
-            "scheduler_state_dict": self.scheduler.state_dict(),
-            "update_count": self.update_count,
-            "total_timesteps_collected": self.total_timesteps_collected,
-            "weight_version": self.weight_version,
-            "gradients_received": self.gradients_received,
-            "timestamp": time.time(),
-        }
-        # Atomic write to prevent corruption
-        tmp_path = self._snapshot_path.with_suffix(".pt.tmp")
-        torch.save(snapshot, tmp_path)
-        tmp_path.rename(self._snapshot_path)
-        self._log(f"Snapshot saved: step={self.update_count}, timesteps={self.total_timesteps_collected:,}")
+        try:
+            snapshot = {
+                "net_state_dict": self.net.state_dict(),
+                "optimizer_state_dict": self.optimizer.state_dict(),
+                "scheduler_state_dict": self.scheduler.state_dict(),
+                "update_count": self.update_count,
+                "total_timesteps_collected": self.total_timesteps_collected,
+                "weight_version": self.weight_version,
+                "gradients_received": self.gradients_received,
+                "timestamp": time.time(),
+            }
+            # Atomic write to prevent corruption
+            tmp_path = self._snapshot_path.with_suffix(".pt.tmp")
+            torch.save(snapshot, tmp_path)
+            tmp_path.rename(self._snapshot_path)
+            self._log(f"Snapshot saved: step={self.update_count}, timesteps={self.total_timesteps_collected:,}")
+        except Exception as e:
+            self._log(f"ERROR saving snapshot: {e}")
 
     def restore_snapshot(self, snapshot_path: Path | None = None) -> bool:
         """
@@ -465,42 +472,45 @@ class DDQNLearner:
 
     def _log_metrics(self, lr: float) -> None:
         """Log metrics to CSV."""
-        total_episodes = sum(self.worker_episodes.values())
-        avg_reward = np.mean(list(self._worker_avg_rewards.values())) if self._worker_avg_rewards else 0.0
-        avg_speed = np.mean(list(self._worker_avg_speeds.values())) if self._worker_avg_speeds else 0.0
-        # Only average non-zero values for time to flag (0 means no flags captured yet)
-        flag_times = [t for t in self._worker_avg_time_to_flag.values() if t > 0]
-        avg_time_to_flag = np.mean(flag_times) if flag_times else 0.0
-        avg_entropy = np.mean(list(self._worker_entropy.values())) if self._worker_entropy else 0.0
-        total_deaths = sum(self._worker_deaths.values())
-        total_flags = sum(self._worker_flags.values())
-        global_best_x = max(self._worker_best_x.values()) if self._worker_best_x else 0
+        try:
+            total_episodes = sum(self.worker_episodes.values())
+            avg_reward = np.mean(list(self._worker_avg_rewards.values())) if self._worker_avg_rewards else 0.0
+            avg_speed = np.mean(list(self._worker_avg_speeds.values())) if self._worker_avg_speeds else 0.0
+            # Only average non-zero values for time to flag (0 means no flags captured yet)
+            flag_times = [t for t in self._worker_avg_time_to_flag.values() if t > 0]
+            avg_time_to_flag = np.mean(flag_times) if flag_times else 0.0
+            avg_entropy = np.mean(list(self._worker_entropy.values())) if self._worker_entropy else 0.0
+            total_deaths = sum(self._worker_deaths.values())
+            total_flags = sum(self._worker_flags.values())
+            global_best_x = max(self._worker_best_x.values()) if self._worker_best_x else 0
 
-        with open(self._metrics_csv, "a", newline="") as f:
-            writer = csv.writer(f)
-            writer.writerow([
-                time.time(),
-                self.update_count,
-                self.total_timesteps_collected,
-                total_episodes,
-                self.last_loss,
-                self.last_q_mean,
-                self.last_q_max,
-                self.last_td_error,
-                self.last_grad_norm,
-                lr,
-                self.grads_per_sec,
-                self.gradients_received,
-                self.weight_version,
-                self.last_num_packets,
-                avg_reward,
-                avg_speed,
-                avg_time_to_flag,
-                avg_entropy,
-                total_deaths,
-                total_flags,
-                global_best_x,
-            ])
+            with open(self._metrics_csv, "a", newline="") as f:
+                writer = csv.writer(f)
+                writer.writerow([
+                    time.time(),
+                    self.update_count,
+                    self.total_timesteps_collected,
+                    total_episodes,
+                    self.last_loss,
+                    self.last_q_mean,
+                    self.last_q_max,
+                    self.last_td_error,
+                    self.last_grad_norm,
+                    lr,
+                    self.grads_per_sec,
+                    self.gradients_received,
+                    self.weight_version,
+                    self.last_num_packets,
+                    avg_reward,
+                    avg_speed,
+                    avg_time_to_flag,
+                    avg_entropy,
+                    total_deaths,
+                    total_flags,
+                    global_best_x,
+                ])
+        except Exception as e:
+            self._log(f"ERROR logging metrics: {e}")
 
     def _send_ui_status(self, lr: float) -> None:
         """Send status to UI queue."""

@@ -480,7 +480,8 @@ def main(
     # Create queues
     # Larger queue to reduce worker blocking
     # Workers send train_steps (4) gradients per cycle, so need more buffer
-    gradient_queue: Queue = Queue(maxsize=workers * 8)
+    # Increased to 32 per worker to handle learner stalls better
+    gradient_queue: Queue = Queue(maxsize=workers * 32)
     ui_queue: Queue | None = Queue() if not no_ui else None
     status_queue: Queue = Queue(maxsize=workers * 10)  # For worker health monitoring
 
@@ -597,6 +598,9 @@ def main(
     if no_ui:
         print("Started worker monitor")
 
+    # Store main process PID for signal handler check
+    main_pid = os.getpid()
+
     # Shutdown function
     def shutdown():
         print("\nShutting down...")
@@ -609,10 +613,16 @@ def main(
         if ui_process and ui_process.is_alive():
             ui_process.terminate()
 
-    # Set up signal handler
+    # Set up signal handler (only runs shutdown in main process)
     def signal_handler(sig, frame):
-        shutdown()
-        sys.exit(0)
+        # Only run shutdown if we're in the main process
+        # Child processes inherit this handler but shouldn't execute shutdown
+        if os.getpid() == main_pid:
+            shutdown()
+            sys.exit(0)
+        else:
+            # Child process received signal - just exit gracefully
+            sys.exit(0)
 
     signal.signal(signal.SIGINT, signal_handler)
     signal.signal(signal.SIGTERM, signal_handler)
