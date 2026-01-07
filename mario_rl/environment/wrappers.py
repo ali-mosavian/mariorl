@@ -22,7 +22,12 @@ class ResizeObservation(gym.ObservationWrapper):
     def observation(self, observation):
         # cv2.resize is ~10x faster than skimage.transform.resize
         # INTER_AREA is best for downscaling (avoids aliasing)
-        return cv2.resize(observation, self.shape, interpolation=cv2.INTER_AREA)
+        # Note: cv2.resize takes (width, height), but self.shape is (height, width)
+        resized = cv2.resize(observation, (self.shape[1], self.shape[0]), interpolation=cv2.INTER_AREA)
+        # cv2.resize strips single channel dim, restore it if needed
+        if len(observation.shape) == 3 and observation.shape[2] == 1 and len(resized.shape) == 2:
+            resized = resized[:, :, np.newaxis]
+        return resized
 
 
 class SkipFrame(gym.Wrapper):
