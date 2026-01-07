@@ -539,25 +539,23 @@ class TrainingUI:
         world_model_height = 7 if self.use_world_model else 0  # Increased for charts
         ppo_height = 7 if self.use_ppo else 0  # PPO section
         learner_height = 7 if not self.use_world_model and not self.use_ppo else 0  # Standard DQN learner
-        worker_height = 4  # Increased for convergence metrics line
-        workers_total_height = self.num_workers * worker_height
         convergence_height = 4  # Global convergence charts
+
+        # Workers grid: calculate columns and rows dynamically
+        min_worker_width = 48
+        num_cols = max(1, width // min_worker_width)
+        num_rows = (self.num_workers + num_cols - 1) // num_cols
+        workers_total_height = num_rows * 4 + 1  # (separator + 3 content) per row + bottom border
 
         # Graphs section - show if we have distributed DDQN data and enough height
         has_graph_data = len(self.graph_reward_history) > 2
-        graphs_height = 12 if has_graph_data and height > 40 else 0
+        # Calculate available space for graphs
+        used_height = header_height + world_model_height + ppo_height + learner_height + workers_total_height + convergence_height + 3
+        available_for_graphs_and_logs = height - used_height
+        # Only show graphs if we have enough space (need at least 5 lines for logs)
+        graphs_height = 12 if has_graph_data and available_for_graphs_and_logs > 17 else 0
 
-        log_height = (
-            height
-            - header_height
-            - world_model_height
-            - ppo_height
-            - learner_height
-            - workers_total_height
-            - convergence_height
-            - graphs_height
-            - 3
-        )
+        log_height = max(3, available_for_graphs_and_logs - graphs_height)
 
         current_y = 0
 
@@ -586,10 +584,9 @@ class TrainingUI:
             self._draw_graphs_section(stdscr, current_y, width, graphs_height)
             current_y += graphs_height
 
-        # Worker sections
-        for i in range(self.num_workers):
-            self._draw_worker(stdscr, current_y, width, worker_height, i)
-            current_y += worker_height
+        # Worker sections - compact multi-column grid
+        workers_height = self._draw_workers_grid(stdscr, current_y, width)
+        current_y += workers_height
 
         # Separator
         stdscr.addstr(current_y, 0, "─" * (width - 1), curses.A_DIM)
@@ -975,6 +972,176 @@ class TrainingUI:
                     stdscr.addstr(f"  ⚠ idle {idle_secs}s", curses.color_pair(3) | curses.A_BOLD)
         else:
             stdscr.addstr(y + 1, 4, "Starting...", curses.A_DIM)
+
+    def _draw_workers_grid(self, stdscr, y: int, width: int) -> int:
+        """Draw workers in a compact multi-column grid layout. Returns height used."""
+        screen_height = stdscr.getmaxyx()[0]
+
+        # Calculate columns based on width (minimum 48 chars per worker including borders)
+        min_worker_width = 48
+        num_cols = max(1, width // min_worker_width)
+        col_width = width // num_cols
+
+        # Calculate rows needed
+        num_rows = (self.num_workers + num_cols - 1) // num_cols
+        content_lines = 3  # 3 lines of worker content per row
+
+        rows_drawn = 0
+        current_y = y
+
+        for row in range(num_rows):
+            # Check if we have space for this row (need content_lines + 1 for separator)
+            if current_y + content_lines >= screen_height - 3:
+                break
+
+            # Draw horizontal separator line
+            try:
+                line_parts = []
+                for col in range(num_cols):
+                    if row == 0:
+                        # Top border
+                        left = "┌" if col == 0 else "┬"
+                    else:
+                        # Row separator
+                        left = "├" if col == 0 else "┼"
+                    line_parts.append(left + "─" * (col_width - 1))
+                # Add right edge
+                right = "┐" if row == 0 else "┤"
+                stdscr.addstr(current_y, 0, "".join(line_parts)[:width-1] + right, curses.A_DIM)
+            except curses.error:
+                pass
+            current_y += 1
+
+            # Draw worker content for this row
+            for line in range(content_lines):
+                for col in range(num_cols):
+                    worker_id = row * num_cols + col
+                    col_x = col * col_width
+
+                    # Draw left border
+                    try:
+                        stdscr.addstr(current_y, col_x, "│", curses.A_DIM)
+                    except curses.error:
+                        pass
+
+                    # Draw worker content on first pass only
+                    if line == 0 and worker_id < self.num_workers:
+                        self._draw_worker_compact(stdscr, current_y, col_x + 1, col_width - 1, worker_id)
+
+                # Draw right border
+                try:
+                    stdscr.addstr(current_y, num_cols * col_width, "│", curses.A_DIM)
+                except curses.error:
+                    pass
+
+                current_y += 1
+
+            rows_drawn += 1
+
+        # Draw bottom border
+        if rows_drawn > 0:
+            try:
+                line_parts = []
+                for col in range(num_cols):
+                    left = "└" if col == 0 else "┴"
+                    line_parts.append(left + "─" * (col_width - 1))
+                stdscr.addstr(current_y, 0, "".join(line_parts)[:width-1] + "┘", curses.A_DIM)
+            except curses.error:
+                pass
+            current_y += 1
+
+        return current_y - y
+
+    def _draw_worker_compact(self, stdscr, y: int, x: int, width: int, worker_id: int):
+        """Draw a compact 3-line worker display within a column."""
+        ws = self.worker_statuses.get(worker_id, {})
+
+        # Header with worker ID and level
+        current_level = ws.get("current_level", "?") if ws else "?"
+        header = f"W{worker_id}[{current_level}]"
+        try:
+            stdscr.addstr(y, x, header, curses.A_BOLD | curses.color_pair(5))
+        except curses.error:
+            return
+
+        if not ws:
+            try:
+                stdscr.addstr(y, x + len(header) + 1, "Starting...", curses.A_DIM)
+            except curses.error:
+                pass
+            return
+
+        # Extract all metrics
+        episode = ws.get("episode", 0)
+        step = ws.get("step", 0)
+        x_pos = ws.get("x_pos", 0)
+        game_time = ws.get("game_time", 0)
+        best_x_ever = ws.get("best_x_ever", 0)
+        epsilon = ws.get("epsilon", 1.0)
+        steps_per_sec = ws.get("steps_per_sec", 0)
+        reward = ws.get("reward", 0)
+        deaths = ws.get("deaths", 0)
+        flags = ws.get("flags", 0)
+        rolling_avg_reward = ws.get("rolling_avg_reward", 0)
+        buffer_fill_pct = ws.get("buffer_fill_pct", 0)
+        can_train = ws.get("can_train", False)
+        avg_speed = ws.get("avg_speed", 0)
+        snapshot_restores = ws.get("snapshot_restores", 0)
+        last_weight_sync = ws.get("last_weight_sync", 0)
+
+        # Calculate sync time string
+        if last_weight_sync > 0:
+            seconds_ago = int(time.time() - last_weight_sync)
+            sync_str = f"{seconds_ago}s" if seconds_ago < 60 else f"{seconds_ago // 60}m"
+        else:
+            sync_str = "-"
+
+        try:
+            # Line 1: header + Ep, Step, X, Time, sps (ASCII for reliable display)
+            line1 = f" Ep:{episode:3d} St:{step:3d} X:{x_pos:4d} T:{game_time:3d} {steps_per_sec:2.0f}sps"
+            stdscr.addstr(y, x + len(header), line1[: width - len(header) - 1])
+
+            # Line 2: reward, deaths, flags, restores, epsilon (ASCII for reliable display)
+            stdscr.addstr(y + 1, x, f"r={reward:6.0f} D:")
+
+            death_color = curses.color_pair(3) if deaths > 0 else curses.A_DIM
+            stdscr.addstr(f"{deaths:2d}", death_color)
+
+            flag_color = curses.color_pair(1) if flags > 0 else curses.A_DIM
+            stdscr.addstr(" F:")
+            stdscr.addstr(f"{flags}", flag_color)
+
+            stdscr.addstr(f" R:{snapshot_restores}")
+            stdscr.addstr(f" e={epsilon:.2f}")
+
+            # Line 3: avg reward, BestX, Spd, Buf%, sync (ASCII for reliable display)
+            stdscr.addstr(y + 2, x, "Avg:")
+            avg_color = curses.color_pair(1) if rolling_avg_reward > 0 else curses.color_pair(3)
+            stdscr.addstr(f"{rolling_avg_reward:5.0f}", avg_color)
+
+            stdscr.addstr(f" Bst:{best_x_ever:4d}")
+            stdscr.addstr(f" Spd:{avg_speed:4.1f}")
+
+            # Buffer fill with color
+            if buffer_fill_pct >= 50:
+                buf_color = curses.color_pair(1)
+            elif buffer_fill_pct >= 10:
+                buf_color = curses.color_pair(2)
+            else:
+                buf_color = curses.color_pair(3)
+            stdscr.addstr(" ")
+            stdscr.addstr(f"{buffer_fill_pct:3.0f}%", buf_color)
+
+            # Training indicator
+            train_char = "✓" if can_train else "✗"
+            train_color = curses.color_pair(1) if can_train else curses.color_pair(3)
+            stdscr.addstr(train_char, train_color)
+
+            # Sync indicator
+            stdscr.addstr(f" ↓{sync_str}")
+
+        except curses.error:
+            pass  # Ignore if we can't fit
 
     def _draw_convergence(self, stdscr, y: int, width: int, height: int):
         """Draw global convergence metrics with sparklines."""
