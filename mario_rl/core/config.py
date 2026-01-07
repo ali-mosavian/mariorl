@@ -33,7 +33,7 @@ class ExplorationConfig:
 
     epsilon_start: float = 1.0
     epsilon_end: float = 0.01
-    decay_steps: int = 100_000
+    decay_steps: int = 1_000_000  # 1M steps for gradual exploration decay
 
 
 @dataclass(frozen=True)

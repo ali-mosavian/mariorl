@@ -379,7 +379,7 @@ def monitor_workers(
 @click.option("--accumulate-grads", default=1, help="Gradients to accumulate before update")
 # Epsilon settings (per worker)
 @click.option("--eps-base", default=0.4, help="Base for per-worker epsilon (ε = base^(1+i/N))")
-@click.option("--eps-decay-steps", default=100_000, help="Steps for epsilon decay per worker")
+@click.option("--eps-decay-steps", default=1_000_000, help="Steps for epsilon decay (1M = ~1hr with 16 workers)")
 # Stability settings
 @click.option("--q-clip", default=100.0, help="Clip Q-values to [-x, x] to prevent explosion (0 to disable)")
 @click.option("--loss-threshold", default=1000.0, help="Skip gradient if loss exceeds this threshold")
