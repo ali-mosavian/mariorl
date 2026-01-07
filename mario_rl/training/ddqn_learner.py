@@ -432,6 +432,13 @@ class DDQNLearner:
         for packet in gradient_packets:
             self.total_timesteps_collected += packet.timesteps
             self.worker_episodes[packet.worker_id] = packet.episodes
+            # Update worker-specific metrics for aggregation
+            self._worker_avg_rewards[packet.worker_id] = packet.avg_reward
+            self._worker_avg_speeds[packet.worker_id] = packet.avg_speed
+            self._worker_entropy[packet.worker_id] = packet.entropy
+            self._worker_deaths[packet.worker_id] = packet.deaths
+            self._worker_flags[packet.worker_id] = packet.flags
+            self._worker_best_x[packet.worker_id] = packet.best_x
 
         # Average worker-computed metrics from gradient packets
         if gradient_packets:

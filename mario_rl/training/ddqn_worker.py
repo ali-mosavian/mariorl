@@ -596,6 +596,12 @@ class DDQNWorker:
             loss=metrics["loss"],
             q_mean=metrics["q_mean"],
             td_error=metrics["td_error"],
+            avg_reward=self.metrics.avg_reward,
+            avg_speed=self.metrics.avg_speed,
+            entropy=metrics["entropy"],
+            deaths=self.metrics.deaths,
+            flags=self.metrics.flags,
+            best_x=self.metrics.best_x_ever,
         )
         if success:
             self.metrics.gradients_sent += 1

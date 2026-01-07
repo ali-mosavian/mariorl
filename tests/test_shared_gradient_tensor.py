@@ -381,7 +381,7 @@ def test_read_detects_concurrent_write(
     # but before the final seq check
     def mock_read() -> GradientPacket | None:
         # First seq check passes
-        seq1, ready, version, worker_id, timesteps, episodes, loss, q_mean, td_error = buffer._read_slot_header(slot_idx)
+        seq1, ready, version, worker_id, timesteps, episodes, loss, q_mean, td_error, avg_reward, avg_speed, entropy, deaths, flags, best_x = buffer._read_slot_header(slot_idx)
         if ready != 1 or (seq1 % 2) == 1:
             return None
 
@@ -411,6 +411,12 @@ def test_read_detects_concurrent_write(
             loss=loss,
             q_mean=q_mean,
             td_error=td_error,
+            avg_reward=avg_reward,
+            avg_speed=avg_speed,
+            entropy=entropy,
+            deaths=deaths,
+            flags=flags,
+            best_x=best_x,
         )
 
     result = mock_read()
