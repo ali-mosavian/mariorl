@@ -42,13 +42,22 @@ class Reward:
 
     @staticmethod
     def calc(c: State, last: State) -> "Reward":
-        # Use position DELTA (current - previous), not (current - max)
-        # This avoids huge negative rewards after death when x resets
-        x_delta = c.x_pos - last.x_pos
+        # Detect death transition (was alive, now dead)
+        just_died = last.is_alive and not c.is_alive
+        
+        # When dying or dead, ignore x_delta to avoid spurious negative rewards
+        # from position resetting during death animation
+        if just_died or not c.is_alive:
+            x_delta = 0
+        else:
+            # Use position DELTA (current - previous), not (current - max)
+            # This avoids huge negative rewards after death when x resets
+            x_delta = c.x_pos - last.x_pos
+        
         return Reward(
             x_reward=min(100, max(-15, x_delta)),
             time_penalty=min(0, c.time - last.time),
-            death_penalty=(not c.is_alive) * -1000,
+            death_penalty=int(just_died) * -1000,  # Only penalize on death transition
             coin_reward=min(3, max(0, c.coins - last.coins)),
             score_reward=min(3, max(0, c.score - last.score)),
             powerup_reward=(c.powerup_state - last.powerup_state) * 100,
@@ -61,22 +70,26 @@ class Reward:
         
         Design principles:
         - Forward progress is the PRIMARY signal (+0.1 to +1 per frame)
-        - Flag completion is a SIGNIFICANT bonus (+10) to incentivize finishing
-        - Death is meaningful (-5) but not overwhelming
+        - Flag completion is a SIGNIFICANT bonus (+15) to incentivize finishing
+        - Death is a moderate penalty (-2) - enough to discourage but not overwhelming
         - Per-frame range: ~-0.15 to ~+1.0 (normal movement)
-        - Terminal events: death=-5, flag=+10
+        - Terminal events: death=-2, flag=+15
+        
+        With restarts/resume, the agent needs to relearn early, so keeping
+        death penalty low allows more exploration without crushing Q-values.
         """
         # Forward progress: main learning signal
         # x_reward ranges -15 to +100, scale to -0.15 to +1.0
         progress = self.x_reward / 100.0
         
-        # Death penalty: meaningful but not overwhelming
-        # -5 makes death significant without dominating Q-values
-        death = self.death_penalty / 200.0  # -5 when dead
+        # Death penalty: moderate, not overwhelming
+        # -2 is meaningful but allows recovery during exploration
+        # Only applied ONCE on death transition, not every frame while dead
+        death = self.death_penalty / 500.0  # -2 when transitioning to dead
         
-        # Flag bonus: significant reward to incentivize level completion
-        # +10 makes completing the level worth ~10x more than just moving
-        flag = self.finish_reward / 100.0  # +10 when flag
+        # Flag bonus: significant reward to incentivize level completion  
+        # +15 makes completing the level worth finishing
+        flag = self.finish_reward / 66.67  # +15 when flag
         
         # Powerup: small bonus/penalty
         powerup = self.powerup_reward / 200.0  # -0.5 to +1
@@ -88,7 +101,7 @@ class Reward:
 
 
 class MarioBrosLevel(SuperMarioBrosEnv):
-    reward_range = (-6, 12)  # Normal: -0.15 to +1.0, Terminal: death=-5, flag=+10
+    reward_range = (-2.5, 16)  # Normal: -0.15 to +1.0, Terminal: death=-2, flag=+15
     _last_state: Optional[State] = None
 
     def __init__(

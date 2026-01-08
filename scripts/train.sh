@@ -8,19 +8,18 @@
 #   ./scripts/train.sh --resume            # Resume from latest checkpoint
 #   ./scripts/train.sh --workers 8         # Override worker count
 #
-
 set -euo pipefail
+SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd)
+PROJECT_ROOT="$SCRIPT_DIR/.."
 
-cd "$(dirname "$0")/.."
-
-exec uv run mario-train-ddqn-dist \
+(cd "$PROJECT_ROOT" && \
+ uv run mario-train-ddqn-dist \
   --workers 16 \
   --accumulate-grads 16 \
   --batch-size 128 \
   --train-steps 8 \
   --tau 0.001 \
   --q-clip 100 \
-  --reward-clip 10 \
+  --reward-clip 20 \
   --eps-decay-steps 1000000 \
-  "$@"
-
+  "$@")
