@@ -5,6 +5,9 @@ Wraps environment interaction into a clean interface that:
 - Processes rewards (scaling, clipping)
 - Handles episode boundaries
 - Returns transitions for training
+
+This is a GENERIC runner - game-specific metrics extraction should
+be done via MetricCollectors, not in this class.
 """
 
 from typing import Any
@@ -24,13 +27,11 @@ class CollectionInfo:
     steps: int
     total_reward: float
     episodes_completed: int
-    final_x_pos: int = 0
-    game_time: int = 0
-    current_level: str = ""
     episode_rewards: list[float] = field(default_factory=list)
-    episode_speeds: list[float] = field(default_factory=list)  # x_pos / time_spent per episode
-    deaths: int = 0  # Number of deaths this collection
-    flags: int = 0   # Number of flags captured this collection
+    
+    # Raw step infos from environment (for collectors to process)
+    step_infos: list[dict[str, Any]] = field(default_factory=list)
+    episode_end_infos: list[dict[str, Any]] = field(default_factory=list)
 
 
 @dataclass
@@ -41,7 +42,10 @@ class EnvRunner:
     - Step collection with action selection
     - Reward processing (scaling, clipping)
     - Episode boundary handling (reset)
-    - Optional episode end callback
+    - Optional callbacks for step/episode events
+    
+    Game-specific metrics should be extracted by MetricCollectors
+    that receive the step_infos, not by this runner.
     """
 
     env: Any  # Gymnasium-like environment
@@ -51,8 +55,9 @@ class EnvRunner:
     reward_scale: float = 1.0
     reward_clip: float = 0.0  # 0 = no clipping
 
-    # Callbacks
-    on_episode_end: Callable[[], None] | None = None
+    # Callbacks (for collectors)
+    on_step: Callable[[dict[str, Any]], None] | None = None
+    on_episode_end: Callable[[dict[str, Any]], None] | None = None
 
     # State tracking
     _current_state: np.ndarray | None = field(init=False, default=None, repr=False)
@@ -76,20 +81,16 @@ class EnvRunner:
             num_steps: Number of environment steps to take
 
         Returns:
-            (transitions, info) where info contains stats
+            (transitions, info) where info contains stats and raw infos
         """
         transitions, info = self._collect_impl(num_steps)
         return transitions, {
             "steps": info.steps,
             "total_reward": info.total_reward,
             "episodes_completed": info.episodes_completed,
-            "final_x_pos": info.final_x_pos,
-            "game_time": info.game_time,
-            "current_level": info.current_level,
             "episode_rewards": info.episode_rewards,
-            "episode_speeds": info.episode_speeds,
-            "deaths": info.deaths,
-            "flags": info.flags,
+            "step_infos": info.step_infos,
+            "episode_end_infos": info.episode_end_infos,
         }
 
     def _collect_impl(self, num_steps: int) -> tuple[list[Transition], CollectionInfo]:
@@ -107,16 +108,10 @@ class EnvRunner:
         transitions: list[Transition] = []
         total_reward = 0.0
         episodes_completed = 0
-        final_x_pos = 0
-        game_time = 0
-        current_level = ""
         episode_rewards: list[float] = []
-        episode_speeds: list[float] = []
         episode_reward = 0.0
-        episode_start_time: int = 400  # Mario timer starts at 400
-        episode_x_pos = 0
-        deaths = 0
-        flags = 0
+        step_infos: list[dict[str, Any]] = []
+        episode_end_infos: list[dict[str, Any]] = []
 
         for _ in range(num_steps):
             # Get action
@@ -141,41 +136,24 @@ class EnvRunner:
             )
             transitions.append(transition)
 
-            # Track position and game state
-            final_x_pos = info.get("x_pos", final_x_pos)
-            episode_x_pos = info.get("x_pos", episode_x_pos)
+            # Store step info for collectors
+            step_infos.append(info)
             
-            # Extract game time from nested state dict
-            state_info = info.get("state", {})
-            game_time = state_info.get("time", game_time) if isinstance(state_info, dict) else game_time
-            
-            # Get current level if available
-            current_level = info.get("level", current_level)
+            # Callback for step (collectors can observe)
+            if self.on_step is not None:
+                self.on_step(info)
 
             if done:
-                # Episode ended - calculate speed (x_pos / time_spent)
-                # Mario's timer counts DOWN from 400, so time_spent = start_time - end_time
-                time_spent = episode_start_time - game_time
-                if time_spent > 0:
-                    episode_speed = episode_x_pos / time_spent
-                    episode_speeds.append(episode_speed)
-                
-                # Track deaths and flag captures
-                is_dead = info.get("is_dead", False) or info.get("is_dying", False)
-                got_flag = info.get("flag_get", False)
-                if got_flag:
-                    flags += 1
-                elif is_dead:
-                    deaths += 1
-                
                 episodes_completed += 1
                 episode_rewards.append(episode_reward)
                 episode_reward = 0.0
-                episode_x_pos = 0
-                episode_start_time = 400  # Reset for next episode
                 
+                # Store episode end info for collectors
+                episode_end_infos.append(info)
+                
+                # Callback for episode end
                 if self.on_episode_end is not None:
-                    self.on_episode_end()
+                    self.on_episode_end(info)
 
                 # Reset for next episode
                 next_state, _ = self.env.reset()
@@ -188,13 +166,9 @@ class EnvRunner:
             steps=num_steps,
             total_reward=total_reward,
             episodes_completed=episodes_completed,
-            final_x_pos=final_x_pos,
-            game_time=game_time,
-            current_level=current_level,
             episode_rewards=episode_rewards,
-            episode_speeds=episode_speeds,
-            deaths=deaths,
-            flags=flags,
+            step_infos=step_infos,
+            episode_end_infos=episode_end_infos,
         )
 
     def _process_reward(self, reward: float) -> float:

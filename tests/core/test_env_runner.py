@@ -220,6 +220,22 @@ def test_episode_callback_called(mock_env: MockEnv, action_fn: Mock) -> None:
     runner.collect(num_steps=5)
 
     assert callback.call_count >= 1
+    # Callback should receive info dict
+    assert callback.call_args[0][0] is not None
+
+
+def test_step_callback_called(mock_env: MockEnv, action_fn: Mock) -> None:
+    """Step callback should be called for each step."""
+    from mario_rl.core.env_runner import EnvRunner
+
+    callback = Mock()
+    runner = EnvRunner(env=mock_env, action_fn=action_fn, on_step=callback)
+
+    runner.collect(num_steps=5)
+
+    assert callback.call_count == 5
+    # Callback should receive info dict with x_pos
+    assert "x_pos" in callback.call_args[0][0]
 
 
 # =============================================================================
@@ -319,6 +335,35 @@ def test_info_sums_rewards(mock_env: MockEnv, action_fn: Mock) -> None:
     _, info = runner.collect_with_info(num_steps=10)
 
     assert info["total_reward"] == 10.0  # 1.0 per step
+
+
+def test_info_contains_step_infos(mock_env: MockEnv, action_fn: Mock) -> None:
+    """Info should contain step infos for collectors."""
+    from mario_rl.core.env_runner import EnvRunner
+
+    runner = EnvRunner(env=mock_env, action_fn=action_fn)
+
+    _, info = runner.collect_with_info(num_steps=5)
+
+    assert "step_infos" in info
+    assert len(info["step_infos"]) == 5
+    # Each step info should have x_pos from mock env
+    for step_info in info["step_infos"]:
+        assert "x_pos" in step_info
+
+
+def test_info_contains_episode_end_infos(mock_env: MockEnv, action_fn: Mock) -> None:
+    """Info should contain episode end infos for collectors."""
+    from mario_rl.core.env_runner import EnvRunner
+
+    mock_env.config = MockEnvConfig(episode_length=3)
+    runner = EnvRunner(env=mock_env, action_fn=action_fn)
+
+    _, info = runner.collect_with_info(num_steps=7)
+
+    assert "episode_end_infos" in info
+    # Should have info for each completed episode
+    assert len(info["episode_end_infos"]) >= 2
 
 
 # =============================================================================
