@@ -126,6 +126,7 @@ class DDQNWorker:
                 input_shape=state_dim,
                 num_actions=self.action_dim,
                 latent_dim=self.config.latent_dim,
+                q_clip=self.config.q_clip,
             ).to(device)
         else:
             # Standard pixel-based DDQN

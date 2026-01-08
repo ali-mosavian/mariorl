@@ -222,6 +222,7 @@ class DDQNLearner:
                 input_shape=state_dim,
                 num_actions=action_dim,
                 latent_dim=self.latent_dim,
+                q_clip=self.q_clip,
             ).to(self.device)
         else:
             # Standard pixel-based DDQN
