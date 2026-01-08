@@ -49,6 +49,7 @@ class Config:
 
     model: str = "ddqn"
     num_workers: int = 4
+    level: str = "1,1"
     collect_steps: int = 64
     train_steps: int = 4
     learning_rate: float = 1e-4
@@ -157,6 +158,24 @@ def install_exit_handler():
     signal.signal(signal.SIGTERM, handler)
 
 
+def parse_level(level_str: str) -> tuple[int, int] | str:
+    """Parse level string to tuple or special mode.
+    
+    Args:
+        level_str: 'random', 'sequential', or 'W,S' (e.g. '1,1')
+    
+    Returns:
+        (world, stage) tuple or 'random'/'sequential' string
+    """
+    if level_str in ("random", "sequential"):
+        return level_str
+    try:
+        parts = level_str.split(",")
+        return (int(parts[0]), int(parts[1]))
+    except (ValueError, IndexError):
+        return (1, 1)  # Default to 1-1
+
+
 # =============================================================================
 # Worker Process
 # =============================================================================
@@ -188,7 +207,8 @@ def run_worker(
         epsilon_end = eps_base ** (1 + (worker_id + 1) / config.num_workers)
 
         # Create components
-        env = create_mario_env(level=(1, 1), render_frames=False)
+        level = parse_level(config.level)
+        env = create_mario_env(level=level, render_frames=False)
         _, learner = create_model_and_learner(config, device)
 
         worker = TrainingWorker(
@@ -441,6 +461,7 @@ def start_monitor_thread(
 @click.command()
 @click.option("--model", type=click.Choice(["ddqn", "dreamer"]), default="ddqn", help="Model type")
 @click.option("--workers", default=4, help="Number of workers")
+@click.option("--level", "-l", default="1,1", help="Level: 'random', 'sequential', or 'W,S' (e.g. '1,1')")
 @click.option("--save-dir", default="checkpoints", help="Directory for checkpoints")
 @click.option("--lr", default=1e-4, help="Learning rate")
 @click.option("--gamma", default=0.99, help="Discount factor")
@@ -450,6 +471,7 @@ def start_monitor_thread(
 def main(
     model: str,
     workers: int,
+    level: str,
     save_dir: str,
     lr: float,
     gamma: float,
@@ -462,7 +484,7 @@ def main(
     print("Distributed Training (Modular)")
     print("=" * 70)
     print(f"  Model: {model}")
-    print(f"  Workers: {workers}")
+    print(f"  Workers: {workers}, Level: {level}")
     print(f"  LR: {lr}, Gamma: {gamma}")
     print(f"  Batch: {batch_size}, Buffer: {buffer_size}")
     print("=" * 70)
@@ -470,6 +492,7 @@ def main(
     config = Config(
         model=model,
         num_workers=workers,
+        level=level,
         learning_rate=lr,
         gamma=gamma,
         batch_size=batch_size,
