@@ -397,6 +397,9 @@ def monitor_workers(
 @click.option("--reward-scale", default=1.0, help="Scale factor when reward-norm=scale")
 @click.option("--reward-clip", default=5.0, help="Clip rewards to [-x, x] to prevent instability (0 to disable)")
 @click.option("--entropy-coef", default=0.01, help="Entropy regularization coefficient (encourages exploration)")
+# Network architecture
+@click.option("--dreamer", is_flag=True, help="Use Dreamer-style network (encoder + latent Q-network)")
+@click.option("--latent-dim", default=128, help="Latent dimension for Dreamer network")
 def main(
     workers: int,
     level: str,
@@ -427,6 +430,8 @@ def main(
     reward_scale: float,
     reward_clip: float,
     entropy_coef: float,
+    dreamer: bool,
+    latent_dim: int,
 ) -> None:
     """Train Mario using Distributed DDQN with async gradient updates."""
     # Parse level
@@ -601,6 +606,8 @@ def main(
         worker_config = WorkerConfig(
             worker_id=i,
             level=cast(ConfigLevelType, level_type),
+            use_dreamer=dreamer,
+            latent_dim=latent_dim,
             steps_per_collection=collect_steps,
             train_steps=train_steps,
             max_grad_norm=max_grad_norm,
@@ -640,6 +647,8 @@ def main(
             "max_grad_norm": max_grad_norm,
             "weight_decay": weight_decay,
             "q_clip": q_clip,
+            "use_dreamer": dreamer,
+            "latent_dim": latent_dim,
             "ui_queue": ui_queue,
             "restore_snapshot": snapshot_path is not None,
             "snapshot_path": snapshot_path,

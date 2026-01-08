@@ -115,6 +115,7 @@ from torch.optim import AdamW
 from torch.optim.lr_scheduler import CosineAnnealingLR
 
 from mario_rl.agent.ddqn_net import DoubleDQN
+from mario_rl.agent.world_model import DreamerDDQN
 from mario_rl.training.shared_gradient_tensor import SharedGradientTensorPool
 from mario_rl.training.shared_gradient_tensor import GradientPacket
 
@@ -155,6 +156,10 @@ class DDQNLearner:
     max_grad_norm: float = 10.0
     weight_decay: float = 1e-4
     accumulate_grads: int = 1  # Number of gradients to accumulate before update
+    
+    # Network architecture
+    use_dreamer: bool = False  # Use Dreamer-style encoder + latent Q-network
+    latent_dim: int = 128  # Latent dimension for Dreamer network
     
     # Stability settings
     q_clip: float = 0.0  # Clip Q-values to [-q_clip, q_clip], 0 to disable
@@ -211,14 +216,23 @@ class DDQNLearner:
         # Create network first (needed for gradient tensor pool)
         state_dim = (4, 64, 64)
         action_dim = 12  # COMPLEX_MOVEMENT
-        self.net = DoubleDQN(
-            input_shape=state_dim,
-            num_actions=action_dim,
-            feature_dim=512,
-            hidden_dim=256,
-            dropout=0.1,
-            q_clip=self.q_clip,
-        ).to(self.device)
+        if self.use_dreamer:
+            # Dreamer-style: encoder + latent Q-network
+            self.net = DreamerDDQN(
+                input_shape=state_dim,
+                num_actions=action_dim,
+                latent_dim=self.latent_dim,
+            ).to(self.device)
+        else:
+            # Standard pixel-based DDQN
+            self.net = DoubleDQN(
+                input_shape=state_dim,
+                num_actions=action_dim,
+                feature_dim=512,
+                hidden_dim=256,
+                dropout=0.1,
+                q_clip=self.q_clip,
+            ).to(self.device)
 
         # Create gradient pool by attaching to existing shared memory files
         # (files were created by main process, we just attach to them)

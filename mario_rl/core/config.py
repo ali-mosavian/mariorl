@@ -54,6 +54,10 @@ class WorkerConfig:
     level: LevelType = (1, 1)
     render_frames: bool = False
 
+    # Network architecture
+    use_dreamer: bool = False  # Use Dreamer-style encoder + latent Q-network
+    latent_dim: int = 128  # Latent dimension for Dreamer network
+
     # Training
     steps_per_collection: int = 64
     train_steps: int = 4
@@ -117,6 +121,10 @@ class WorkerConfig:
 @dataclass(frozen=True)
 class LearnerConfig:
     """Configuration for the DDQN learner."""
+
+    # Network architecture
+    use_dreamer: bool = False  # Use Dreamer-style encoder + latent Q-network
+    latent_dim: int = 128  # Latent dimension for Dreamer network
 
     # Optimizer
     learning_rate: float = 0.00025

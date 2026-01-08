@@ -34,6 +34,7 @@ from mario_rl.buffers import NStepBuffer
 from mario_rl.core.types import Transition
 from mario_rl.core.timing import TimingStats
 from mario_rl.agent.ddqn_net import DoubleDQN
+from mario_rl.agent.world_model import DreamerDDQN
 from mario_rl.core.config import WorkerConfig
 from mario_rl.core.device import detect_device
 from mario_rl.core.episode import EpisodeState
@@ -119,11 +120,20 @@ class DDQNWorker:
 
         # Create network
         state_dim = (4, 64, 64)
-        self.net = DoubleDQN(
-            input_shape=state_dim,
-            num_actions=self.action_dim,
-            q_clip=self.config.q_clip,
-        ).to(device)
+        if self.config.use_dreamer:
+            # Dreamer-style: encoder + latent Q-network
+            self.net = DreamerDDQN(
+                input_shape=state_dim,
+                num_actions=self.action_dim,
+                latent_dim=self.config.latent_dim,
+            ).to(device)
+        else:
+            # Standard pixel-based DDQN
+            self.net = DoubleDQN(
+                input_shape=state_dim,
+                num_actions=self.action_dim,
+                q_clip=self.config.q_clip,
+            ).to(device)
 
         # Attach to SharedGradientTensor (must be after model creation)
         self.gradient_tensor = attach_tensor_buffer(
