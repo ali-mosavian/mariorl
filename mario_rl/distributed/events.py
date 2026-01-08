@@ -8,6 +8,7 @@ Uses msgpack for fast binary serialization.
 """
 from __future__ import annotations
 
+import logging
 import os
 import time
 from dataclasses import dataclass
@@ -154,3 +155,74 @@ def make_endpoint(pid: int | None = None) -> str:
     if pid is None:
         pid = os.getpid()
     return f"ipc:///tmp/mario_events_{pid}.sock"
+
+
+# =============================================================================
+# Logging Adapter
+# =============================================================================
+
+
+class ZMQLogHandler(logging.Handler):
+    """Logging handler that publishes log records via ZMQ.
+    
+    Usage:
+        publisher = EventPublisher(endpoint, source_id=0)
+        handler = ZMQLogHandler(publisher)
+        logger = logging.getLogger("worker")
+        logger.addHandler(handler)
+        logger.setLevel(logging.INFO)
+        
+        logger.info("Starting worker...")  # Sends via ZMQ
+    """
+    
+    def __init__(self, publisher: EventPublisher, level: int = logging.NOTSET) -> None:
+        super().__init__(level)
+        self.publisher = publisher
+    
+    def emit(self, record: logging.LogRecord) -> None:
+        """Emit a log record via ZMQ."""
+        try:
+            msg = self.format(record)
+            self.publisher.log(msg)
+        except Exception:
+            self.handleError(record)
+
+
+def get_logger(
+    name: str,
+    publisher: EventPublisher,
+    level: int = logging.INFO,
+    fmt: str = "%(message)s",
+) -> logging.Logger:
+    """Create a logger that publishes via ZMQ.
+    
+    Args:
+        name: Logger name (e.g., "worker.0", "coordinator")
+        publisher: EventPublisher to send log messages through
+        level: Logging level (default: INFO)
+        fmt: Log format string (default: just the message)
+    
+    Returns:
+        Configured logger instance
+    
+    Usage:
+        publisher = EventPublisher(endpoint, source_id=0)
+        log = get_logger("worker.0", publisher)
+        log.info("Starting...")
+        log.warning("Something happened")
+    """
+    logger = logging.getLogger(name)
+    logger.setLevel(level)
+    
+    # Remove existing handlers to avoid duplicates
+    logger.handlers.clear()
+    
+    # Add ZMQ handler
+    handler = ZMQLogHandler(publisher, level)
+    handler.setFormatter(logging.Formatter(fmt))
+    logger.addHandler(handler)
+    
+    # Don't propagate to root logger
+    logger.propagate = False
+    
+    return logger
