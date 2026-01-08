@@ -6,13 +6,15 @@ Combines:
 - Learning rate scheduling (cosine annealing)
 - Checkpointing (model + optimizer state)
 - Target network updates
+- Optional: MetricLogger for CSV/ZMQ metrics
 """
 
-from typing import Any
+from typing import Any, Protocol
 from pathlib import Path
 from dataclasses import field
 from dataclasses import dataclass
 import math
+import time
 
 import torch
 from torch import Tensor
@@ -21,6 +23,17 @@ from torch.optim import Adam
 from mario_rl.learners.base import Learner
 from mario_rl.distributed.shm_gradient_pool import SharedGradientPool
 from mario_rl.training.shared_gradient_tensor import GradientPacket
+
+
+class MetricsLogger(Protocol):
+    """Protocol for metrics logger (avoids hard dependency)."""
+    
+    def count(self, name: str, n: int = 1) -> None: ...
+    def gauge(self, name: str, value: float) -> None: ...
+    def observe(self, name: str, value: float) -> None: ...
+    def flush(self) -> None: ...
+    def save_state(self) -> dict[str, Any]: ...
+    def load_state(self, state: dict[str, Any]) -> None: ...
 
 
 @dataclass
@@ -54,12 +67,18 @@ class TrainingCoordinator:
     # Whether to create shm files (False = attach to existing)
     create_shm: bool = False
 
+    # Optional metrics (injected, can be None)
+    logger: MetricsLogger | None = None
+    flush_every: int = 10  # Flush metrics every N updates
+
     # Internal state
     gradient_pool: SharedGradientPool = field(init=False, repr=False)
     optimizer: Adam = field(init=False, repr=False)
     _update_count: int = field(init=False, default=0)
     _total_steps: int = field(init=False, default=0)
     _last_checkpoint: int = field(init=False, default=0)
+    _updates_since_flush: int = field(init=False, default=0)
+    _last_update_time: float = field(init=False, default=0.0)
 
     def __post_init__(self) -> None:
         """Initialize gradient pool, optimizer, and directories."""
@@ -185,15 +204,18 @@ class TrainingCoordinator:
         """
         ckpt_path = self.checkpoint_dir / f"checkpoint_{self._update_count}.pt"
 
-        torch.save(
-            {
-                "model_state_dict": self.model.state_dict(),
-                "optimizer_state_dict": self.optimizer.state_dict(),
-                "update_count": self._update_count,
-                "total_steps": self._total_steps,
-            },
-            ckpt_path,
-        )
+        ckpt_data = {
+            "model_state_dict": self.model.state_dict(),
+            "optimizer_state_dict": self.optimizer.state_dict(),
+            "update_count": self._update_count,
+            "total_steps": self._total_steps,
+        }
+
+        # Include metrics state for resume
+        if self.logger is not None:
+            ckpt_data["metrics_state"] = self.logger.save_state()
+
+        torch.save(ckpt_data, ckpt_path)
 
         self._last_checkpoint = self._update_count
         return ckpt_path
@@ -218,6 +240,10 @@ class TrainingCoordinator:
         self.optimizer.load_state_dict(ckpt["optimizer_state_dict"])
         self._update_count = ckpt["update_count"]
         self._total_steps = ckpt["total_steps"]
+
+        # Restore metrics state if available
+        if self.logger is not None and "metrics_state" in ckpt:
+            self.logger.load_state(ckpt["metrics_state"])
 
         return True
 
@@ -258,6 +284,16 @@ class TrainingCoordinator:
 
         # Update tracking
         self._total_steps += timesteps
+        self._updates_since_flush += 1
+
+        # Compute grads/sec
+        now = time.time()
+        grads_per_sec = 0.0
+        if self._last_update_time > 0:
+            dt = now - self._last_update_time
+            if dt > 0:
+                grads_per_sec = len(packets) / dt
+        self._last_update_time = now
 
         # Update LR
         self.update_lr()
@@ -272,11 +308,25 @@ class TrainingCoordinator:
         # Save weights for workers
         self.save_weights()
 
+        # Track metrics if logger provided
+        if self.logger is not None:
+            self.logger.count("update_count")
+            self.logger.count("total_steps", n=timesteps)
+            self.logger.gauge("learning_rate", self.current_lr())
+            self.logger.gauge("grads_per_sec", grads_per_sec)
+            self.logger.count("weight_version")
+
+            # Flush periodically
+            if self._updates_since_flush >= self.flush_every:
+                self.logger.flush()
+                self._updates_since_flush = 0
+
         return {
             "update_count": self._update_count,
             "total_steps": self._total_steps,
             "gradients_processed": len(packets),
             "lr": self.current_lr(),
+            "grads_per_sec": grads_per_sec,
         }
 
     def close(self) -> None:
