@@ -52,6 +52,7 @@ class CommonMetrics:
     BEST_X = MetricDef("best_x", MetricType.GAUGE)
     BEST_X_EVER = MetricDef("best_x_ever", MetricType.GAUGE)
     GAME_TIME = MetricDef("game_time", MetricType.GAUGE)
+    SPEED = MetricDef("speed", MetricType.ROLLING)  # x_pos / game_time (game advance rate)
     WORLD = MetricDef("world", MetricType.GAUGE)
     STAGE = MetricDef("stage", MetricType.GAUGE)
     DEATHS = MetricDef("deaths", MetricType.COUNTER)
@@ -72,6 +73,7 @@ class CommonMetrics:
             cls.BEST_X,
             cls.BEST_X_EVER,
             cls.GAME_TIME,
+            cls.SPEED,
             cls.WORLD,
             cls.STAGE,
             cls.DEATHS,
