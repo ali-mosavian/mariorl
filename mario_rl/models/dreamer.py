@@ -276,15 +276,14 @@ class DreamerModel(nn.Module):
         """Encode observations to latent space.
 
         Args:
-            x: Observations (batch, C, H, W), can be [0, 255] or [0, 1]
+            x: Observations (batch, C, H, W) in [0, 255] range
             deterministic: If True, use mean; if False, sample from distribution
 
         Returns:
             z: Latent representation (batch, latent_dim)
         """
-        # Normalize to [0, 1] if needed (auto-detect based on max value)
-        if x.max() > 1.0:
-            x = x / 255.0
+        # Normalize from [0, 255] to [0, 1]
+        x = x / 255.0
         return self.encoder.encode(x, deterministic)
 
     def imagine_step(

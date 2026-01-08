@@ -71,7 +71,7 @@ class DDQNBackbone(nn.Module):
     """CNN backbone for DDQN (Nature DQN style with modern improvements).
 
     Takes frame-stacked observations (N, C, H, W) where C is the frame stack.
-    Input should already be normalized to [0, 1] and in channels-first format.
+    Input should be in [0, 255] range and channels-first format (normalized internally).
 
     Improvements over vanilla Nature DQN:
     - GELU activation (smoother gradients)
@@ -192,11 +192,13 @@ class DDQNNet(nn.Module):
         """Forward pass returning Q-values for all actions.
 
         Args:
-            x: Observation tensor (N, C, H, W) where C is frame stack
+            x: Observation tensor (N, C, H, W) in [0, 255] range
 
         Returns:
             q_values: Q-values for each action (N, num_actions)
         """
+        # Normalize from [0, 255] to [0, 1]
+        x = x / 255.0
         features = self.backbone(x)
         q_values = self.head(features)
 
