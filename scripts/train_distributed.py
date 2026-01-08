@@ -35,6 +35,8 @@ from torch import nn
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
+from mario_rl.training.training_ui import UIMessage, MessageType
+
 
 # =============================================================================
 # Configuration
@@ -130,17 +132,21 @@ def create_model_and_learner(
     return model, learner
 
 
-def make_logger(prefix: str, ui_queue: Queue | None):
+def make_logger(prefix: str, ui_queue: Queue | None, source_id: int = -1):
     """Create a logger function that writes to UI queue or stdout."""
 
     def log(msg: str) -> None:
         if ui_queue:
             try:
-                ui_queue.put_nowait({"type": "log", "data": {"message": f"{prefix} {msg}"}})
+                msg_type = MessageType.WORKER_LOG if source_id >= 0 else MessageType.LEARNER_LOG
+                ui_queue.put_nowait(UIMessage(
+                    msg_type=msg_type,
+                    source_id=source_id,
+                    data={"text": f"{prefix} {msg}"},
+                ))
             except Exception:
                 pass
-        else:
-            print(f"{prefix} {msg}", flush=True)
+        print(f"{prefix} {msg}", flush=True)  # Always print to stdout too
 
     return log
 
@@ -170,7 +176,7 @@ def run_worker(
 ) -> None:
     """Run a training worker process."""
     install_exit_handler()
-    log = make_logger(f"[W{worker_id}]", ui_queue)
+    log = make_logger(f"[W{worker_id}]", ui_queue, source_id=worker_id)
 
     try:
         from mario_rl.environment.factory import create_mario_env
@@ -259,16 +265,19 @@ def run_worker(
             # UI update
             if ui_queue:
                 try:
-                    ui_queue.put_nowait({
-                        "type": "worker_status",
-                        "data": {
-                            "worker_id": worker_id,
-                            "episodes": total_episodes,
-                            "steps": worker.total_steps,
+                    ui_queue.put_nowait(UIMessage(
+                        msg_type=MessageType.WORKER_STATUS,
+                        source_id=worker_id,
+                        data={
+                            "episode": total_episodes,
+                            "step": worker.total_steps,
                             "best_x": best_x,
+                            "best_x_ever": best_x,
                             "epsilon": worker.epsilon_at(worker.total_steps),
+                            "x_pos": info.get("final_x_pos", 0),
+                            "reward": info.get("episode_reward", 0),
                         },
-                    })
+                    ))
                 except Exception:
                     pass
 
@@ -335,14 +344,16 @@ def run_coordinator(
 
                 if ui_queue:
                     try:
-                        ui_queue.put_nowait({
-                            "type": "learner_status",
-                            "data": {
-                                "update_count": result["update_count"],
-                                "total_steps": result["total_steps"],
-                                "gradients_per_sec": grads_per_sec,
+                        ui_queue.put_nowait(UIMessage(
+                            msg_type=MessageType.LEARNER_STATUS,
+                            source_id=-1,
+                            data={
+                                "step": result["update_count"],
+                                "timesteps": result["total_steps"],
+                                "grads_per_sec": grads_per_sec,
+                                "gradients_received": result.get("gradients_processed", 0),
                             },
-                        })
+                        ))
                     except Exception:
                         pass
 
@@ -523,7 +534,7 @@ def main(
         from mario_rl.training.training_ui import TrainingUI
 
         def run_ui():
-            TrainingUI(num_workers=workers, message_queue=ui_queue).run()
+            TrainingUI(num_workers=workers, ui_queue=ui_queue).run()
 
         ui_process = Process(target=run_ui, daemon=True)
         ui_process.start()
