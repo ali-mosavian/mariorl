@@ -23,26 +23,17 @@ import multiprocessing as mp
 from pathlib import Path
 from datetime import datetime
 from dataclasses import dataclass
+from typing import Any
 
-# Use 'spawn' start method for cleaner CUDA handling
 mp.set_start_method("spawn", force=True)
 
-from multiprocessing import Queue
-from multiprocessing import Process
+from multiprocessing import Queue, Process
 
 import click
 import torch
+from torch import nn
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
-
-
-def get_device() -> torch.device:
-    """Get best available accelerator device."""
-    if torch.cuda.is_available():
-        return torch.device("cuda")
-    if hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
-        return torch.device("mps")
-    return torch.device("cpu")
 
 
 # =============================================================================
@@ -51,7 +42,7 @@ def get_device() -> torch.device:
 
 
 @dataclass(frozen=True)
-class TrainingConfig:
+class Config:
     """Training configuration."""
 
     model: str = "ddqn"
@@ -79,95 +70,125 @@ class TrainingConfig:
 
 
 # =============================================================================
+# Helpers
+# =============================================================================
+
+
+def get_device() -> torch.device:
+    """Get best available accelerator device."""
+    if torch.cuda.is_available():
+        return torch.device("cuda")
+    if hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
+        return torch.device("mps")
+    return torch.device("cpu")
+
+
+def create_model_and_learner(
+    config: Config,
+    device: torch.device | None = None,
+) -> tuple[nn.Module, Any]:
+    """Create model and learner from config."""
+    if config.model == "ddqn":
+        from mario_rl.models.ddqn import DoubleDQN, DDQNConfig
+        from mario_rl.learners.ddqn import DDQNLearner
+
+        cfg = DDQNConfig(input_shape=(4, 64, 64), num_actions=12, q_scale=config.q_scale)
+        model = DoubleDQN(
+            input_shape=cfg.input_shape,
+            num_actions=cfg.num_actions,
+            feature_dim=cfg.feature_dim,
+            hidden_dim=cfg.hidden_dim,
+            dropout=cfg.dropout,
+            q_scale=cfg.q_scale,
+        )
+        if device:
+            model = model.to(device)
+        learner = DDQNLearner(model=model, gamma=config.gamma)
+    else:
+        from mario_rl.models.dreamer import DreamerModel, DreamerModelConfig
+        from mario_rl.learners.dreamer import DreamerLearner
+
+        cfg = DreamerModelConfig(
+            input_shape=(4, 64, 64),
+            num_actions=12,
+            latent_dim=config.latent_dim,
+        )
+        model = DreamerModel(
+            input_shape=cfg.input_shape,
+            num_actions=cfg.num_actions,
+            latent_dim=cfg.latent_dim,
+            hidden_dim=cfg.hidden_dim,
+            rssm_hidden_dim=cfg.rssm_hidden_dim,
+            actor_hidden_dim=cfg.actor_hidden_dim,
+            critic_hidden_dim=cfg.critic_hidden_dim,
+            imagination_horizon=cfg.imagination_horizon,
+        )
+        if device:
+            model = model.to(device)
+        learner = DreamerLearner(model=model, gamma=config.gamma)
+
+    return model, learner
+
+
+def make_logger(prefix: str, ui_queue: Queue | None):
+    """Create a logger function that writes to UI queue or stdout."""
+
+    def log(msg: str) -> None:
+        if ui_queue:
+            try:
+                ui_queue.put_nowait({"type": "log", "data": {"message": f"{prefix} {msg}"}})
+            except Exception:
+                pass
+        else:
+            print(f"{prefix} {msg}", flush=True)
+
+    return log
+
+
+def install_exit_handler():
+    """Install signal handler that exits cleanly in child processes."""
+
+    def handler(sig, frame):
+        os._exit(0)
+
+    signal.signal(signal.SIGINT, handler)
+    signal.signal(signal.SIGTERM, handler)
+
+
+# =============================================================================
 # Worker Process
 # =============================================================================
 
 
 def run_worker(
     worker_id: int,
-    config: TrainingConfig,
+    config: Config,
     weights_path: Path,
     shm_path: Path,
     shm_dir: Path,
     ui_queue: Queue | None = None,
 ) -> None:
     """Run a training worker process."""
-    # Each process sets up its own signal handler
-    def worker_signal_handler(sig, frame):
-        os._exit(0)  # Use os._exit to avoid cleanup issues
-
-    signal.signal(signal.SIGINT, worker_signal_handler)
-    signal.signal(signal.SIGTERM, worker_signal_handler)
-
-    import torch
-
-    from mario_rl.environment.factory import create_mario_env
-    from mario_rl.distributed.training_worker import TrainingWorker
-    from mario_rl.distributed.shm_heartbeat import SharedHeartbeat
-    from mario_rl.training.shared_gradient_tensor import attach_tensor_buffer
-
-    # Log to UI
-    def log(msg: str) -> None:
-        if ui_queue:
-            try:
-                ui_queue.put_nowait({"type": "log", "data": {"message": f"[W{worker_id}] {msg}"}})
-            except Exception:
-                pass
-        else:
-            print(f"[W{worker_id}] {msg}", flush=True)
+    install_exit_handler()
+    log = make_logger(f"[W{worker_id}]", ui_queue)
 
     try:
+        from mario_rl.environment.factory import create_mario_env
+        from mario_rl.distributed.training_worker import TrainingWorker
+        from mario_rl.distributed.shm_heartbeat import SharedHeartbeat
+        from mario_rl.training.shared_gradient_tensor import attach_tensor_buffer
+
         device = get_device()
         log(f"Starting on {device}...")
 
-        # Worker-specific epsilon (diverse exploration)
+        # Worker-specific epsilon for diverse exploration
         eps_base = 0.4
         epsilon_end = eps_base ** (1 + (worker_id + 1) / config.num_workers)
 
-        # Create environment
+        # Create components
         env = create_mario_env(level=(1, 1), render_frames=False)
+        _, learner = create_model_and_learner(config, device)
 
-        # Create model and learner on accelerator
-        if config.model == "ddqn":
-            from mario_rl.models.ddqn import DoubleDQN, DDQNConfig
-            from mario_rl.learners.ddqn import DDQNLearner
-
-            model_config = DDQNConfig(
-                input_shape=(4, 64, 64),
-                num_actions=12,
-                q_scale=config.q_scale,
-            )
-            model = DoubleDQN(
-                input_shape=model_config.input_shape,
-                num_actions=model_config.num_actions,
-                feature_dim=model_config.feature_dim,
-                hidden_dim=model_config.hidden_dim,
-                dropout=model_config.dropout,
-                q_scale=model_config.q_scale,
-            ).to(device)
-            learner = DDQNLearner(model=model, gamma=config.gamma)
-        else:
-            from mario_rl.models.dreamer import DreamerModel, DreamerModelConfig
-            from mario_rl.learners.dreamer import DreamerLearner
-
-            model_config = DreamerModelConfig(
-                input_shape=(4, 64, 64),
-                num_actions=12,
-                latent_dim=config.latent_dim,
-            )
-            model = DreamerModel(
-                input_shape=model_config.input_shape,
-                num_actions=model_config.num_actions,
-                latent_dim=model_config.latent_dim,
-                hidden_dim=model_config.hidden_dim,
-                rssm_hidden_dim=model_config.rssm_hidden_dim,
-                actor_hidden_dim=model_config.actor_hidden_dim,
-                critic_hidden_dim=model_config.critic_hidden_dim,
-                imagination_horizon=model_config.imagination_horizon,
-            ).to(device)
-            learner = DreamerLearner(model=model, gamma=config.gamma)
-
-        # Create training worker
         worker = TrainingWorker(
             env=env,
             learner=learner,
@@ -181,7 +202,6 @@ def run_worker(
             epsilon_decay_steps=config.epsilon_decay_steps,
         )
 
-        # Attach to shared memory (created by main process)
         gradient_buffer = attach_tensor_buffer(
             worker_id=worker_id,
             model=worker.model,
@@ -197,39 +217,29 @@ def run_worker(
 
         log(f"Started (ε_end={epsilon_end:.4f})")
 
-        # Main loop
+        # Training loop state
         version = 0
         total_episodes = 0
         best_x = 0
         grads_sent = 0
 
         while True:
-            # Update heartbeat
             heartbeat.update(worker_id)
-
-            # Sync weights
             worker.sync_weights(weights_path)
 
-            # Run cycle
             result = worker.run_cycle(
                 collect_steps=config.collect_steps,
                 train_steps=config.train_steps,
             )
 
-            grads = result["gradients"]
+            # Update stats
             info = result["collection_info"]
-
-            # Track stats
             total_episodes += info.get("episodes_completed", 0)
-            if info.get("final_x_pos", 0) > best_x:
-                best_x = info["final_x_pos"]
+            best_x = max(best_x, info.get("final_x_pos", 0))
 
             # Write gradients to shared memory
-            if grads:
-                loss = 0.0
-                if result.get("train_metrics"):
-                    loss = result["train_metrics"][0].get("loss", 0.0)
-
+            if grads := result["gradients"]:
+                loss = result.get("train_metrics", [{}])[0].get("loss", 0.0)
                 gradient_buffer.write(
                     grads=grads,
                     version=version,
@@ -241,12 +251,12 @@ def run_worker(
                 )
                 grads_sent += 1
 
-            # Periodic log
+            # Periodic logging
             if grads_sent % 10 == 0:
                 eps = worker.epsilon_at(worker.total_steps)
                 log(f"steps={worker.total_steps}, eps={total_episodes}, ε={eps:.4f}, best_x={best_x}, grads={grads_sent}")
 
-            # Send UI update
+            # UI update
             if ui_queue:
                 try:
                     ui_queue.put_nowait({
@@ -275,78 +285,24 @@ def run_worker(
 
 
 def run_coordinator(
-    config: TrainingConfig,
+    config: Config,
     weights_path: Path,
     checkpoint_dir: Path,
     shm_dir: Path,
     ui_queue: Queue | None = None,
 ) -> None:
     """Run the training coordinator process."""
-    # Each process sets up its own signal handler
-    def coord_signal_handler(sig, frame):
-        os._exit(0)  # Use os._exit to avoid cleanup issues
-
-    signal.signal(signal.SIGINT, coord_signal_handler)
-    signal.signal(signal.SIGTERM, coord_signal_handler)
-
-    import torch
-
-    from mario_rl.distributed.training_coordinator import TrainingCoordinator
-
-    def log(msg: str) -> None:
-        if ui_queue:
-            try:
-                ui_queue.put_nowait({"type": "log", "data": {"message": f"[COORD] {msg}"}})
-            except Exception:
-                pass
-        else:
-            print(f"[COORD] {msg}", flush=True)
+    install_exit_handler()
+    log = make_logger("[COORD]", ui_queue)
 
     try:
+        from mario_rl.distributed.training_coordinator import TrainingCoordinator
+
         device = get_device()
         log(f"Starting on {device}...")
 
-        # Create model and learner
-        if config.model == "ddqn":
-            from mario_rl.models.ddqn import DoubleDQN, DDQNConfig
-            from mario_rl.learners.ddqn import DDQNLearner
+        _, learner = create_model_and_learner(config, device)
 
-            model_config = DDQNConfig(
-                input_shape=(4, 64, 64),
-                num_actions=12,
-                q_scale=config.q_scale,
-            )
-            model = DoubleDQN(
-                input_shape=model_config.input_shape,
-                num_actions=model_config.num_actions,
-                feature_dim=model_config.feature_dim,
-                hidden_dim=model_config.hidden_dim,
-                dropout=model_config.dropout,
-                q_scale=model_config.q_scale,
-            ).to(device)
-            learner = DDQNLearner(model=model, gamma=config.gamma)
-        else:
-            from mario_rl.models.dreamer import DreamerModel, DreamerModelConfig
-            from mario_rl.learners.dreamer import DreamerLearner
-
-            model_config = DreamerModelConfig(
-                input_shape=(4, 64, 64),
-                num_actions=12,
-                latent_dim=config.latent_dim,
-            )
-            model = DreamerModel(
-                input_shape=model_config.input_shape,
-                num_actions=model_config.num_actions,
-                latent_dim=model_config.latent_dim,
-                hidden_dim=model_config.hidden_dim,
-                rssm_hidden_dim=model_config.rssm_hidden_dim,
-                actor_hidden_dim=model_config.actor_hidden_dim,
-                critic_hidden_dim=model_config.critic_hidden_dim,
-                imagination_horizon=model_config.imagination_horizon,
-            ).to(device)
-            learner = DreamerLearner(model=model, gamma=config.gamma)
-
-        # Create coordinator (attach to existing shm)
         coordinator = TrainingCoordinator(
             learner=learner,
             num_workers=config.num_workers,
@@ -364,7 +320,6 @@ def run_coordinator(
 
         log("Started")
 
-        # Main loop
         last_log = time.time()
         grads_since_log = 0
 
@@ -372,7 +327,7 @@ def run_coordinator(
             result = coordinator.training_step()
             grads_since_log += result["gradients_processed"]
 
-            # Log periodically
+            # Periodic logging
             if time.time() - last_log > 5.0:
                 elapsed = time.time() - last_log
                 grads_per_sec = grads_since_log / elapsed
@@ -394,7 +349,7 @@ def run_coordinator(
                 last_log = time.time()
                 grads_since_log = 0
 
-            # Small sleep if no work
+            # Avoid busy loop when no gradients
             if result["gradients_processed"] == 0:
                 time.sleep(0.01)
 
@@ -403,6 +358,72 @@ def run_coordinator(
         import traceback
         traceback.print_exc()
         sys.exit(1)
+
+
+# =============================================================================
+# Process Management
+# =============================================================================
+
+
+@dataclass
+class ProcessManager:
+    """Manages worker and coordinator processes."""
+
+    workers: list[tuple[Process, int]]
+    coordinator: Process
+    ui: Process | None
+    gradient_pool: Any
+    heartbeats: Any
+    stop_event: threading.Event
+
+    def terminate_all(self) -> None:
+        """Terminate all managed processes."""
+        self.stop_event.set()
+
+        for p, _ in self.workers:
+            if p.is_alive():
+                p.terminate()
+
+        if self.coordinator.is_alive():
+            self.coordinator.terminate()
+
+        if self.ui and self.ui.is_alive():
+            self.ui.terminate()
+
+    def cleanup(self) -> None:
+        """Clean up shared memory resources."""
+        try:
+            self.gradient_pool.unlink()
+        except Exception:
+            pass
+        try:
+            self.heartbeats.unlink()
+        except Exception:
+            pass
+
+
+def start_monitor_thread(
+    heartbeats: Any,
+    stop_event: threading.Event,
+    timeout: float = 60.0,
+) -> threading.Thread:
+    """Start a thread that monitors worker heartbeats."""
+
+    def monitor():
+        time.sleep(timeout)  # Initial delay
+        while not stop_event.is_set():
+            try:
+                for wid in heartbeats.stale_workers(timeout=timeout):
+                    if stop_event.is_set():
+                        break
+                    print(f"Warning: Worker {wid} appears stale")
+            except Exception:
+                pass
+            time.sleep(10.0)
+
+    thread = threading.Thread(target=monitor, daemon=True)
+    thread.start()
+    return thread
 
 
 # =============================================================================
@@ -439,7 +460,7 @@ def main(
     print(f"  Batch: {batch_size}, Buffer: {buffer_size}")
     print("=" * 70)
 
-    config = TrainingConfig(
+    config = Config(
         model=model,
         num_workers=workers,
         learning_rate=lr,
@@ -448,46 +469,22 @@ def main(
         buffer_capacity=buffer_size,
     )
 
-    # Create directories
+    # Setup directories
     timestamp = datetime.now().strftime("%Y-%m-%dT%H-%M-%S")
     run_dir = Path(save_dir) / f"{model}_dist_{timestamp}"
     run_dir.mkdir(parents=True, exist_ok=True)
     weights_path = run_dir / "weights.pt"
 
-    # Shared memory directory
     shm_dir = Path("/dev/shm") / f"mario_{model}_{os.getpid()}"
     shm_dir.mkdir(parents=True, exist_ok=True)
 
-    # Create reference model on CPU for shm sizing only (deleted after)
-    if model == "ddqn":
-        from mario_rl.models.ddqn import DoubleDQN, DDQNConfig
+    # Create reference model for shm sizing (CPU only, deleted after)
+    ref_model, _ = create_model_and_learner(config, device=None)
+    torch.save(ref_model.state_dict(), weights_path)
 
-        ref_config = DDQNConfig(input_shape=(4, 64, 64), num_actions=12, q_scale=config.q_scale)
-        ref_model = DoubleDQN(
-            input_shape=ref_config.input_shape,
-            num_actions=ref_config.num_actions,
-            feature_dim=ref_config.feature_dim,
-            hidden_dim=ref_config.hidden_dim,
-            dropout=ref_config.dropout,
-            q_scale=ref_config.q_scale,
-        )
-    else:
-        from mario_rl.models.dreamer import DreamerModel, DreamerModelConfig
-
-        ref_config = DreamerModelConfig(input_shape=(4, 64, 64), num_actions=12, latent_dim=config.latent_dim)
-        ref_model = DreamerModel(
-            input_shape=ref_config.input_shape,
-            num_actions=ref_config.num_actions,
-            latent_dim=ref_config.latent_dim,
-            hidden_dim=ref_config.hidden_dim,
-            rssm_hidden_dim=ref_config.rssm_hidden_dim,
-            actor_hidden_dim=ref_config.actor_hidden_dim,
-            critic_hidden_dim=ref_config.critic_hidden_dim,
-            imagination_horizon=ref_config.imagination_horizon,
-        )
-
-    # Create gradient pool in main process
+    # Initialize shared memory
     from mario_rl.distributed.shm_gradient_pool import SharedGradientPool
+    from mario_rl.distributed.shm_heartbeat import SharedHeartbeat
 
     gradient_pool = SharedGradientPool(
         num_workers=workers,
@@ -496,15 +493,18 @@ def main(
         create=True,
     )
     shm_paths = [gradient_pool.buffer_path(i) for i in range(workers)]
-
-    # Save initial weights
-    torch.save(ref_model.state_dict(), weights_path)
     del ref_model
+
+    heartbeats = SharedHeartbeat(num_workers=workers, shm_dir=shm_dir, create=True)
 
     # Register cleanup
     def cleanup_shm():
         try:
             gradient_pool.unlink()
+        except Exception:
+            pass
+        try:
+            heartbeats.unlink()
         except Exception:
             pass
         try:
@@ -515,28 +515,20 @@ def main(
 
     atexit.register(cleanup_shm)
 
-    # Create heartbeats
-    from mario_rl.distributed.shm_heartbeat import SharedHeartbeat
-
-    heartbeats = SharedHeartbeat(num_workers=workers, shm_dir=shm_dir, create=True)
-    atexit.register(heartbeats.unlink)
-
-    # UI queue
+    # UI setup
     ui_queue: Queue | None = Queue() if not no_ui else None
-
-    # Start UI process (if enabled)
     ui_process = None
+
     if not no_ui:
         from mario_rl.training.training_ui import TrainingUI
 
         def run_ui():
-            ui = TrainingUI(num_workers=workers, message_queue=ui_queue)
-            ui.run()
+            TrainingUI(num_workers=workers, message_queue=ui_queue).run()
 
         ui_process = Process(target=run_ui, daemon=True)
         ui_process.start()
 
-    # Start workers (pass shm_dir so they can attach to heartbeats)
+    # Start workers
     worker_processes = []
     for i in range(workers):
         p = Process(
@@ -561,40 +553,27 @@ def main(
     if no_ui:
         print("Started coordinator")
 
-    # Start worker monitor thread
-    stop_monitor = threading.Event()
+    # Process manager
+    stop_event = threading.Event()
+    manager = ProcessManager(
+        workers=worker_processes,
+        coordinator=coord_process,
+        ui=ui_process,
+        gradient_pool=gradient_pool,
+        heartbeats=heartbeats,
+        stop_event=stop_event,
+    )
 
-    def monitor_workers():
-        # Initial delay to let workers start up
-        time.sleep(60.0)
-        while not stop_monitor.is_set():
-            try:
-                stale = heartbeats.stale_workers(timeout=60.0)
-                for wid in stale:
-                    if stop_monitor.is_set():
-                        break
-                    print(f"Warning: Worker {wid} appears stale")
-            except Exception:
-                pass
-            time.sleep(10.0)
+    # Monitor thread
+    start_monitor_thread(heartbeats, stop_event)
 
-    monitor_thread = threading.Thread(target=monitor_workers, daemon=True)
-    monitor_thread.start()
-
-    # Store main PID for signal handler
+    # Signal handling
     main_pid = os.getpid()
 
     def shutdown():
         print("\nShutting down...")
-        stop_monitor.set()
-        for p, _ in worker_processes:
-            if p.is_alive():
-                p.terminate()
-        if coord_process.is_alive():
-            coord_process.terminate()
-        if ui_process and ui_process.is_alive():
-            ui_process.terminate()
-        gradient_pool.unlink()
+        manager.terminate_all()
+        manager.cleanup()
 
     def signal_handler(sig, frame):
         if os.getpid() == main_pid:
@@ -606,7 +585,7 @@ def main(
     signal.signal(signal.SIGINT, signal_handler)
     signal.signal(signal.SIGTERM, signal_handler)
 
-    # Wait for processes
+    # Main loop
     try:
         if ui_process:
             ui_process.join()
