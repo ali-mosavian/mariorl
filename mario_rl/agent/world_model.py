@@ -224,13 +224,13 @@ class FrameEncoder(nn.Module):
         # 64 -> 31 (k=4,s=2) -> 14 (k=4,s=2) -> 6 (k=3,s=2) -> 2 (k=3,s=2)
         self.conv = nn.Sequential(
             nn.Conv2d(frames * channels, 32, kernel_size=4, stride=2, padding=1),
-            nn.ReLU(),
+            nn.GELU(),
             nn.Conv2d(32, 64, kernel_size=4, stride=2, padding=1),
-            nn.ReLU(),
+            nn.GELU(),
             nn.Conv2d(64, 128, kernel_size=4, stride=2, padding=1),
-            nn.ReLU(),
+            nn.GELU(),
             nn.Conv2d(128, 256, kernel_size=4, stride=2, padding=1),
-            nn.ReLU(),
+            nn.GELU(),
             nn.Flatten(),
         )
 
@@ -293,11 +293,11 @@ class FrameDecoder(nn.Module):
 
         self.deconv = nn.Sequential(
             nn.ConvTranspose2d(256, 128, kernel_size=4, stride=2, padding=1),  # 4 -> 8
-            nn.ReLU(),
+            nn.GELU(),
             nn.ConvTranspose2d(128, 64, kernel_size=4, stride=2, padding=1),  # 8 -> 16
-            nn.ReLU(),
+            nn.GELU(),
             nn.ConvTranspose2d(64, 32, kernel_size=4, stride=2, padding=1),  # 16 -> 32
-            nn.ReLU(),
+            nn.GELU(),
             nn.ConvTranspose2d(32, out_channels, kernel_size=4, stride=2, padding=1),  # 32 -> 64
             nn.Sigmoid(),
         )
@@ -352,7 +352,7 @@ class DynamicsModel(nn.Module):
         # Predict next latent distribution
         self.fc_out = nn.Sequential(
             nn.Linear(hidden_dim, hidden_dim),
-            nn.ReLU(),
+            nn.GELU(),
         )
         self.fc_mu = nn.Linear(hidden_dim, latent_dim)
         self.fc_logvar = nn.Linear(hidden_dim, latent_dim)
@@ -408,9 +408,9 @@ class RewardPredictor(nn.Module):
         super().__init__()
         self.net = nn.Sequential(
             nn.Linear(latent_dim, hidden_dim),
-            nn.ReLU(),
+            nn.GELU(),
             nn.Linear(hidden_dim, hidden_dim),
-            nn.ReLU(),
+            nn.GELU(),
             nn.Linear(hidden_dim, 1),
         )
 
@@ -430,7 +430,7 @@ class TerminalPredictor(nn.Module):
         super().__init__()
         self.net = nn.Sequential(
             nn.Linear(latent_dim, hidden_dim),
-            nn.ReLU(),
+            nn.GELU(),
             nn.Linear(hidden_dim, 1),
             nn.Sigmoid(),
         )
@@ -727,9 +727,9 @@ class LatentQNetwork(nn.Module):
         super().__init__()
         self.q_net = nn.Sequential(
             nn.Linear(latent_dim, hidden_dim),
-            nn.ReLU(),
+            nn.GELU(),
             nn.Linear(hidden_dim, hidden_dim),
-            nn.ReLU(),
+            nn.GELU(),
             nn.Linear(hidden_dim, num_actions),
         )
 
@@ -748,20 +748,20 @@ class LatentDuelingDQN(nn.Module):
         # Shared feature layer
         self.feature = nn.Sequential(
             nn.Linear(latent_dim, hidden_dim),
-            nn.ReLU(),
+            nn.GELU(),
         )
 
         # Advantage stream
         self.advantage = nn.Sequential(
             nn.Linear(hidden_dim, hidden_dim),
-            nn.ReLU(),
+            nn.GELU(),
             nn.Linear(hidden_dim, num_actions),
         )
 
         # Value stream
         self.value = nn.Sequential(
             nn.Linear(hidden_dim, hidden_dim),
-            nn.ReLU(),
+            nn.GELU(),
             nn.Linear(hidden_dim, 1),
         )
 
