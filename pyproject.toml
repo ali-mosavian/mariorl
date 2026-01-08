@@ -20,6 +20,8 @@ dependencies = [
     "opencv-python-headless>=4.8.0",  # Fast image processing (replaces slow skimage.resize)
     "scikit-image>=0.21.0",
     "stable-baselines3[extra]>=2.0.0",
+    "pyzmq>=25.0.0",  # ZeroMQ for non-blocking event messaging
+    "msgpack>=1.0.0",  # Fast binary serialization for events
 ]
 
 [project.optional-dependencies]

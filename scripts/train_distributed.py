@@ -35,7 +35,13 @@ from torch import nn
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from mario_rl.training.training_ui import UIMessage, MessageType
+from mario_rl.distributed.events import (
+    EventPublisher,
+    EventSubscriber,
+    format_event,
+    event_to_ui_message,
+    make_endpoint,
+)
 
 
 # =============================================================================
@@ -129,23 +135,9 @@ def create_model_and_learner(
     return model, learner
 
 
-def make_logger(prefix: str, ui_queue: Queue | None, source_id: int = -1):
-    """Create a logger function that writes to UI queue or stdout."""
-
-    def log(msg: str) -> None:
-        if ui_queue:
-            try:
-                msg_type = MessageType.WORKER_LOG if source_id >= 0 else MessageType.LEARNER_LOG
-                ui_queue.put_nowait(UIMessage(
-                    msg_type=msg_type,
-                    source_id=source_id,
-                    data={"text": f"{prefix} {msg}"},
-                ))
-            except Exception:
-                pass
-        print(f"{prefix} {msg}", flush=True)  # Always print to stdout too
-
-    return log
+def make_event_publisher(endpoint: str, source_id: int = -1) -> EventPublisher:
+    """Create an EventPublisher for a child process."""
+    return EventPublisher(endpoint=endpoint, source_id=source_id)
 
 
 def install_exit_handler():
@@ -187,11 +179,11 @@ def run_worker(
     weights_path: Path,
     shm_path: Path,
     shm_dir: Path,
-    ui_queue: Queue | None = None,
+    zmq_endpoint: str,
 ) -> None:
     """Run a training worker process."""
     install_exit_handler()
-    log = make_logger(f"[W{worker_id}]", ui_queue, source_id=worker_id)
+    events = make_event_publisher(zmq_endpoint, source_id=worker_id)
 
     try:
         from mario_rl.environment.factory import create_mario_env
@@ -200,7 +192,7 @@ def run_worker(
         from mario_rl.training.shared_gradient_tensor import attach_tensor_buffer
 
         device = get_device()
-        log(f"Starting on {device}...")
+        events.log(f"Starting on {device}...")
 
         # Worker-specific epsilon for diverse exploration
         eps_base = 0.4
@@ -237,7 +229,7 @@ def run_worker(
             create=False,
         )
 
-        log(f"Started (ε_end={epsilon_end:.4f})")
+        events.log(f"Started (ε_end={epsilon_end:.4f})")
 
         # Training loop state
         version = 0
@@ -276,29 +268,21 @@ def run_worker(
             # Periodic logging
             if grads_sent % 10 == 0:
                 eps = worker.epsilon_at(worker.total_steps)
-                log(f"steps={worker.total_steps}, eps={total_episodes}, ε={eps:.4f}, best_x={best_x}, grads={grads_sent}")
+                events.log(f"steps={worker.total_steps}, eps={total_episodes}, ε={eps:.4f}, best_x={best_x}, grads={grads_sent}")
 
-            # UI update
-            if ui_queue:
-                try:
-                    ui_queue.put_nowait(UIMessage(
-                        msg_type=MessageType.WORKER_STATUS,
-                        source_id=worker_id,
-                        data={
-                            "episode": total_episodes,
-                            "step": worker.total_steps,
-                            "best_x": best_x,
-                            "best_x_ever": best_x,
-                            "epsilon": worker.epsilon_at(worker.total_steps),
-                            "x_pos": info.get("final_x_pos", 0),
-                            "reward": info.get("episode_reward", 0),
-                        },
-                    ))
-                except Exception:
-                    pass
+            # Status update (sent via ZMQ)
+            events.status(
+                episode=total_episodes,
+                step=worker.total_steps,
+                best_x=best_x,
+                best_x_ever=best_x,
+                epsilon=worker.epsilon_at(worker.total_steps),
+                x_pos=info.get("final_x_pos", 0),
+                reward=info.get("episode_reward", 0),
+            )
 
     except Exception as e:
-        log(f"Error: {e}")
+        events.log(f"Error: {e}")
         import traceback
         traceback.print_exc()
         sys.exit(1)
@@ -314,17 +298,17 @@ def run_coordinator(
     weights_path: Path,
     checkpoint_dir: Path,
     shm_dir: Path,
-    ui_queue: Queue | None = None,
+    zmq_endpoint: str,
 ) -> None:
     """Run the training coordinator process."""
     install_exit_handler()
-    log = make_logger("[COORD]", ui_queue)
+    events = make_event_publisher(zmq_endpoint, source_id=-1)
 
     try:
         from mario_rl.distributed.training_coordinator import TrainingCoordinator
 
         device = get_device()
-        log(f"Starting on {device}...")
+        events.log(f"Starting on {device}...")
 
         _, learner = create_model_and_learner(config, device)
 
@@ -343,7 +327,7 @@ def run_coordinator(
             create_shm=False,
         )
 
-        log("Started")
+        events.log("Started")
 
         last_log = time.time()
         grads_since_log = 0
@@ -356,22 +340,15 @@ def run_coordinator(
             if time.time() - last_log > 5.0:
                 elapsed = time.time() - last_log
                 grads_per_sec = grads_since_log / elapsed
-                log(f"update={result['update_count']}, steps={result['total_steps']}, grads/s={grads_per_sec:.1f}")
+                events.log(f"update={result['update_count']}, steps={result['total_steps']}, grads/s={grads_per_sec:.1f}")
 
-                if ui_queue:
-                    try:
-                        ui_queue.put_nowait(UIMessage(
-                            msg_type=MessageType.LEARNER_STATUS,
-                            source_id=-1,
-                            data={
-                                "step": result["update_count"],
-                                "timesteps": result["total_steps"],
-                                "grads_per_sec": grads_per_sec,
-                                "gradients_received": result.get("gradients_processed", 0),
-                            },
-                        ))
-                    except Exception:
-                        pass
+                # Status update (sent via ZMQ)
+                events.status(
+                    step=result["update_count"],
+                    timesteps=result["total_steps"],
+                    grads_per_sec=grads_per_sec,
+                    gradients_received=result.get("gradients_processed", 0),
+                )
 
                 last_log = time.time()
                 grads_since_log = 0
@@ -381,7 +358,7 @@ def run_coordinator(
                 time.sleep(0.01)
 
     except Exception as e:
-        log(f"Error: {e}")
+        events.log(f"Error: {e}")
         import traceback
         traceback.print_exc()
         sys.exit(1)
@@ -545,7 +522,16 @@ def main(
 
     atexit.register(cleanup_shm)
 
-    # UI setup
+    # ZMQ event system
+    zmq_endpoint = make_endpoint()
+    event_sub = EventSubscriber(zmq_endpoint)
+    
+    # Cleanup ZMQ on exit
+    def cleanup_zmq():
+        event_sub.close()
+    atexit.register(cleanup_zmq)
+
+    # UI setup (only queue for forwarding to UI process)
     ui_queue: Queue | None = Queue() if not no_ui else None
     ui_process = None
 
@@ -559,30 +545,26 @@ def main(
         )
         ui_process.start()
 
-    # Start workers
+    # Start workers (pass zmq_endpoint, not ui_queue)
     worker_processes = []
     for i in range(workers):
         p = Process(
             target=run_worker,
-            args=(i, config, weights_path, shm_paths[i], shm_dir),
-            kwargs={"ui_queue": ui_queue},
+            args=(i, config, weights_path, shm_paths[i], shm_dir, zmq_endpoint),
             daemon=True,
         )
         p.start()
         worker_processes.append((p, i))
-        if no_ui:
-            print(f"Started worker {i}")
+        print(f"Started worker {i}")
 
-    # Start coordinator
+    # Start coordinator (pass zmq_endpoint, not ui_queue)
     coord_process = Process(
         target=run_coordinator,
-        args=(config, weights_path, run_dir, shm_dir),
-        kwargs={"ui_queue": ui_queue},
+        args=(config, weights_path, run_dir, shm_dir, zmq_endpoint),
         daemon=True,
     )
     coord_process.start()
-    if no_ui:
-        print("Started coordinator")
+    print("Started coordinator")
 
     # Process manager
     stop_event = threading.Event()
@@ -616,14 +598,32 @@ def main(
     signal.signal(signal.SIGINT, signal_handler)
     signal.signal(signal.SIGTERM, signal_handler)
 
-    # Main loop
+    # Main event loop - poll ZMQ and route events
     try:
-        if ui_process:
-            ui_process.join()
-            shutdown()
-        else:
-            coord_process.join()
+        while True:
+            # Check if coordinator is still alive
+            if not coord_process.is_alive():
+                print("Coordinator exited")
+                break
+            
+            # Poll events from ZMQ (non-blocking)
+            for event in event_sub.poll(timeout_ms=50):
+                if ui_queue:
+                    # Forward to UI process
+                    try:
+                        ui_queue.put_nowait(event_to_ui_message(event))
+                    except Exception:
+                        pass
+                else:
+                    # Print to stdout
+                    text = format_event(event)
+                    if text:
+                        print(text, flush=True)
+            
+            time.sleep(0.01)
     except KeyboardInterrupt:
+        pass
+    finally:
         shutdown()
 
 
