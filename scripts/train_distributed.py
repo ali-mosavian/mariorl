@@ -181,6 +181,7 @@ def run_worker(
     shm_path: Path,
     shm_dir: Path,
     zmq_endpoint: str,
+    run_dir: Path,
 ) -> None:
     """Run a training worker process."""
     install_exit_handler()
@@ -191,6 +192,7 @@ def run_worker(
         from mario_rl.distributed.training_worker import TrainingWorker
         from mario_rl.distributed.shm_heartbeat import SharedHeartbeat
         from mario_rl.training.shared_gradient_tensor import attach_tensor_buffer
+        from mario_rl.metrics import MetricLogger, DDQNMetrics, DreamerMetrics
 
         device = get_device()
         events.log(f"Starting on {device}...")
@@ -204,6 +206,16 @@ def run_worker(
         env = create_mario_env(level=level, render_frames=False)
         _, learner = create_model_and_learner(config, device)
 
+        # Create metrics logger for this worker
+        schema = DDQNMetrics if config.model == "ddqn" else DreamerMetrics
+        csv_path = run_dir / f"worker_{worker_id}.csv"
+        logger = MetricLogger(
+            source_id=f"worker.{worker_id}",
+            schema=schema,
+            csv_path=csv_path,
+            publisher=events,
+        )
+
         worker = TrainingWorker(
             env=env,
             learner=learner,
@@ -215,6 +227,8 @@ def run_worker(
             epsilon_start=config.epsilon_start,
             epsilon_end=epsilon_end,
             epsilon_decay_steps=config.epsilon_decay_steps,
+            logger=logger,
+            flush_every=config.collect_steps * 10,  # Flush every 10 cycles
         )
 
         gradient_buffer = attach_tensor_buffer(
@@ -300,6 +314,7 @@ def run_coordinator(
     checkpoint_dir: Path,
     shm_dir: Path,
     zmq_endpoint: str,
+    run_dir: Path,
 ) -> None:
     """Run the training coordinator process."""
     install_exit_handler()
@@ -307,11 +322,21 @@ def run_coordinator(
 
     try:
         from mario_rl.distributed.training_coordinator import TrainingCoordinator
+        from mario_rl.metrics import MetricLogger, CoordinatorMetrics
 
         device = get_device()
         events.log(f"Starting on {device}...")
 
         _, learner = create_model_and_learner(config, device)
+
+        # Create metrics logger for coordinator
+        csv_path = run_dir / "coordinator.csv"
+        logger = MetricLogger(
+            source_id="coordinator",
+            schema=CoordinatorMetrics,
+            csv_path=csv_path,
+            publisher=events,
+        )
 
         coordinator = TrainingCoordinator(
             learner=learner,
@@ -326,6 +351,7 @@ def run_coordinator(
             target_update_interval=config.target_update_interval,
             checkpoint_interval=config.checkpoint_interval,
             create_shm=False,
+            logger=logger,
         )
 
         events.log("Started")
@@ -554,7 +580,7 @@ def main(
     for i in range(workers):
         p = Process(
             target=run_worker,
-            args=(i, config, weights_path, shm_paths[i], shm_dir, zmq_endpoint),
+            args=(i, config, weights_path, shm_paths[i], shm_dir, zmq_endpoint, run_dir),
             daemon=True,
         )
         p.start()
@@ -564,7 +590,7 @@ def main(
     # Start coordinator (pass zmq_endpoint, not ui_queue)
     coord_process = Process(
         target=run_coordinator,
-        args=(config, weights_path, run_dir, shm_dir, zmq_endpoint),
+        args=(config, weights_path, run_dir, shm_dir, zmq_endpoint, run_dir),
         daemon=True,
     )
     coord_process.start()
