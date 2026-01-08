@@ -85,6 +85,11 @@ class TrainingWorker:
         return self.learner.model
 
     @property
+    def device(self) -> torch.device:
+        """Get device the model is on."""
+        return next(self.model.parameters()).device
+
+    @property
     def buffer(self) -> ReplayBuffer:
         """Access the replay buffer."""
         return self._buffer
@@ -107,7 +112,7 @@ class TrainingWorker:
 
         state = self._preprocess_state(state)
         with torch.no_grad():
-            state_t = torch.from_numpy(state).unsqueeze(0).float()
+            state_t = torch.from_numpy(state).unsqueeze(0).float().to(self.device)
             q_values = self.model(state_t)
             return int(q_values.argmax(dim=1).item())
 
@@ -161,8 +166,8 @@ class TrainingWorker:
                 f"Not enough data in buffer: {len(self._buffer)} < {self.batch_size}"
             )
 
-        # Sample batch
-        batch = self._buffer.sample(self.batch_size)
+        # Sample batch and move to device
+        batch = self._buffer.sample(self.batch_size, device=str(self.device))
 
         # Zero gradients
         self.model.zero_grad()

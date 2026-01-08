@@ -36,6 +36,15 @@ import torch
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 
+def get_device() -> torch.device:
+    """Get best available accelerator device."""
+    if torch.cuda.is_available():
+        return torch.device("cuda")
+    if hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
+        return torch.device("mps")
+    return torch.device("cpu")
+
+
 # =============================================================================
 # Configuration
 # =============================================================================
@@ -108,7 +117,8 @@ def run_worker(
             print(f"[W{worker_id}] {msg}", flush=True)
 
     try:
-        log("Starting...")
+        device = get_device()
+        log(f"Starting on {device}...")
 
         # Worker-specific epsilon (diverse exploration)
         eps_base = 0.4
@@ -117,7 +127,7 @@ def run_worker(
         # Create environment
         env = create_mario_env(level=(1, 1), render_frames=False)
 
-        # Create model and learner
+        # Create model and learner on accelerator
         if config.model == "ddqn":
             from mario_rl.models.ddqn import DoubleDQN, DDQNConfig
             from mario_rl.learners.ddqn import DDQNLearner
@@ -134,7 +144,7 @@ def run_worker(
                 hidden_dim=model_config.hidden_dim,
                 dropout=model_config.dropout,
                 q_scale=model_config.q_scale,
-            )
+            ).to(device)
             learner = DDQNLearner(model=model, gamma=config.gamma)
         else:
             from mario_rl.models.dreamer import DreamerModel, DreamerModelConfig
@@ -154,7 +164,7 @@ def run_worker(
                 actor_hidden_dim=model_config.actor_hidden_dim,
                 critic_hidden_dim=model_config.critic_hidden_dim,
                 imagination_horizon=model_config.imagination_horizon,
-            )
+            ).to(device)
             learner = DreamerLearner(model=model, gamma=config.gamma)
 
         # Create training worker
@@ -293,7 +303,7 @@ def run_coordinator(
             print(f"[COORD] {msg}", flush=True)
 
     try:
-        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        device = get_device()
         log(f"Starting on {device}...")
 
         # Create model and learner
@@ -448,7 +458,7 @@ def main(
     shm_dir = Path("/dev/shm") / f"mario_{model}_{os.getpid()}"
     shm_dir.mkdir(parents=True, exist_ok=True)
 
-    # Create reference model for shm initialization
+    # Create reference model on CPU for shm sizing only (deleted after)
     if model == "ddqn":
         from mario_rl.models.ddqn import DoubleDQN, DDQNConfig
 
