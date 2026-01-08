@@ -87,7 +87,7 @@ def create_mario_env(
     base_env = SuperMarioBrosMultiLevel(level=level)
     env = JoypadSpace(base_env, actions=smb_actions.COMPLEX_MOVEMENT)
     env = SkipFrame(env, skip=4, render_frames=render_frames)
-    env = GrayScaleObservation(env, keep_dim=True)
+    env = GrayScaleObservation(env, keep_dim=False)
     env = ResizeObservation(env, shape=64)
     # Note: Normalization (x/255) is done in the neural network on GPU
     # This keeps observations as uint8 (smaller memory, faster transfer)

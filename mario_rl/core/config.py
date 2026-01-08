@@ -4,9 +4,14 @@ Configuration dataclasses for training.
 All configuration is immutable (frozen) to prevent accidental modification.
 """
 
+import os
+
 from typing import Tuple
 from typing import Literal
 from dataclasses import dataclass
+
+# Default to number of CPU cores (fallback to 4 if detection fails)
+_DEFAULT_NUM_WORKERS = os.cpu_count() or 4
 
 # Type for level specification
 LevelType = Literal["sequential", "random"] | Tuple[Literal[1, 2, 3, 4, 5, 6, 7, 8], Literal[1, 2, 3, 4]]
@@ -76,7 +81,7 @@ class WorkerConfig:
     entropy_coef: float = 0.01  # Coefficient for entropy bonus in loss
 
     # Stability settings (prevent Q-value explosion)
-    q_clip: float = 0.0  # Clip Q-values to [-q_clip, q_clip], 0 to disable
+    q_scale: float = 100.0  # Softsign activation scales Q-values to [-q_scale, q_scale]
     loss_threshold: float = 1000.0  # Skip gradient if loss exceeds this
 
     # Device (None = auto-detect)
@@ -104,7 +109,7 @@ class WorkerConfig:
             reward_scale=self.reward_scale,
             reward_clip=self.reward_clip,
             entropy_coef=self.entropy_coef,
-            q_clip=self.q_clip,
+            q_scale=self.q_scale,
             loss_threshold=self.loss_threshold,
             device=self.device,
             initial_steps=self.initial_steps,
@@ -137,7 +142,7 @@ class LearnerConfig:
     gamma: float = 0.99
 
     # Stability settings
-    q_clip: float = 0.0  # Clip Q-values to [-q_clip, q_clip], 0 to disable
+    q_scale: float = 100.0  # Softsign activation scales Q-values to [-q_scale, q_scale]
 
     # Scheduling
     lr_schedule_steps: int = 500_000
@@ -151,7 +156,7 @@ class LearnerConfig:
 class TrainingConfig:
     """Top-level training configuration."""
 
-    num_workers: int = 4
+    num_workers: int = _DEFAULT_NUM_WORKERS
     level: LevelType = (1, 1)
 
     # Worker settings
@@ -182,7 +187,7 @@ class TrainingConfig:
                 reward_scale=self.worker.reward_scale,
                 reward_clip=self.worker.reward_clip,
                 entropy_coef=self.worker.entropy_coef,
-                q_clip=self.worker.q_clip,
+                q_scale=self.worker.q_scale,
                 loss_threshold=self.worker.loss_threshold,
                 device=self.worker.device,
                 initial_steps=self.worker.initial_steps,

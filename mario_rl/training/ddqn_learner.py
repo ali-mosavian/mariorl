@@ -162,7 +162,7 @@ class DDQNLearner:
     latent_dim: int = 128  # Latent dimension for Dreamer network
     
     # Stability settings
-    q_clip: float = 0.0  # Clip Q-values to [-q_clip, q_clip], 0 to disable
+    q_scale: float = 100.0  # Softsign activation scales Q-values to [-q_scale, q_scale]
 
     # Scheduling
     total_timesteps: int = 2_000_000
@@ -222,7 +222,7 @@ class DDQNLearner:
                 input_shape=state_dim,
                 num_actions=action_dim,
                 latent_dim=self.latent_dim,
-                q_clip=self.q_clip,
+                q_scale=self.q_scale,
             ).to(self.device)
         else:
             # Standard pixel-based DDQN
@@ -232,7 +232,7 @@ class DDQNLearner:
                 feature_dim=512,
                 hidden_dim=256,
                 dropout=0.1,
-                q_clip=self.q_clip,
+                q_scale=self.q_scale,
             ).to(self.device)
 
         # Create gradient pool by attaching to existing shared memory files

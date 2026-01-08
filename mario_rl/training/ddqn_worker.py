@@ -126,14 +126,14 @@ class DDQNWorker:
                 input_shape=state_dim,
                 num_actions=self.action_dim,
                 latent_dim=self.config.latent_dim,
-                q_clip=self.config.q_clip,
+                q_scale=self.config.q_scale,
             ).to(device)
         else:
             # Standard pixel-based DDQN
             self.net = DoubleDQN(
                 input_shape=state_dim,
                 num_actions=self.action_dim,
-                q_clip=self.config.q_clip,
+                q_scale=self.config.q_scale,
             ).to(device)
 
         # Attach to SharedGradientTensor (must be after model creation)

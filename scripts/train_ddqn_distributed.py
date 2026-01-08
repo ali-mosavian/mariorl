@@ -381,7 +381,7 @@ def monitor_workers(
 @click.option("--eps-base", default=0.4, help="Base for per-worker epsilon (ε = base^(1+i/N))")
 @click.option("--eps-decay-steps", default=1_000_000, help="Steps for epsilon decay (1M = ~1hr with 16 workers)")
 # Stability settings
-@click.option("--q-clip", default=100.0, help="Clip Q-values to [-x, x] to prevent explosion (0 to disable)")
+@click.option("--q-scale", default=100.0, help="Softsign activation scales Q-values to [-x, x]")
 @click.option("--loss-threshold", default=1000.0, help="Skip gradient if loss exceeds this threshold")
 # Other
 @click.option("--total-steps", default=2_000_000, help="Total training steps (for LR schedule)")
@@ -416,7 +416,7 @@ def main(
     accumulate_grads: int,
     eps_base: float,
     eps_decay_steps: int,
-    q_clip: float,
+    q_scale: float,
     loss_threshold: float,
     total_steps: int,
     max_grad_norm: float,
@@ -512,7 +512,7 @@ def main(
         print(f"  LR: {lr} → {lr_end} (cosine)")
         print(f"  Gamma: {gamma}, N-step: {n_step}")
         print(f"  Tau: {tau}, Entropy coef: {entropy_coef}")
-        print(f"  Q-clip: {q_clip}, Loss threshold: {loss_threshold}, Reward clip: {reward_clip}")
+        print(f"  Q-scale: {q_scale}, Loss threshold: {loss_threshold}, Reward clip: {reward_clip}")
         print(f"  Local buffer: {local_buffer_size:,}, Batch: {batch_size}")
         print(f"  Collect steps: {collect_steps}, Train steps: {train_steps}")
         print(f"  Accumulate grads: {accumulate_grads}")
@@ -615,7 +615,7 @@ def main(
             reward_scale=reward_scale,
             reward_clip=reward_clip,
             entropy_coef=entropy_coef,
-            q_clip=q_clip,
+            q_scale=q_scale,
             loss_threshold=loss_threshold,
             initial_steps=initial_steps,  # Resume from correct timestep for epsilon decay
             buffer=buffer_config,
@@ -646,7 +646,7 @@ def main(
             "accumulate_grads": accumulate_grads,
             "max_grad_norm": max_grad_norm,
             "weight_decay": weight_decay,
-            "q_clip": q_clip,
+            "q_scale": q_scale,
             "use_dreamer": dreamer,
             "latent_dim": latent_dim,
             "ui_queue": ui_queue,

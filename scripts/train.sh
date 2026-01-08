@@ -26,7 +26,7 @@ PROJECT_ROOT="$SCRIPT_DIR/.."
   --train-steps 8 \
   --lr 1e-4 \
   --tau 0.001 \
-  --q-clip 0 \
+  --q-scale 1500 \
   --reward-clip 0 \
   --eps-decay-steps 100000 \
   "$@")

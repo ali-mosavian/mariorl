@@ -26,6 +26,8 @@ Architecture:
     │             └────────────┬────────────┘                         │
     │                          ↓                                      │
     │           Q(s,a) = V(s) + (A(s,a) - mean(A))                   │
+    │                          ↓                                      │
+    │              softsign(Q) * q_scale                              │
     │                                                                  │
     └─────────────────────────────────────────────────────────────────┘
 
@@ -169,7 +171,7 @@ class DDQNNet(nn.Module):
     - Nature DQN-style CNN backbone with modern improvements
     - Dueling architecture (separate value and advantage streams)
     - GELU activation, LayerNorm, Dropout, Orthogonal init
-    - Optional Q-value clipping to prevent runaway estimates
+    - Softsign activation with scaling to bound Q-values while retaining gradients
     """
 
     def __init__(
@@ -179,13 +181,13 @@ class DDQNNet(nn.Module):
         feature_dim: int = 512,
         hidden_dim: int = 256,
         dropout: float = 0.1,
-        q_clip: float = 0.0,
+        q_scale: float = 100.0,
     ):
         super().__init__()
         self.backbone = DDQNBackbone(input_shape, feature_dim, dropout)
         self.head = DuelingHead(feature_dim, num_actions, hidden_dim)
         self.num_actions = num_actions
-        self.q_clip = q_clip  # 0 = disabled, >0 = clip Q to [-q_clip, q_clip]
+        self.q_scale = q_scale  # Q-values bounded to [-q_scale, q_scale]
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """
@@ -199,13 +201,13 @@ class DDQNNet(nn.Module):
         """
         features = self.backbone(x)
         q_values = self.head(features)
-        
-        # Soft clip Q-values using tanh to prevent runaway estimates
-        # Unlike hard clamp, tanh maintains gradient flow at extreme values
-        # tanh(x/scale)*scale smoothly saturates to [-scale, scale]
-        if self.q_clip > 0:
-            q_values = torch.tanh(q_values / self.q_clip) * self.q_clip
-        
+
+        # Softsign activation: x / (1 + |x|) bounded to [-1, 1]
+        # Then scale to [-q_scale, q_scale]
+        # Softsign has polynomial gradient decay (1/(1+|x|)^2) vs tanh's exponential
+        # This retains gradients much better at extreme values
+        q_values = torch.nn.functional.softsign(q_values) * self.q_scale
+
         return q_values
 
     def get_action(self, x: torch.Tensor, epsilon: float = 0.0) -> torch.Tensor:
@@ -243,9 +245,9 @@ class DoubleDQN(nn.Module):
     Target network is updated via:
     - Soft update (polyak averaging): θ_target = τ * θ_online + (1-τ) * θ_target
     - Hard sync: copy online weights to target every N steps
-    
+
     Stability features:
-    - Optional Q-value clipping to prevent runaway estimates
+    - Softsign activation with scaling bounds Q-values while retaining gradients
     """
 
     def __init__(
@@ -255,13 +257,13 @@ class DoubleDQN(nn.Module):
         feature_dim: int = 512,
         hidden_dim: int = 256,
         dropout: float = 0.1,
-        q_clip: float = 0.0,
+        q_scale: float = 100.0,
     ):
         super().__init__()
-        self.online = DDQNNet(input_shape, num_actions, feature_dim, hidden_dim, dropout, q_clip)
-        self.target = DDQNNet(input_shape, num_actions, feature_dim, hidden_dim, dropout, q_clip)
+        self.online = DDQNNet(input_shape, num_actions, feature_dim, hidden_dim, dropout, q_scale)
+        self.target = DDQNNet(input_shape, num_actions, feature_dim, hidden_dim, dropout, q_scale)
         self.num_actions = num_actions
-        self.q_clip = q_clip
+        self.q_scale = q_scale
 
         # Copy online weights to target and freeze target
         self.sync_target()
