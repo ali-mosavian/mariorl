@@ -164,17 +164,20 @@ class TrainingUI:
 
                 if msg.msg_type == MessageType.LEARNER_STATUS:
                     self.learner_status = msg.data
-                    # Track loss history for standard learner
-                    if "loss" in msg.data:
-                        self.loss_history.append(msg.data["loss"])
+                    # Track loss history for standard learner (support both field names)
+                    loss = msg.data.get("loss", 0)
+                    if loss:
+                        self.loss_history.append(loss)
                         if len(self.loss_history) > self.max_history:
                             self.loss_history.pop(0)
                     # Track graph history for distributed DDQN
-                    if "avg_reward" in msg.data and "timesteps" in msg.data:
-                        timesteps = msg.data.get("timesteps", 0)
+                    # Support both old (timesteps) and new (total_steps) field names
+                    timesteps = msg.data.get("timesteps", msg.data.get("total_steps", 0))
+                    avg_reward = msg.data.get("avg_reward", 0)
+                    if timesteps > 0:
                         # Only add new data points (avoid duplicates)
                         if not self.graph_steps_history or timesteps > self.graph_steps_history[-1]:
-                            self.graph_reward_history.append(msg.data.get("avg_reward", 0))
+                            self.graph_reward_history.append(avg_reward)
                             self.graph_speed_history.append(msg.data.get("avg_speed", 0))
                             self.graph_entropy_history.append(msg.data.get("avg_entropy", 0))
                             self.graph_steps_history.append(timesteps)
@@ -195,8 +198,9 @@ class TrainingUI:
                     self.worker_statuses[msg.source_id] = new_data
 
                     # Track global convergence metrics when episode ends
-                    old_episode = old_data.get("episode", 0)
-                    new_episode = new_data.get("episode", 0)
+                    # Support both old (episode) and new (episodes) field names
+                    old_episode = old_data.get("episode", old_data.get("episodes", 0))
+                    new_episode = new_data.get("episode", new_data.get("episodes", 0))
                     if new_episode > old_episode and new_episode > 0:
                         # New episode completed - track metrics
                         self.total_episodes += 1
@@ -636,7 +640,8 @@ class TrainingUI:
 
         ls = self.learner_status
         if ls:
-            step = ls.get("step", 0)
+            # Support both old and new field names
+            step = ls.get("step", ls.get("update_count", 0))
             loss = ls.get("loss", 0)
             avg_loss = ls.get("avg_loss", 0)
             buf_size = ls.get("buf_size", 0)
@@ -649,12 +654,12 @@ class TrainingUI:
             steps_per_sec = ls.get("steps_per_sec", 0)
             queue_msgs_per_sec = ls.get("queue_msgs_per_sec", 0)
             queue_kb_per_sec = ls.get("queue_kb_per_sec", 0)
-            # New diagnostics from DDQN learner
-            lr = ls.get("lr", 0)
+            # New diagnostics from DDQN learner / new metrics system
+            lr = ls.get("lr", ls.get("learning_rate", 0))
             grads_per_sec = ls.get("grads_per_sec", 0)
             gradients_received = ls.get("gradients_received", 0)
-            timesteps = ls.get("timesteps", 0)
-            total_episodes = ls.get("total_episodes", 0)
+            timesteps = ls.get("timesteps", ls.get("total_steps", 0))
+            total_episodes = ls.get("total_episodes", ls.get("episodes", 0))
             weight_version = ls.get("weight_version", 0)
 
             # Progress bar for steps
@@ -884,18 +889,19 @@ class TrainingUI:
         stdscr.addstr(y, 2 + len(header), "─" * (width - len(header) - 4))
 
         if ws:
-            episode = ws.get("episode", 0)
+            # Support both old and new field names
+            episode = ws.get("episode", ws.get("episodes", 0))
             reward = ws.get("reward", 0)
             x_pos = ws.get("x_pos", 0)
             best_x = ws.get("best_x", 0)
             deaths = ws.get("deaths", 0)
             flags = ws.get("flags", 0)
             epsilon = ws.get("epsilon", 1.0)
-            exp = ws.get("experiences", 0)
+            exp = ws.get("experiences", ws.get("buffer_size", 0))
             q_mean = ws.get("q_mean", 0)
             q_max = ws.get("q_max", 0)
             steps_per_sec = ws.get("steps_per_sec", 0)
-            step = ws.get("step", 0)
+            step = ws.get("step", ws.get("steps", 0))
             ws.get("curr_step", 0)
             last_weight_sync = ws.get("last_weight_sync", 0)
             weight_sync_count = ws.get("weight_sync_count", 0)
@@ -903,7 +909,7 @@ class TrainingUI:
             restores_without_progress = ws.get("restores_without_progress", 0)
             max_restores = ws.get("max_restores", 3)
             # Convergence metrics
-            rolling_avg_reward = ws.get("rolling_avg_reward", 0)
+            rolling_avg_reward = ws.get("rolling_avg_reward", ws.get("reward", 0))
             ws.get("first_flag_time", 0)
             best_x_ever = ws.get("best_x_ever", 0)
 
@@ -1105,9 +1111,9 @@ class TrainingUI:
                 pass
             return
 
-        # Extract all metrics
-        episode = ws.get("episode", 0)
-        step = ws.get("step", 0)
+        # Extract all metrics (support both old and new field names)
+        episode = ws.get("episode", ws.get("episodes", 0))
+        step = ws.get("step", ws.get("steps", 0))
         x_pos = ws.get("x_pos", 0)
         game_time = ws.get("game_time", 0)
         best_x_ever = ws.get("best_x_ever", 0)
@@ -1116,9 +1122,13 @@ class TrainingUI:
         reward = ws.get("reward", 0)
         deaths = ws.get("deaths", 0)
         flags = ws.get("flags", 0)
-        rolling_avg_reward = ws.get("rolling_avg_reward", 0)
+        rolling_avg_reward = ws.get("rolling_avg_reward", ws.get("reward", 0))
         buffer_fill_pct = ws.get("buffer_fill_pct", 0)
-        can_train = ws.get("can_train", False)
+        buffer_size = ws.get("buffer_size", 0)
+        # Compute buffer fill % from buffer_size if available
+        if buffer_fill_pct == 0 and buffer_size > 0:
+            buffer_fill_pct = min(100.0, buffer_size / 100.0)  # Rough estimate
+        can_train = ws.get("can_train", buffer_size >= 32)
         avg_speed = ws.get("avg_speed", 0)
         snapshot_restores = ws.get("snapshot_restores", 0)
         last_weight_sync = ws.get("last_weight_sync", 0)

@@ -127,6 +127,30 @@ def event_to_ui_message(event: dict[str, Any]) -> UIMessage:
     source_id = event.get("source_id", -1)
     data = event.get("data", {})
     
+    # Handle new metrics events
+    if msg_type_str == "metrics":
+        # Route to appropriate status type based on source
+        source = data.get("source", "")
+        snapshot = data.get("snapshot", {})
+        if source.startswith("worker."):
+            # Extract worker ID from source string
+            try:
+                worker_id = int(source.split(".")[1])
+            except (IndexError, ValueError):
+                worker_id = source_id
+            return UIMessage(
+                msg_type=MessageType.WORKER_STATUS,
+                source_id=worker_id,
+                data=snapshot,
+            )
+        else:
+            # Coordinator metrics
+            return UIMessage(
+                msg_type=MessageType.LEARNER_STATUS,
+                source_id=-1,
+                data=snapshot,
+            )
+    
     msg_type_map = {
         "worker_log": MessageType.WORKER_LOG,
         "learner_log": MessageType.LEARNER_LOG,
