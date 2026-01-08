@@ -42,6 +42,7 @@ from mario_rl.distributed.events import (
     event_to_ui_message,
     make_endpoint,
 )
+from mario_rl.metrics import MetricAggregator
 
 
 # =============================================================================
@@ -526,6 +527,9 @@ def main(
     zmq_endpoint = make_endpoint()
     event_sub = EventSubscriber(zmq_endpoint)
     
+    # Metrics aggregator for combining worker/coordinator stats
+    aggregator = MetricAggregator(num_workers=workers)
+    
     # Cleanup ZMQ on exit
     def cleanup_zmq():
         event_sub.close()
@@ -613,6 +617,12 @@ def main(
             
             # Poll events from ZMQ (non-blocking)
             for event in event_sub.poll(timeout_ms=50):
+                # Update aggregator with metrics events
+                if event.get("msg_type") == "metrics":
+                    source = event.get("data", {}).get("source", "")
+                    snapshot = event.get("data", {}).get("snapshot", {})
+                    aggregator.update(source, snapshot)
+                
                 if ui_queue:
                     # Forward to UI process
                     try:

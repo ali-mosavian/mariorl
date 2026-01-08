@@ -6,9 +6,11 @@ Combines:
 - Epsilon-greedy exploration
 - Gradient computation (via Learner)
 - Weight synchronization from file
+- Optional: MetricLogger for CSV/ZMQ metrics
+- Optional: LevelTracker for per-level stats
 """
 
-from typing import Any
+from typing import Any, Protocol
 from pathlib import Path
 from dataclasses import field
 from dataclasses import dataclass
@@ -21,6 +23,15 @@ from mario_rl.core.types import Transition
 from mario_rl.core.env_runner import EnvRunner
 from mario_rl.core.replay_buffer import ReplayBuffer
 from mario_rl.learners.base import Learner
+
+
+class MetricsLogger(Protocol):
+    """Protocol for metrics logger (avoids hard dependency)."""
+    
+    def count(self, name: str, n: int = 1) -> None: ...
+    def gauge(self, name: str, value: float) -> None: ...
+    def observe(self, name: str, value: float) -> None: ...
+    def flush(self) -> None: ...
 
 
 @dataclass
@@ -51,11 +62,17 @@ class TrainingWorker:
     # Tracking
     total_steps: int = 0
     weight_version: int = 0
+    total_episodes: int = 0
+
+    # Optional metrics (can be None)
+    logger: MetricsLogger | None = None
+    flush_every: int = 100  # Flush metrics every N steps
 
     # Internal state
     _buffer: ReplayBuffer = field(init=False, repr=False)
     _env_runner: EnvRunner = field(init=False, repr=False)
     _last_weights_mtime: float = field(init=False, default=0.0)
+    _steps_since_flush: int = field(init=False, default=0)
 
     def __post_init__(self) -> None:
         """Initialize buffer and env runner."""
@@ -145,6 +162,27 @@ class TrainingWorker:
             self._buffer.add(preprocessed)
 
         self.total_steps += num_steps
+        self._steps_since_flush += num_steps
+
+        # Track episodes completed
+        episodes_completed = info.get("episodes_completed", 0)
+        self.total_episodes += episodes_completed
+
+        # Update metrics if logger provided
+        if self.logger is not None:
+            self.logger.count("steps", n=num_steps)
+            self.logger.count("episodes", n=episodes_completed)
+            self.logger.gauge("epsilon", self.epsilon_at(self.total_steps))
+            self.logger.gauge("buffer_size", len(self._buffer))
+
+            # Track episode rewards
+            for reward in info.get("episode_rewards", []):
+                self.logger.observe("reward", reward)
+
+            # Flush periodically
+            if self._steps_since_flush >= self.flush_every:
+                self.logger.flush()
+                self._steps_since_flush = 0
 
         return info
 
@@ -195,6 +233,15 @@ class TrainingWorker:
         if batch.weights is not None and self.alpha > 0:
             td_errors = (batch.states.sum(dim=(1, 2, 3)).abs() * 0.01).detach().cpu().numpy()
             self._buffer.update_priorities(batch.indices, td_errors)
+
+        # Track training metrics
+        if self.logger is not None:
+            if "loss" in metrics:
+                self.logger.observe("loss", float(metrics["loss"]))
+            if "q_mean" in metrics:
+                self.logger.observe("q_mean", float(metrics["q_mean"]))
+            if "td_error" in metrics:
+                self.logger.observe("td_error", float(metrics["td_error"]))
 
         return gradients, metrics
 
