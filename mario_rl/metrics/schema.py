@@ -47,6 +47,14 @@ class CommonMetrics:
     EPSILON = MetricDef("epsilon", MetricType.GAUGE)
     STEPS_PER_SEC = MetricDef("steps_per_sec", MetricType.GAUGE)
     
+    # Mario-specific metrics (game state)
+    X_POS = MetricDef("x_pos", MetricType.GAUGE)
+    BEST_X = MetricDef("best_x", MetricType.GAUGE)
+    BEST_X_EVER = MetricDef("best_x_ever", MetricType.GAUGE)
+    DEATHS = MetricDef("deaths", MetricType.COUNTER)
+    FLAGS = MetricDef("flags", MetricType.COUNTER)
+    GRADS_SENT = MetricDef("grads_sent", MetricType.COUNTER)
+    
     @classmethod
     def definitions(cls) -> list[MetricDef]:
         """Return list of all common metric definitions."""
@@ -57,6 +65,12 @@ class CommonMetrics:
             cls.EPISODE_LENGTH,
             cls.EPSILON,
             cls.STEPS_PER_SEC,
+            cls.X_POS,
+            cls.BEST_X,
+            cls.BEST_X_EVER,
+            cls.DEATHS,
+            cls.FLAGS,
+            cls.GRADS_SENT,
         ]
 
 

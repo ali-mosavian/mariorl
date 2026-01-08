@@ -264,11 +264,33 @@ def run_worker(
             # Update stats
             info = result["collection_info"]
             total_episodes += info.get("episodes_completed", 0)
-            best_x = max(best_x, info.get("final_x_pos", 0))
+            x_pos = info.get("final_x_pos", 0)
+            best_x = max(best_x, x_pos)
+
+            # Update game-specific metrics in logger
+            logger.gauge("x_pos", x_pos)
+            logger.gauge("best_x", best_x)
+            logger.gauge("best_x_ever", best_x)
+            logger.count("grads_sent", n=0)  # Will increment below if gradient sent
 
             # Write gradients to shared memory
             if grads := result["gradients"]:
-                loss = result.get("train_metrics", [{}])[0].get("loss", 0.0)
+                train_metrics = result.get("train_metrics", [{}])
+                if train_metrics:
+                    m = train_metrics[0]
+                    loss = m.get("loss", 0.0)
+                    # Log training metrics
+                    if loss:
+                        logger.observe("loss", float(loss))
+                    if "q_mean" in m:
+                        logger.observe("q_mean", float(m["q_mean"]))
+                    if "td_error" in m:
+                        logger.observe("td_error", float(m["td_error"]))
+                    if "q_max" in m:
+                        logger.gauge("q_max", float(m["q_max"]))
+                else:
+                    loss = 0.0
+                
                 gradient_buffer.write(
                     grads=grads,
                     version=version,
@@ -279,22 +301,16 @@ def run_worker(
                     best_x=best_x,
                 )
                 grads_sent += 1
+                logger.count("grads_sent")
+
+            # Force periodic flush to send metrics to UI
+            if grads_sent % 5 == 0:
+                logger.flush()
 
             # Periodic logging
             if grads_sent % 10 == 0:
                 eps = worker.epsilon_at(worker.total_steps)
                 events.log(f"steps={worker.total_steps}, eps={total_episodes}, ε={eps:.4f}, best_x={best_x}, grads={grads_sent}")
-
-            # Status update (sent via ZMQ)
-            events.status(
-                episode=total_episodes,
-                step=worker.total_steps,
-                best_x=best_x,
-                best_x_ever=best_x,
-                epsilon=worker.epsilon_at(worker.total_steps),
-                x_pos=info.get("final_x_pos", 0),
-                reward=info.get("episode_reward", 0),
-            )
 
     except Exception as e:
         events.log(f"Error: {e}")
