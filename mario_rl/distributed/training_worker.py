@@ -76,7 +76,6 @@ class TrainingWorker:
     _env_runner: EnvRunner = field(init=False, repr=False)
     _last_weights_mtime: float = field(init=False, default=0.0)
     _steps_since_flush: int = field(init=False, default=0)
-    _last_collect_time: float = field(init=False, default=0.0)
 
     def __post_init__(self) -> None:
         """Initialize buffer and env runner."""
@@ -170,11 +169,10 @@ class TrainingWorker:
         self.total_steps += num_steps
         self._steps_since_flush += num_steps
 
-        # Calculate steps per second
+        # Calculate steps per second (actual collection duration)
         collect_end = time.time()
-        elapsed = collect_end - self._last_collect_time if self._last_collect_time > 0 else 1.0
+        elapsed = collect_end - collect_start
         steps_per_sec = num_steps / max(elapsed, 0.001)
-        self._last_collect_time = collect_end
 
         # Track episodes completed
         episodes_completed = info.get("episodes_completed", 0)
