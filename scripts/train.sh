@@ -2,6 +2,12 @@
 #
 # Train Mario using Distributed DDQN with optimized stability settings.
 #
+# Key settings for stable training:
+# - Soft Q-clipping (tanh) at 50 to prevent saturation while maintaining gradients
+# - Lower learning rate (1e-4) for stable updates
+# - Slow epsilon decay (2M steps) for thorough exploration
+# - Death penalty: -2 (once), Flag bonus: +15
+#
 # Usage:
 #   ./scripts/train.sh                     # Run with defaults
 #   ./scripts/train.sh --no-ui             # Run without UI
@@ -18,8 +24,9 @@ PROJECT_ROOT="$SCRIPT_DIR/.."
   --accumulate-grads 16 \
   --batch-size 128 \
   --train-steps 8 \
+  --lr 1e-4 \
   --tau 0.001 \
-  --q-clip 100 \
+  --q-clip 50 \
   --reward-clip 20 \
-  --eps-decay-steps 1000000 \
+  --eps-decay-steps 2000000 \
   "$@")

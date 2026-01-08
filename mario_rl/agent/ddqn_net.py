@@ -200,9 +200,11 @@ class DDQNNet(nn.Module):
         features = self.backbone(x)
         q_values = self.head(features)
         
-        # Clip Q-values to prevent runaway estimates during training instability
+        # Soft clip Q-values using tanh to prevent runaway estimates
+        # Unlike hard clamp, tanh maintains gradient flow at extreme values
+        # tanh(x/scale)*scale smoothly saturates to [-scale, scale]
         if self.q_clip > 0:
-            q_values = torch.clamp(q_values, -self.q_clip, self.q_clip)
+            q_values = torch.tanh(q_values / self.q_clip) * self.q_clip
         
         return q_values
 
