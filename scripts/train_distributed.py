@@ -531,12 +531,13 @@ def main(
     ui_process = None
 
     if not no_ui:
-        from mario_rl.training.training_ui import TrainingUI
+        from mario_rl.training.training_ui import run_ui
 
-        def run_ui():
-            TrainingUI(num_workers=workers, ui_queue=ui_queue).run()
-
-        ui_process = Process(target=run_ui, daemon=True)
+        ui_process = Process(
+            target=run_ui,
+            args=(workers, ui_queue),
+            daemon=True,
+        )
         ui_process.start()
 
     # Start workers
