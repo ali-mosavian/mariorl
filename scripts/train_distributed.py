@@ -606,6 +606,11 @@ def main(
                 print("Coordinator exited")
                 break
             
+            # Check if UI exited (user pressed 'q')
+            if ui_process is not None and not ui_process.is_alive():
+                print("UI exited, stopping training...")
+                break
+            
             # Poll events from ZMQ (non-blocking)
             for event in event_sub.poll(timeout_ms=50):
                 if ui_queue:
