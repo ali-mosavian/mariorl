@@ -107,10 +107,10 @@ def create_model_and_learner(
             model = model.to(device)
         learner = DDQNLearner(model=model, gamma=config.gamma)
     else:
-        from mario_rl.models.dreamer import DreamerModel, DreamerModelConfig
+        from mario_rl.models.dreamer import DreamerModel, DreamerConfig
         from mario_rl.learners.dreamer import DreamerLearner
 
-        cfg = DreamerModelConfig(
+        cfg = DreamerConfig(
             input_shape=(4, 64, 64),
             num_actions=12,
             latent_dim=config.latent_dim,
@@ -120,10 +120,6 @@ def create_model_and_learner(
             num_actions=cfg.num_actions,
             latent_dim=cfg.latent_dim,
             hidden_dim=cfg.hidden_dim,
-            rssm_hidden_dim=cfg.rssm_hidden_dim,
-            actor_hidden_dim=cfg.actor_hidden_dim,
-            critic_hidden_dim=cfg.critic_hidden_dim,
-            imagination_horizon=cfg.imagination_horizon,
         )
         if device:
             model = model.to(device)
