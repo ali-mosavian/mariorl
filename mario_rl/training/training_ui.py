@@ -956,9 +956,11 @@ class TrainingUI:
 
             # Convergence metrics line (rolling avg + speed + flag time)
             avg_color = curses.color_pair(1) if rolling_avg_reward > 0 else curses.color_pair(3)
-            avg_speed = ws.get("avg_speed", 0)
+            # Support both old (avg_speed) and new (speed) field names
+            avg_speed = ws.get("avg_speed", ws.get("speed", 0))
             avg_x_at_death = ws.get("avg_x_at_death", 0)
             avg_time_to_flag = ws.get("avg_time_to_flag", 0)
+            total_deaths = ws.get("total_deaths", ws.get("deaths", 0))
 
             # Buffer diagnostics
             buffer_fill_pct = ws.get("buffer_fill_pct", 0)
@@ -1147,7 +1149,9 @@ class TrainingUI:
         if buffer_fill_pct == 0 and buffer_size > 0:
             buffer_fill_pct = min(100.0, buffer_size / 100.0)  # Rough estimate
         can_train = ws.get("can_train", buffer_size >= 32)
-        avg_speed = ws.get("avg_speed", 0)
+        # Support both old (avg_speed) and new (speed) field names
+        avg_speed = ws.get("avg_speed", ws.get("speed", 0))
+        total_deaths = ws.get("total_deaths", ws.get("deaths", 0))
         snapshot_restores = ws.get("snapshot_restores", 0)
         last_weight_sync = ws.get("last_weight_sync", 0)
 

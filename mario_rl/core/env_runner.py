@@ -29,6 +29,8 @@ class CollectionInfo:
     current_level: str = ""
     episode_rewards: list[float] = field(default_factory=list)
     episode_speeds: list[float] = field(default_factory=list)  # x_pos / time_spent per episode
+    deaths: int = 0  # Number of deaths this collection
+    flags: int = 0   # Number of flags captured this collection
 
 
 @dataclass
@@ -86,6 +88,8 @@ class EnvRunner:
             "current_level": info.current_level,
             "episode_rewards": info.episode_rewards,
             "episode_speeds": info.episode_speeds,
+            "deaths": info.deaths,
+            "flags": info.flags,
         }
 
     def _collect_impl(self, num_steps: int) -> tuple[list[Transition], CollectionInfo]:
@@ -111,6 +115,8 @@ class EnvRunner:
         episode_reward = 0.0
         episode_start_time: int = 400  # Mario timer starts at 400
         episode_x_pos = 0
+        deaths = 0
+        flags = 0
 
         for _ in range(num_steps):
             # Get action
@@ -154,6 +160,14 @@ class EnvRunner:
                     episode_speed = episode_x_pos / time_spent
                     episode_speeds.append(episode_speed)
                 
+                # Track deaths and flag captures
+                is_dead = info.get("is_dead", False) or info.get("is_dying", False)
+                got_flag = info.get("flag_get", False)
+                if got_flag:
+                    flags += 1
+                elif is_dead:
+                    deaths += 1
+                
                 episodes_completed += 1
                 episode_rewards.append(episode_reward)
                 episode_reward = 0.0
@@ -179,6 +193,8 @@ class EnvRunner:
             current_level=current_level,
             episode_rewards=episode_rewards,
             episode_speeds=episode_speeds,
+            deaths=deaths,
+            flags=flags,
         )
 
     def _process_reward(self, reward: float) -> float:

@@ -268,6 +268,14 @@ def run_worker(
             best_x = max(best_x, x_pos)
             game_time = info.get("game_time", 0)
             current_level = info.get("current_level", "")
+            
+            # Track deaths and flags
+            deaths_this_cycle = info.get("deaths", 0)
+            flags_this_cycle = info.get("flags", 0)
+            if deaths_this_cycle > 0:
+                logger.count("deaths", n=deaths_this_cycle)
+            if flags_this_cycle > 0:
+                logger.count("flags", n=flags_this_cycle)
 
             # Update game-specific metrics in logger
             logger.gauge("x_pos", x_pos)
