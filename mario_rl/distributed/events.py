@@ -1,8 +1,8 @@
 """
 ZeroMQ-based event system for distributed training.
 
-Provides non-blocking pub/sub messaging between child processes and the main process.
-Child processes publish events, main process subscribes and routes them.
+Uses PUSH/PULL pattern for many-to-one messaging (workers -> main).
+Child processes push events, main process pulls and routes them.
 
 Uses msgpack for fast binary serialization.
 """
@@ -10,8 +10,7 @@ from __future__ import annotations
 
 import logging
 import os
-import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 import msgpack
@@ -27,23 +26,20 @@ from mario_rl.training.training_ui import MessageType, UIMessage
 
 @dataclass
 class EventPublisher:
-    """ZMQ PUB socket wrapper for sending events."""
+    """ZMQ PUSH socket wrapper for sending events."""
     
     endpoint: str
     source_id: int = -1
-    _sock: zmq.Socket | None = None
+    _sock: zmq.Socket = field(init=False, repr=False)
     
     def __post_init__(self) -> None:
         ctx = zmq.Context.instance()
-        self._sock = ctx.socket(zmq.PUB)
+        self._sock = ctx.socket(zmq.PUSH)
+        self._sock.setsockopt(zmq.LINGER, 0)  # Don't block on close
         self._sock.connect(self.endpoint)
-        # Small delay to let socket connect before first message
-        time.sleep(0.05)
     
     def publish(self, msg_type: str, data: dict[str, Any]) -> None:
         """Publish an event (non-blocking, fire-and-forget)."""
-        if self._sock is None:
-            return
         try:
             payload = msgpack.packb({
                 "msg_type": msg_type,
@@ -66,9 +62,7 @@ class EventPublisher:
     
     def close(self) -> None:
         """Close the socket."""
-        if self._sock is not None:
-            self._sock.close()
-            self._sock = None
+        self._sock.close()
 
 
 # =============================================================================
@@ -78,21 +72,19 @@ class EventPublisher:
 
 @dataclass
 class EventSubscriber:
-    """ZMQ SUB socket wrapper for receiving events."""
+    """ZMQ PULL socket wrapper for receiving events."""
     
     endpoint: str
-    _sock: zmq.Socket | None = None
+    _sock: zmq.Socket = field(init=False, repr=False)
     
     def __post_init__(self) -> None:
         ctx = zmq.Context.instance()
-        self._sock = ctx.socket(zmq.SUB)
+        self._sock = ctx.socket(zmq.PULL)
+        self._sock.setsockopt(zmq.LINGER, 0)
         self._sock.bind(self.endpoint)
-        self._sock.setsockopt_string(zmq.SUBSCRIBE, "")  # Subscribe to all
     
     def poll(self, timeout_ms: int = 10) -> list[dict[str, Any]]:
         """Poll for events (non-blocking). Returns list of event dicts."""
-        if self._sock is None:
-            return []
         events = []
         while self._sock.poll(timeout_ms, zmq.POLLIN):
             try:
@@ -104,9 +96,7 @@ class EventSubscriber:
     
     def close(self) -> None:
         """Close the socket."""
-        if self._sock is not None:
-            self._sock.close()
-            self._sock = None
+        self._sock.close()
 
 
 # =============================================================================
