@@ -10,6 +10,7 @@ Combines:
 - Optional: LevelTracker for per-level stats
 """
 
+import time
 from typing import Any, Protocol
 from pathlib import Path
 from dataclasses import field
@@ -75,6 +76,7 @@ class TrainingWorker:
     _env_runner: EnvRunner = field(init=False, repr=False)
     _last_weights_mtime: float = field(init=False, default=0.0)
     _steps_since_flush: int = field(init=False, default=0)
+    _last_collect_time: float = field(init=False, default=0.0)
 
     def __post_init__(self) -> None:
         """Initialize buffer and env runner."""
@@ -149,6 +151,8 @@ class TrainingWorker:
         Returns:
             Collection info dict
         """
+        collect_start = time.time()
+        
         transitions, info = self._env_runner.collect_with_info(num_steps)
 
         # Add to buffer with preprocessing
@@ -166,6 +170,12 @@ class TrainingWorker:
         self.total_steps += num_steps
         self._steps_since_flush += num_steps
 
+        # Calculate steps per second
+        collect_end = time.time()
+        elapsed = collect_end - self._last_collect_time if self._last_collect_time > 0 else 1.0
+        steps_per_sec = num_steps / max(elapsed, 0.001)
+        self._last_collect_time = collect_end
+
         # Track episodes completed
         episodes_completed = info.get("episodes_completed", 0)
         self.total_episodes += episodes_completed
@@ -176,6 +186,7 @@ class TrainingWorker:
             self.logger.count("episodes", n=episodes_completed)
             self.logger.gauge("epsilon", self.epsilon_at(self.total_steps))
             self.logger.gauge("buffer_size", len(self._buffer))
+            self.logger.gauge("steps_per_sec", steps_per_sec)
 
             # Track episode rewards
             for reward in info.get("episode_rewards", []):
