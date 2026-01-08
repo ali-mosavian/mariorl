@@ -28,6 +28,7 @@ class CollectionInfo:
     game_time: int = 0
     current_level: str = ""
     episode_rewards: list[float] = field(default_factory=list)
+    episode_speeds: list[float] = field(default_factory=list)  # x_pos / time_spent per episode
 
 
 @dataclass
@@ -84,6 +85,7 @@ class EnvRunner:
             "game_time": info.game_time,
             "current_level": info.current_level,
             "episode_rewards": info.episode_rewards,
+            "episode_speeds": info.episode_speeds,
         }
 
     def _collect_impl(self, num_steps: int) -> tuple[list[Transition], CollectionInfo]:
@@ -105,7 +107,10 @@ class EnvRunner:
         game_time = 0
         current_level = ""
         episode_rewards: list[float] = []
+        episode_speeds: list[float] = []
         episode_reward = 0.0
+        episode_start_time: int = 400  # Mario timer starts at 400
+        episode_x_pos = 0
 
         for _ in range(num_steps):
             # Get action
@@ -132,6 +137,7 @@ class EnvRunner:
 
             # Track position and game state
             final_x_pos = info.get("x_pos", final_x_pos)
+            episode_x_pos = info.get("x_pos", episode_x_pos)
             
             # Extract game time from nested state dict
             state_info = info.get("state", {})
@@ -141,10 +147,18 @@ class EnvRunner:
             current_level = info.get("level", current_level)
 
             if done:
-                # Episode ended
+                # Episode ended - calculate speed (x_pos / time_spent)
+                # Mario's timer counts DOWN from 400, so time_spent = start_time - end_time
+                time_spent = episode_start_time - game_time
+                if time_spent > 0:
+                    episode_speed = episode_x_pos / time_spent
+                    episode_speeds.append(episode_speed)
+                
                 episodes_completed += 1
                 episode_rewards.append(episode_reward)
                 episode_reward = 0.0
+                episode_x_pos = 0
+                episode_start_time = 400  # Reset for next episode
                 
                 if self.on_episode_end is not None:
                     self.on_episode_end()
@@ -164,6 +178,7 @@ class EnvRunner:
             game_time=game_time,
             current_level=current_level,
             episode_rewards=episode_rewards,
+            episode_speeds=episode_speeds,
         )
 
     def _process_reward(self, reward: float) -> float:

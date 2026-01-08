@@ -274,10 +274,11 @@ def run_worker(
             logger.gauge("best_x", best_x)
             logger.gauge("best_x_ever", best_x)
             logger.gauge("game_time", game_time)
-            # Calculate game speed (x_pos / game_time) - how fast Mario advances
-            if game_time > 0:
-                speed = x_pos / game_time
+            
+            # Log episode speeds (x_pos / time_spent, calculated at episode end)
+            for speed in info.get("episode_speeds", []):
                 logger.observe("speed", speed)
+            
             # Parse level string (e.g. "1-1") into world/stage
             if current_level and "-" in current_level:
                 try:
