@@ -25,6 +25,9 @@ class CollectionInfo:
     total_reward: float
     episodes_completed: int
     final_x_pos: int = 0
+    game_time: int = 0
+    current_level: str = ""
+    episode_rewards: list[float] = field(default_factory=list)
 
 
 @dataclass
@@ -78,6 +81,9 @@ class EnvRunner:
             "total_reward": info.total_reward,
             "episodes_completed": info.episodes_completed,
             "final_x_pos": info.final_x_pos,
+            "game_time": info.game_time,
+            "current_level": info.current_level,
+            "episode_rewards": info.episode_rewards,
         }
 
     def _collect_impl(self, num_steps: int) -> tuple[list[Transition], CollectionInfo]:
@@ -96,6 +102,10 @@ class EnvRunner:
         total_reward = 0.0
         episodes_completed = 0
         final_x_pos = 0
+        game_time = 0
+        current_level = ""
+        episode_rewards: list[float] = []
+        episode_reward = 0.0
 
         for _ in range(num_steps):
             # Get action
@@ -108,6 +118,7 @@ class EnvRunner:
             # Process reward
             processed_reward = self._process_reward(reward)
             total_reward += reward  # Track raw reward
+            episode_reward += reward
 
             # Create transition
             transition = Transition(
@@ -119,12 +130,22 @@ class EnvRunner:
             )
             transitions.append(transition)
 
-            # Track position
+            # Track position and game state
             final_x_pos = info.get("x_pos", final_x_pos)
+            
+            # Extract game time from nested state dict
+            state_info = info.get("state", {})
+            game_time = state_info.get("time", game_time) if isinstance(state_info, dict) else game_time
+            
+            # Get current level if available
+            current_level = info.get("level", current_level)
 
             if done:
                 # Episode ended
                 episodes_completed += 1
+                episode_rewards.append(episode_reward)
+                episode_reward = 0.0
+                
                 if self.on_episode_end is not None:
                     self.on_episode_end()
 
@@ -140,6 +161,9 @@ class EnvRunner:
             total_reward=total_reward,
             episodes_completed=episodes_completed,
             final_x_pos=final_x_pos,
+            game_time=game_time,
+            current_level=current_level,
+            episode_rewards=episode_rewards,
         )
 
     def _process_reward(self, reward: float) -> float:

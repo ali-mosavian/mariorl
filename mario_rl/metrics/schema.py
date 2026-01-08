@@ -51,6 +51,9 @@ class CommonMetrics:
     X_POS = MetricDef("x_pos", MetricType.GAUGE)
     BEST_X = MetricDef("best_x", MetricType.GAUGE)
     BEST_X_EVER = MetricDef("best_x_ever", MetricType.GAUGE)
+    GAME_TIME = MetricDef("game_time", MetricType.GAUGE)
+    WORLD = MetricDef("world", MetricType.GAUGE)
+    STAGE = MetricDef("stage", MetricType.GAUGE)
     DEATHS = MetricDef("deaths", MetricType.COUNTER)
     FLAGS = MetricDef("flags", MetricType.COUNTER)
     GRADS_SENT = MetricDef("grads_sent", MetricType.COUNTER)
@@ -68,6 +71,9 @@ class CommonMetrics:
             cls.X_POS,
             cls.BEST_X,
             cls.BEST_X_EVER,
+            cls.GAME_TIME,
+            cls.WORLD,
+            cls.STAGE,
             cls.DEATHS,
             cls.FLAGS,
             cls.GRADS_SENT,

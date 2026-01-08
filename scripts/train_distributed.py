@@ -266,11 +266,22 @@ def run_worker(
             total_episodes += info.get("episodes_completed", 0)
             x_pos = info.get("final_x_pos", 0)
             best_x = max(best_x, x_pos)
+            game_time = info.get("game_time", 0)
+            current_level = info.get("current_level", "")
 
             # Update game-specific metrics in logger
             logger.gauge("x_pos", x_pos)
             logger.gauge("best_x", best_x)
             logger.gauge("best_x_ever", best_x)
+            logger.gauge("game_time", game_time)
+            # Parse level string (e.g. "1-1") into world/stage
+            if current_level and "-" in current_level:
+                try:
+                    w, s = current_level.split("-")
+                    logger.gauge("world", int(w))
+                    logger.gauge("stage", int(s))
+                except ValueError:
+                    pass
             logger.count("grads_sent", n=0)  # Will increment below if gradient sent
 
             # Write gradients to shared memory

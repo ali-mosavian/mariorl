@@ -883,7 +883,16 @@ class TrainingUI:
         ws = self.worker_statuses.get(worker_id, {})
 
         # Header with level info
-        current_level = ws.get("current_level", "?") if ws else "?"
+        if ws:
+            # Try new world/stage format first, fall back to current_level string
+            world = ws.get("world", 0)
+            stage = ws.get("stage", 0)
+            if world > 0 and stage > 0:
+                current_level = f"{int(world)}-{int(stage)}"
+            else:
+                current_level = ws.get("current_level", "?")
+        else:
+            current_level = "?"
         header = f"├─ WORKER {worker_id} [{current_level}] "
         stdscr.addstr(y, 2, header, curses.A_BOLD | curses.color_pair(5))
         stdscr.addstr(y, 2 + len(header), "─" * (width - len(header) - 4))
@@ -1078,7 +1087,16 @@ class TrainingUI:
         ws = self.worker_statuses.get(worker_id, {})
 
         # Header with worker ID and level
-        current_level = ws.get("current_level", "?") if ws else "?"
+        if ws:
+            # Try new world/stage format first, fall back to current_level string
+            world = ws.get("world", 0)
+            stage = ws.get("stage", 0)
+            if world > 0 and stage > 0:
+                current_level = f"{int(world)}-{int(stage)}"
+            else:
+                current_level = ws.get("current_level", "?")
+        else:
+            current_level = "?"
         header = f"W{worker_id}[{current_level}]"
         
         # Calculate heartbeat status
