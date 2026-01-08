@@ -91,6 +91,7 @@ class Encoder(nn.Module):
 
     def sample(self, mu: Tensor, logvar: Tensor) -> Tensor:
         """Reparameterization trick for VAE sampling."""
+        logvar = logvar.clamp(-10, 2)  # Clamp for numerical stability
         std = torch.exp(0.5 * logvar)
         eps = torch.randn_like(std)
         return mu + eps * std
@@ -275,12 +276,15 @@ class DreamerModel(nn.Module):
         """Encode observations to latent space.
 
         Args:
-            x: Observations (batch, C, H, W)
+            x: Observations (batch, C, H, W), can be [0, 255] or [0, 1]
             deterministic: If True, use mean; if False, sample from distribution
 
         Returns:
             z: Latent representation (batch, latent_dim)
         """
+        # Normalize to [0, 1] if needed (auto-detect based on max value)
+        if x.max() > 1.0:
+            x = x / 255.0
         return self.encoder.encode(x, deterministic)
 
     def imagine_step(
