@@ -59,6 +59,7 @@ class Config:
     level: str = "1,1"
     collect_steps: int = 64
     train_steps: int = 4
+    accumulate_grads: int = 1  # Gradients to accumulate before update
     learning_rate: float = 1e-4
     lr_min: float = 1e-5
     lr_decay_steps: int = 1_000_000
@@ -70,8 +71,7 @@ class Config:
     batch_size: int = 32
     n_step: int = 3
     alpha: float = 0.6
-    epsilon_start: float = 1.0
-    epsilon_end: float = 0.01
+    eps_base: float = 0.4  # Base for per-worker epsilon
     epsilon_decay_steps: int = 1_000_000
     q_scale: float = 100.0
     latent_dim: int = 128
@@ -198,8 +198,7 @@ def run_worker(
         events.log(f"Starting on {device}...")
 
         # Worker-specific epsilon for diverse exploration
-        eps_base = 0.4
-        epsilon_end = eps_base ** (1 + (worker_id + 1) / config.num_workers)
+        epsilon_end = config.eps_base ** (1 + (worker_id + 1) / config.num_workers)
 
         # Create components
         level = parse_level(config.level)
@@ -224,7 +223,7 @@ def run_worker(
             n_step=config.n_step,
             gamma=config.gamma,
             alpha=config.alpha,
-            epsilon_start=config.epsilon_start,
+            epsilon_start=1.0,
             epsilon_end=epsilon_end,
             epsilon_decay_steps=config.epsilon_decay_steps,
             logger=logger,
@@ -298,24 +297,22 @@ def run_worker(
             
             best_x = max(best_x, x_pos)
             
-            # Count deaths (life transitions from >0 to 0) and flags from step infos
-            # Also track death positions for hotspot aggregation
+            # Count deaths and flags from episode_end_infos
+            # Death = episode ended without capturing flag
             deaths_this_cycle = 0
             death_positions: list[int] = []
             flags_this_cycle = 0
-            prev_life = None
-            prev_x = 0
-            for step_info in step_infos:
-                life = step_info.get("life", 0)
-                curr_x = step_info.get("x_pos", prev_x)
-                if prev_life is not None and prev_life > 0 and life == 0:
-                    deaths_this_cycle += 1
-                    death_positions.append(prev_x)  # Position just before death
-                prev_life = life
-                prev_x = curr_x
-                
-                if step_info.get("flag_get", False):
+            
+            for ep_info in episode_end_infos:
+                if ep_info.get("flag_get", False):
+                    # Completed level
                     flags_this_cycle += 1
+                else:
+                    # Episode ended without flag = death (or timeout, but usually death)
+                    deaths_this_cycle += 1
+                    death_x = ep_info.get("x_pos", 0)
+                    if death_x > 0:
+                        death_positions.append(death_x)
             
             if deaths_this_cycle > 0:
                 logger.count("deaths", n=deaths_this_cycle)
@@ -428,6 +425,7 @@ def run_coordinator(
             weight_decay=config.weight_decay,
             max_grad_norm=config.max_grad_norm,
             tau=config.tau,
+            accumulate_count=config.accumulate_grads,
             target_update_interval=config.target_update_interval,
             checkpoint_interval=config.checkpoint_interval,
             create_shm=False,
@@ -455,6 +453,9 @@ def run_coordinator(
                     timesteps=result["total_steps"],
                     grads_per_sec=grads_per_sec,
                     gradients_received=result.get("gradients_processed", 0),
+                    grad_norm=result.get("grad_norm", 0.0),
+                    weight_version=result.get("weight_version", 0),
+                    lr=result.get("lr", 0.0),
                 )
 
                 last_log = time.time()
@@ -544,13 +545,33 @@ def start_monitor_thread(
 
 @click.command()
 @click.option("--model", type=click.Choice(["ddqn", "dreamer"]), default="ddqn", help="Model type")
-@click.option("--workers", default=4, help="Number of workers")
-@click.option("--level", "-l", default="1,1", help="Level: 'random', 'sequential', or 'W,S' (e.g. '1,1')")
+@click.option("--workers", "-w", default=4, help="Number of workers")
+@click.option("--level", "-l", default="random", help="Level: 'random', 'sequential', or 'W,S' (e.g. '1,1')")
 @click.option("--save-dir", default="checkpoints", help="Directory for checkpoints")
-@click.option("--lr", default=1e-4, help="Learning rate")
+# Learning hyperparameters
+@click.option("--lr", default=2.5e-4, help="Initial learning rate")
+@click.option("--lr-end", default=1e-5, help="Final learning rate")
 @click.option("--gamma", default=0.99, help="Discount factor")
-@click.option("--batch-size", default=32, help="Batch size")
-@click.option("--buffer-size", default=10000, help="Buffer capacity per worker")
+@click.option("--n-step", default=3, help="N-step returns")
+@click.option("--tau", default=0.001, help="Soft update coefficient")
+# Worker settings
+@click.option("--buffer-size", default=10_000, help="Buffer capacity per worker")
+@click.option("--batch-size", default=32, help="Batch size per worker")
+@click.option("--collect-steps", default=64, help="Steps to collect per cycle")
+@click.option("--train-steps", default=4, help="Gradient computations per cycle")
+# Learner settings
+@click.option("--accumulate-grads", default=1, help="Gradients to accumulate before update")
+# Epsilon settings
+@click.option("--eps-base", default=0.4, help="Base for per-worker epsilon (ε = base^(1+i/N))")
+@click.option("--eps-decay-steps", default=1_000_000, help="Steps for epsilon decay")
+# Stability settings
+@click.option("--q-scale", default=100.0, help="Q-value scale for softsign")
+@click.option("--max-grad-norm", default=10.0, help="Maximum gradient norm")
+@click.option("--weight-decay", default=1e-4, help="L2 regularization")
+# Dreamer specific
+@click.option("--latent-dim", default=128, help="Latent dimension for Dreamer")
+# Other
+@click.option("--total-steps", default=2_000_000, help="Total training steps (for LR schedule)")
 @click.option("--no-ui", is_flag=True, help="Disable ncurses UI")
 def main(
     model: str,
@@ -558,29 +579,60 @@ def main(
     level: str,
     save_dir: str,
     lr: float,
+    lr_end: float,
     gamma: float,
-    batch_size: int,
+    n_step: int,
+    tau: float,
     buffer_size: int,
+    batch_size: int,
+    collect_steps: int,
+    train_steps: int,
+    accumulate_grads: int,
+    eps_base: float,
+    eps_decay_steps: int,
+    q_scale: float,
+    max_grad_norm: float,
+    weight_decay: float,
+    latent_dim: int,
+    total_steps: int,
     no_ui: bool,
 ) -> None:
     """Train Mario using distributed gradient updates."""
     print("=" * 70)
-    print("Distributed Training (Modular)")
+    print("Distributed Training")
     print("=" * 70)
     print(f"  Model: {model}")
     print(f"  Workers: {workers}, Level: {level}")
-    print(f"  LR: {lr}, Gamma: {gamma}")
+    print(f"  LR: {lr} → {lr_end} (cosine), Gamma: {gamma}")
+    print(f"  Tau: {tau}, N-step: {n_step}")
     print(f"  Batch: {batch_size}, Buffer: {buffer_size}")
+    print(f"  Collect steps: {collect_steps}, Train steps: {train_steps}")
+    print(f"  Accumulate grads: {accumulate_grads}")
+    print(f"  Epsilon: {eps_base}^(1+i/N), decay: {eps_decay_steps:,}")
+    print(f"  Q-scale: {q_scale}, Max grad norm: {max_grad_norm}")
     print("=" * 70)
 
     config = Config(
         model=model,
         num_workers=workers,
         level=level,
+        collect_steps=collect_steps,
+        train_steps=train_steps,
+        accumulate_grads=accumulate_grads,
         learning_rate=lr,
+        lr_min=lr_end,
+        lr_decay_steps=total_steps,
         gamma=gamma,
-        batch_size=batch_size,
+        tau=tau,
+        max_grad_norm=max_grad_norm,
+        weight_decay=weight_decay,
         buffer_capacity=buffer_size,
+        batch_size=batch_size,
+        n_step=n_step,
+        eps_base=eps_base,
+        epsilon_decay_steps=eps_decay_steps,
+        q_scale=q_scale,
+        latent_dim=latent_dim,
     )
 
     # Setup directories
@@ -651,7 +703,7 @@ def main(
             main_csv_file = open(main_csv_path, "w", newline="")
             fieldnames = [
                 "timestamp", "update_count", "total_steps", "total_episodes",
-                "grads_per_sec", "learning_rate", "weight_version",
+                "grads_per_sec", "total_sps", "learning_rate", "weight_version",
                 "avg_reward", "avg_speed", "avg_loss", "q_mean", "td_error", "grad_norm",
             ]
             main_csv_writer = csv.DictWriter(main_csv_file, fieldnames=fieldnames)
@@ -666,6 +718,7 @@ def main(
             "total_steps": data.get("timesteps", data.get("total_steps", 0)),
             "total_episodes": data.get("total_episodes", 0),
             "grads_per_sec": data.get("grads_per_sec", 0),
+            "total_sps": data.get("total_sps", 0),
             "learning_rate": data.get("lr", data.get("learning_rate", 0)),
             "weight_version": data.get("weight_version", 0),
             "avg_reward": data.get("avg_reward", 0),
@@ -749,6 +802,8 @@ def main(
         # Close main process CSV
         if main_csv_file is not None:
             main_csv_file.close()
+        # Save death hotspots on exit
+        hotspot_aggregator.save_if_dirty()
 
     def signal_handler(sig, frame):
         if os.getpid() == main_pid:
@@ -800,6 +855,7 @@ def main(
                     event["data"]["q_mean"] = agg.get("mean_q_mean", 0.0)
                     event["data"]["td_error"] = agg.get("mean_td_error", 0.0)
                     event["data"]["total_episodes"] = agg.get("total_episodes", 0)
+                    event["data"]["total_sps"] = agg.get("total_steps_per_sec", 0.0)
                     
                     # Write enhanced metrics to CSV
                     write_main_metrics(event["data"])
@@ -816,9 +872,9 @@ def main(
                     if text:
                         print(text, flush=True)
             
-            # Periodically save death hotspots (every 60 seconds)
+            # Periodically save death hotspots (every 30 seconds)
             now = time.time()
-            if now - last_hotspot_save > 60:
+            if now - last_hotspot_save > 30:
                 if hotspot_aggregator.save_if_dirty():
                     pass  # Saved successfully
                 last_hotspot_save = now

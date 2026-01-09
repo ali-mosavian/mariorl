@@ -60,6 +60,7 @@ class TrainingCoordinator:
     weight_decay: float = 1e-4
     max_grad_norm: float = 10.0
     tau: float = 0.001  # Soft update coefficient for target network
+    accumulate_count: int = 1  # Gradients to accumulate before update
 
     # Update intervals
     target_update_interval: int = 1  # Update target every step
@@ -80,6 +81,10 @@ class TrainingCoordinator:
     _last_checkpoint: int = field(init=False, default=0)
     _updates_since_flush: int = field(init=False, default=0)
     _last_update_time: float = field(init=False, default=0.0)
+    _pending_grads: list = field(init=False, default_factory=list)
+    _pending_timesteps: int = field(init=False, default=0)
+    _last_grad_norm: float = field(init=False, default=0.0)
+    _weight_version: int = field(init=False, default=0)
 
     def __post_init__(self) -> None:
         """Initialize gradient pool, optimizer, and directories."""
@@ -162,11 +167,11 @@ class TrainingCoordinator:
             if name in averaged:
                 param.grad = averaged[name].to(param.device)
 
-        # Gradient clipping
-        torch.nn.utils.clip_grad_norm_(
+        # Gradient clipping (returns total norm before clipping)
+        self._last_grad_norm = torch.nn.utils.clip_grad_norm_(
             self.model.parameters(),
             self.max_grad_norm,
-        )
+        ).item()
 
         # Optimizer step
         self.optimizer.step()
@@ -256,29 +261,40 @@ class TrainingCoordinator:
         """
         weights_path = self.checkpoint_dir / "weights.pt"
         torch.save(self.model.state_dict(), weights_path)
+        self._weight_version += 1
         return weights_path
 
     def training_step(self) -> dict[str, Any]:
         """Run one training step.
 
-        Polls gradients, aggregates, applies, and updates LR/targets.
+        Polls gradients, accumulates until we have enough, then applies.
 
         Returns:
             Step info dict
         """
         # Poll gradients
         packets = self.poll_gradients()
+        grads_received = len(packets)
 
-        if not packets:
+        if packets:
+            # Add to pending gradients
+            for p in packets:
+                self._pending_grads.append(p.grads)
+                self._pending_timesteps += p.timesteps
+
+        # Check if we have enough to apply
+        if len(self._pending_grads) < self.accumulate_count:
             return {
                 "update_count": self._update_count,
                 "total_steps": self._total_steps,
-                "gradients_processed": 0,
+                "gradients_processed": grads_received,
             }
 
-        # Extract gradients and sum timesteps
-        grads_list = [p.grads for p in packets]
-        timesteps = sum(p.timesteps for p in packets)
+        # We have enough - apply accumulated gradients
+        grads_list = self._pending_grads[:]
+        timesteps = self._pending_timesteps
+        self._pending_grads.clear()
+        self._pending_timesteps = 0
 
         # Apply gradients
         self.apply_gradients(grads_list)
@@ -293,7 +309,7 @@ class TrainingCoordinator:
         if self._last_update_time > 0:
             dt = now - self._last_update_time
             if dt > 0:
-                grads_per_sec = len(packets) / dt
+                grads_per_sec = len(grads_list) / dt
         self._last_update_time = now
 
         # Update LR
@@ -325,9 +341,12 @@ class TrainingCoordinator:
         return {
             "update_count": self._update_count,
             "total_steps": self._total_steps,
-            "gradients_processed": len(packets),
+            "gradients_processed": grads_received,
+            "gradients_applied": len(grads_list),
             "lr": self.current_lr(),
             "grads_per_sec": grads_per_sec,
+            "grad_norm": self._last_grad_norm,
+            "weight_version": self._weight_version,
         }
 
     def close(self) -> None:

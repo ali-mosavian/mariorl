@@ -10,8 +10,10 @@ from dataclasses import dataclass, field
 from typing import Any
 
 
-# Metrics that should be summed across workers (counters)
+# Metrics that should be summed across workers (counters and rates)
 COUNTER_METRICS = {"episodes", "steps", "deaths", "flags", "attempts", "completions"}
+# Rates that should be summed (total throughput, not averaged)
+SUM_RATE_METRICS = {"steps_per_sec", "grads_sent"}
 
 
 @dataclass
@@ -96,6 +98,9 @@ class MetricAggregator:
             
             if key in COUNTER_METRICS:
                 # Sum counters
+                result[f"total_{key}"] = sum(values)
+            elif key in SUM_RATE_METRICS:
+                # Sum rate metrics (total throughput across workers)
                 result[f"total_{key}"] = sum(values)
             else:
                 # Average and max for others

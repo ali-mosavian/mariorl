@@ -12,6 +12,7 @@ from datetime import datetime
 
 import pandas as pd
 import streamlit as st
+import plotly.express as px
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 
@@ -92,11 +93,16 @@ def load_death_hotspots(checkpoint_dir: str) -> dict[str, dict[int, int]] | None
     try:
         with open(json_path) as f:
             data = json.load(f)
+        
+        # Handle both old format (flat) and new format (with "levels" key)
+        levels_data = data.get("levels", data)
+        
         # Convert string keys to int for bucket positions
         result = {}
-        for level_id, buckets in data.items():
-            result[level_id] = {int(k): v for k, v in buckets.items()}
-        return result
+        for level_id, buckets in levels_data.items():
+            if isinstance(buckets, dict):
+                result[level_id] = {int(k): v for k, v in buckets.items()}
+        return result if result else None
     except Exception:
         return None
 
@@ -149,11 +155,11 @@ def make_chart(df: pd.DataFrame, metrics: list[tuple[str, str, str]], title: str
     fig.update_layout(
         title=dict(text=title, font=dict(size=14)),
         height=height,
-        margin=dict(l=0, r=0, t=30, b=0),
+        margin=dict(l=0, r=0, t=40, b=0),
         template="plotly_dark",
         paper_bgcolor="rgba(0,0,0,0)",
         plot_bgcolor="rgba(0,0,0,0)",
-        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0, font=dict(size=10)),
+        legend=dict(orientation="h", yanchor="bottom", y=1.0, xanchor="right", x=1, font=dict(size=10)),
         xaxis=dict(title="Time (min)", gridcolor="#313244", showgrid=True),
         yaxis=dict(gridcolor="#313244", showgrid=True),
     )
@@ -180,13 +186,14 @@ def render_coordinator_tab(df: pd.DataFrame) -> None:
 
     # Key metrics - row 2: Training metrics (aggregated from workers)
     st.caption("TRAINING METRICS (aggregated)")
-    cols2 = st.columns(6)
+    cols2 = st.columns(7)
     cols2[0].metric("Avg Reward", f"{latest.get('avg_reward', 0):.1f}")
     cols2[1].metric("Avg Speed", f"{latest.get('avg_speed', 0):.2f}")
     cols2[2].metric("Avg Loss", f"{latest.get('avg_loss', 0):.4f}")
     cols2[3].metric("Q Mean", f"{latest.get('q_mean', 0):.2f}")
     cols2[4].metric("TD Error", f"{latest.get('td_error', 0):.4f}")
     cols2[5].metric("Grad Norm", f"{latest.get('grad_norm', 0):.2f}")
+    cols2[6].metric("Total SPS", f"{latest.get('total_sps', 0):.0f}")
 
     st.divider()
 
@@ -201,10 +208,36 @@ def render_coordinator_tab(df: pd.DataFrame) -> None:
         st.plotly_chart(fig, use_container_width=True)
 
     with col2:
-        fig = make_chart(df, [
-            ("q_mean", "Q Mean", "blue"),
-            ("td_error", "TD Error", "sky"),
-        ], "Q-Values & TD Error")
+        # Dual y-axis for Q Mean and TD Error (different scales)
+        fig = go.Figure()
+        
+        if "q_mean" in df.columns:
+            fig.add_trace(go.Scatter(
+                x=df["elapsed_min"], y=df["q_mean"],
+                name="Q Mean", line=dict(color=COLORS["blue"], width=2),
+                mode="lines", yaxis="y",
+            ))
+        
+        if "td_error" in df.columns:
+            fig.add_trace(go.Scatter(
+                x=df["elapsed_min"], y=df["td_error"],
+                name="TD Error", line=dict(color=COLORS["sky"], width=2),
+                mode="lines", yaxis="y2",
+            ))
+        
+        fig.update_layout(
+            title=dict(text="Q-Values & TD Error", font=dict(size=14)),
+            height=280,
+            margin=dict(l=0, r=40, t=40, b=0),
+            template="plotly_dark",
+            paper_bgcolor="rgba(0,0,0,0)",
+            plot_bgcolor="rgba(0,0,0,0)",
+            legend=dict(orientation="h", yanchor="bottom", y=1.0, xanchor="right", x=1, font=dict(size=10)),
+            xaxis=dict(title="Time (min)", gridcolor="#313244", showgrid=True),
+            yaxis=dict(title=dict(text="Q Mean", font=dict(color=COLORS["blue"])), gridcolor="#313244", showgrid=True, side="left"),
+            yaxis2=dict(title=dict(text="TD Error", font=dict(color=COLORS["sky"])), gridcolor="#313244", overlaying="y", side="right"),
+        )
+        
         st.plotly_chart(fig, use_container_width=True)
 
     # Charts - row 2: Performance trends
@@ -232,9 +265,36 @@ def render_coordinator_tab(df: pd.DataFrame) -> None:
         st.plotly_chart(fig, use_container_width=True)
 
     with col6:
-        fig = make_chart(df, [
-            ("grads_per_sec", "Grads/sec", "mauve"),
-        ], "Throughput")
+        # Use dual y-axis for throughput since scales are very different
+        fig = go.Figure()
+        
+        if "total_sps" in df.columns:
+            fig.add_trace(go.Scatter(
+                x=df["elapsed_min"], y=df["total_sps"],
+                name="Steps/sec", line=dict(color=COLORS["green"], width=2),
+                mode="lines", yaxis="y",
+            ))
+        
+        if "grads_per_sec" in df.columns:
+            fig.add_trace(go.Scatter(
+                x=df["elapsed_min"], y=df["grads_per_sec"],
+                name="Grads/sec", line=dict(color=COLORS["mauve"], width=2),
+                mode="lines", yaxis="y2",
+            ))
+        
+        fig.update_layout(
+            title=dict(text="Throughput", font=dict(size=14)),
+            height=280,
+            margin=dict(l=0, r=40, t=40, b=0),
+            template="plotly_dark",
+            paper_bgcolor="rgba(0,0,0,0)",
+            plot_bgcolor="rgba(0,0,0,0)",
+            legend=dict(orientation="h", yanchor="bottom", y=1.0, xanchor="right", x=1, font=dict(size=10)),
+            xaxis=dict(title="Time (min)", gridcolor="#313244", showgrid=True),
+            yaxis=dict(title=dict(text="SPS", font=dict(color=COLORS["green"])), gridcolor="#313244", showgrid=True, side="left"),
+            yaxis2=dict(title=dict(text="Grads/s", font=dict(color=COLORS["mauve"])), gridcolor="#313244", overlaying="y", side="right"),
+        )
+        
         st.plotly_chart(fig, use_container_width=True)
 
 
@@ -451,7 +511,7 @@ def render_workers_tab(workers: dict[int, pd.DataFrame]) -> None:
 def render_levels_tab(workers: dict[int, pd.DataFrame], death_hotspots: dict[str, dict[int, int]] | None) -> None:
     """Render levels tab with death hotspot visualization."""
     
-    # Collect level data from workers
+    # Collect level data from workers with full reward tracking
     level_stats: dict[str, dict] = {}
     
     for wid, df in workers.items():
@@ -462,7 +522,10 @@ def render_levels_tab(workers: dict[int, pd.DataFrame], death_hotspots: dict[str
         for _, row in df.iterrows():
             level = row.get("current_level", "?")
             if level == "?" and "world" in row and "stage" in row:
-                level = f"{int(row['world'])}-{int(row['stage'])}"
+                try:
+                    level = f"{int(row['world'])}-{int(row['stage'])}"
+                except (ValueError, TypeError):
+                    continue
             
             if level == "?" or pd.isna(level):
                 continue
@@ -473,25 +536,47 @@ def render_levels_tab(workers: dict[int, pd.DataFrame], death_hotspots: dict[str
                     "deaths": 0,
                     "flags": 0,
                     "best_x": 0,
-                    "total_reward": 0,
+                    "rewards": [],  # Track all rewards for min/max/avg
+                    "speeds": [],   # Track speeds
+                    "x_positions": [],  # Track x positions for progress analysis
                 }
             
             level_stats[level]["episodes"] += 1
             level_stats[level]["deaths"] += int(row.get("deaths", 0))
             level_stats[level]["flags"] += int(row.get("flags", 0))
-            level_stats[level]["best_x"] = max(level_stats[level]["best_x"], int(row.get("best_x_ever", 0)))
-            level_stats[level]["total_reward"] += float(row.get("reward", 0))
+            
+            best_x = row.get("best_x_ever", row.get("best_x", 0))
+            if pd.notna(best_x):
+                level_stats[level]["best_x"] = max(level_stats[level]["best_x"], int(best_x))
+                level_stats[level]["x_positions"].append(int(best_x))
+            
+            # Track rewards for range calculation
+            reward = row.get("reward", row.get("episode_reward", 0))
+            if pd.notna(reward):
+                level_stats[level]["rewards"].append(float(reward))
+            
+            # Track speed
+            speed = row.get("speed", 0)
+            if pd.notna(speed) and speed > 0:
+                level_stats[level]["speeds"].append(float(speed))
     
     if not level_stats:
         st.info("⏳ Waiting for level data...")
         return
     
-    # Summary table
+    # Summary table with reward range
     st.subheader("📊 Level Statistics")
     
     rows = []
     for level, stats in sorted(level_stats.items()):
-        avg_reward = stats["total_reward"] / stats["episodes"] if stats["episodes"] > 0 else 0
+        rewards = stats["rewards"]
+        speeds = stats["speeds"]
+        
+        avg_reward = sum(rewards) / len(rewards) if rewards else 0
+        min_reward = min(rewards) if rewards else 0
+        max_reward = max(rewards) if rewards else 0
+        avg_speed = sum(speeds) / len(speeds) if speeds else 0
+        
         rows.append({
             "Level": level,
             "Episodes": stats["episodes"],
@@ -499,159 +584,308 @@ def render_levels_tab(workers: dict[int, pd.DataFrame], death_hotspots: dict[str
             "Deaths": stats["deaths"],
             "Flags": stats["flags"],
             "Avg Reward": f"{avg_reward:.1f}",
+            "Min R": f"{min_reward:.1f}",
+            "Max R": f"{max_reward:.1f}",
+            "Avg Speed": f"{avg_speed:.2f}",
         })
     
     st.dataframe(pd.DataFrame(rows), hide_index=True, use_container_width=True)
+    
+    # Reward and episodes charts
+    st.divider()
+    st.subheader("📈 Level Performance")
+    
+    # Create box plot for rewards per level
+    levels_with_data = [(l, s) for l, s in sorted(level_stats.items()) if len(s["rewards"]) > 0]
+    
+    if levels_with_data:
+        chart_col1, chart_col2 = st.columns(2)
+        
+        with chart_col1:
+            # Episodes per level bar chart
+            level_names = [l for l, _ in levels_with_data]
+            episode_counts = [s["episodes"] for _, s in levels_with_data]
+            
+            fig = go.Figure()
+            fig.add_trace(go.Bar(
+                x=level_names,
+                y=episode_counts,
+                marker_color=COLORS["mauve"],
+                hovertemplate="Level %{x}<br>Episodes: %{y}<extra></extra>",
+            ))
+            
+            fig.update_layout(
+                title="Episodes per Level",
+                yaxis_title="Episodes",
+                height=350,
+                template="plotly_dark",
+                paper_bgcolor="rgba(0,0,0,0)",
+                plot_bgcolor="rgba(0,0,0,0)",
+                xaxis=dict(gridcolor="#313244"),
+                yaxis=dict(gridcolor="#313244"),
+                margin=dict(l=0, r=0, t=50, b=0),
+            )
+            
+            st.plotly_chart(fig, use_container_width=True)
+        
+        with chart_col2:
+            # Reward distribution box plot
+            fig = go.Figure()
+            
+            for level, stats in levels_with_data:
+                rewards = stats["rewards"]
+                fig.add_trace(go.Box(
+                    y=rewards,
+                    name=level,
+                    boxpoints="outliers",
+                    marker_color=COLORS["green"],
+                    line_color=COLORS["teal"],
+                ))
+            
+            fig.update_layout(
+                title="Reward Distribution per Level",
+                yaxis_title="Reward",
+                height=350,
+                template="plotly_dark",
+                paper_bgcolor="rgba(0,0,0,0)",
+                plot_bgcolor="rgba(0,0,0,0)",
+                xaxis=dict(gridcolor="#313244"),
+                yaxis=dict(gridcolor="#313244"),
+                margin=dict(l=0, r=0, t=50, b=0),
+                showlegend=False,
+            )
+            
+            st.plotly_chart(fig, use_container_width=True)
+    
+    # Progress chart (best X over time per level)
+    col1, col2 = st.columns(2)
+    
+    with col1:
+        if levels_with_data:
+            fig = go.Figure()
+            
+            for i, (level, stats) in enumerate(levels_with_data):
+                x_positions = stats["x_positions"]
+                if x_positions:
+                    # Show cumulative max (best X progression)
+                    cummax = []
+                    current_max = 0
+                    for x in x_positions:
+                        current_max = max(current_max, x)
+                        cummax.append(current_max)
+                    
+                    colors = list(COLORS.values())
+                    fig.add_trace(go.Scatter(
+                        x=list(range(len(cummax))),
+                        y=cummax,
+                        name=level,
+                        mode="lines",
+                        line=dict(color=colors[i % len(colors)], width=2),
+                    ))
+            
+            fig.update_layout(
+                title="Best X Progression by Level",
+                xaxis_title="Episode",
+                yaxis_title="Best X Position",
+                height=300,
+                template="plotly_dark",
+                paper_bgcolor="rgba(0,0,0,0)",
+                plot_bgcolor="rgba(0,0,0,0)",
+                xaxis=dict(gridcolor="#313244"),
+                yaxis=dict(gridcolor="#313244"),
+                margin=dict(l=0, r=0, t=50, b=0),
+                legend=dict(orientation="h", yanchor="bottom", y=1.02),
+            )
+            
+            st.plotly_chart(fig, use_container_width=True)
+    
+    with col2:
+        # Speed distribution per level (box plot)
+        if any(len(s["speeds"]) > 0 for _, s in levels_with_data):
+            fig = go.Figure()
+            
+            for level, stats in levels_with_data:
+                speeds = stats["speeds"]
+                if speeds:
+                    fig.add_trace(go.Box(
+                        y=speeds,
+                        name=level,
+                        boxpoints="outliers",
+                        marker_color=COLORS["sky"],
+                        line_color=COLORS["blue"],
+                    ))
+            
+            fig.update_layout(
+                title="Speed Distribution by Level",
+                yaxis_title="Speed (x/time)",
+                height=300,
+                template="plotly_dark",
+                paper_bgcolor="rgba(0,0,0,0)",
+                plot_bgcolor="rgba(0,0,0,0)",
+                xaxis=dict(gridcolor="#313244"),
+                yaxis=dict(gridcolor="#313244"),
+                margin=dict(l=0, r=0, t=50, b=0),
+                showlegend=False,
+            )
+            
+            st.plotly_chart(fig, use_container_width=True)
     
     st.divider()
     
     # Death hotspots visualization
     st.subheader("💀 Death Hotspots")
     
+    # If no hotspots file, try to infer from worker data
     if death_hotspots is None or len(death_hotspots) == 0:
-        st.info("No death hotspot data available yet. Deaths will be tracked as training progresses.")
-        return
+        # Try to infer death locations from x_pos patterns (where progress resets)
+        inferred_hotspots: dict[str, dict[int, int]] = {}
+        
+        for wid, df in workers.items():
+            if len(df) < 2:
+                continue
+            
+            # Detect deaths by looking for x_pos drops (Mario died and restarted)
+            if "x_pos" in df.columns and "world" in df.columns and "stage" in df.columns:
+                prev_x = None
+                prev_level = None
+                
+                for _, row in df.iterrows():
+                    try:
+                        level = f"{int(row['world'])}-{int(row['stage'])}"
+                        x_pos = int(row.get("x_pos", 0))
+                    except (ValueError, TypeError):
+                        continue
+                    
+                    # If same level but x_pos dropped significantly, likely a death
+                    if prev_level == level and prev_x is not None:
+                        if prev_x > 100 and x_pos < prev_x - 200:
+                            # Death occurred at prev_x
+                            if level not in inferred_hotspots:
+                                inferred_hotspots[level] = {}
+                            bucket = (prev_x // 25) * 25
+                            inferred_hotspots[level][bucket] = inferred_hotspots[level].get(bucket, 0) + 1
+                    
+                    prev_x = x_pos
+                    prev_level = level
+        
+        if inferred_hotspots:
+            st.info("💡 Death hotspots inferred from x_pos patterns (file not yet created)")
+            death_hotspots = inferred_hotspots
+        else:
+            st.info("No death hotspot data available yet. Deaths will be tracked as training progresses.")
+            return
     
-    # Level selector
+    # Build heatmap data: X = level, Y = position bin, Z = death count
     available_levels = sorted(death_hotspots.keys())
     if not available_levels:
         st.info("No death data collected yet.")
         return
     
-    selected_level = st.selectbox(
-        "Select Level",
-        options=available_levels,
-        format_func=lambda x: f"Level {x}",
+    # Find all unique position bins across all levels
+    all_bins: set[int] = set()
+    for buckets in death_hotspots.values():
+        all_bins.update(buckets.keys())
+    
+    if not all_bins:
+        st.info("No death position data available.")
+        return
+    
+    # Create sorted bin labels (Y axis)
+    sorted_bins = sorted(all_bins)
+    bin_labels = [f"{b}-{b+25}" for b in sorted_bins]
+    
+    # Build heatmap matrix: rows = bins (Y), cols = levels (X)
+    z_data = []
+    for bin_start in sorted_bins:
+        row = []
+        for level in available_levels:
+            count = death_hotspots.get(level, {}).get(bin_start, 0)
+            row.append(count)
+        z_data.append(row)
+    
+    # Summary stats
+    total_deaths = sum(sum(buckets.values()) for buckets in death_hotspots.values())
+    max_deaths_level = max(death_hotspots.items(), key=lambda x: sum(x[1].values()))
+    
+    cols = st.columns(4)
+    cols[0].metric("Total Deaths", total_deaths)
+    cols[1].metric("Levels Tracked", len(available_levels))
+    cols[2].metric("Position Bins", len(sorted_bins))
+    cols[3].metric("Deadliest Level", max_deaths_level[0])
+    
+    st.divider()
+    
+    # Create heatmap using plotly express
+    fig = px.imshow(
+        z_data,
+        x=available_levels,
+        y=bin_labels,
+        color_continuous_scale="Turbo",
+        labels=dict(x="Level", y="Position Range", color="Deaths"),
+        aspect="auto",
     )
     
-    if selected_level:
-        hotspots = death_hotspots.get(selected_level, {})
-        
-        if not hotspots:
-            st.info(f"No deaths recorded in level {selected_level}")
-            return
-        
-        # Calculate statistics
-        total_deaths = sum(hotspots.values())
-        max_bucket = max(hotspots.keys())
-        min_bucket = min(hotspots.keys())
-        top_hotspot = max(hotspots.items(), key=lambda x: x[1])
-        
-        # Summary metrics
-        cols = st.columns(4)
-        cols[0].metric("Total Deaths", total_deaths)
-        cols[1].metric("Death Zones", len(hotspots))
-        cols[2].metric("Deadliest Spot", f"x={top_hotspot[0]}")
-        cols[3].metric("Deaths There", top_hotspot[1])
-        
-        st.divider()
-        
-        # Create histogram
-        # Sort buckets by position
-        sorted_buckets = sorted(hotspots.items(), key=lambda x: x[0])
-        x_positions = [b[0] for b in sorted_buckets]
-        death_counts = [b[1] for b in sorted_buckets]
-        
-        # Create bar chart
-        fig = go.Figure()
-        
-        # Color bars by intensity
-        max_deaths = max(death_counts)
-        colors = [
-            f"rgb({min(255, int(150 + 105 * (c / max_deaths)))}, {max(50, int(150 - 100 * (c / max_deaths)))}, {max(50, int(150 - 100 * (c / max_deaths)))})"
-            for c in death_counts
-        ]
-        
-        fig.add_trace(go.Bar(
-            x=x_positions,
-            y=death_counts,
-            marker_color=colors,
-            hovertemplate="Position: %{x}<br>Deaths: %{y}<extra></extra>",
-        ))
-        
-        fig.update_layout(
-            title=f"Death Distribution in Level {selected_level}",
-            xaxis_title="X Position (25px buckets)",
-            yaxis_title="Death Count",
-            height=400,
-            template="plotly_dark",
-            paper_bgcolor="rgba(0,0,0,0)",
-            plot_bgcolor="rgba(0,0,0,0)",
-            xaxis=dict(gridcolor="#313244"),
-            yaxis=dict(gridcolor="#313244"),
-            margin=dict(l=0, r=0, t=50, b=0),
-        )
-        
-        st.plotly_chart(fig, use_container_width=True)
-        
-        # Show top death spots table
-        st.caption("TOP DEATH ZONES")
-        top_spots = sorted(hotspots.items(), key=lambda x: x[1], reverse=True)[:10]
-        spot_rows = [
-            {
-                "Position": f"x={pos} to x={pos+25}",
-                "Deaths": count,
-                "% of Total": f"{count/total_deaths*100:.1f}%",
-            }
-            for pos, count in top_spots
-        ]
-        st.dataframe(pd.DataFrame(spot_rows), hide_index=True, use_container_width=True)
-        
-        # Suggested snapshot positions
-        st.divider()
-        st.caption("💾 SUGGESTED SNAPSHOT POSITIONS")
-        st.markdown("""
-        Based on death hotspots, consider saving emulator state at these positions 
-        (just before the dangerous zones) to practice difficult sections:
-        """)
-        
-        # Calculate suggestions (before top hotspots with spacing)
-        suggested = []
-        for pos, count in sorted(top_spots[:5], key=lambda x: x[0]):
-            snap_pos = max(0, pos - 50)  # 50 pixels before hotspot
-            if not suggested or all(abs(snap_pos - s) >= 100 for s in suggested):
-                suggested.append(snap_pos)
-        
-        if suggested:
-            cols = st.columns(len(suggested))
-            for i, pos in enumerate(suggested):
-                cols[i].metric(f"Snapshot {i+1}", f"x = {pos}")
-        else:
-            st.info("Not enough death data to suggest positions yet.")
+    fig.update_layout(
+        title="Death Heatmap",
+        height=max(400, len(sorted_bins) * 12),
+        template="plotly_dark",
+        paper_bgcolor="rgba(0,0,0,0)",
+        plot_bgcolor="rgba(0,0,0,0)",
+        margin=dict(l=0, r=0, t=50, b=0),
+    )
     
-    # All levels comparison
+    st.plotly_chart(fig, use_container_width=True)
+    
+    # Top death zones table (across all levels)
     st.divider()
-    st.subheader("📈 Deaths Across Levels")
+    st.caption("🔥 TOP DEATH ZONES (ALL LEVELS)")
+    
+    all_hotspots = []
+    for level, buckets in death_hotspots.items():
+        for pos, count in buckets.items():
+            all_hotspots.append((level, pos, count))
+    
+    top_spots = sorted(all_hotspots, key=lambda x: x[2], reverse=True)[:15]
+    spot_rows = [
+        {
+            "Level": level,
+            "Position": f"x={pos}-{pos+25}",
+            "Deaths": count,
+            "% of Total": f"{count/total_deaths*100:.1f}%" if total_deaths > 0 else "0%",
+        }
+        for level, pos, count in top_spots
+    ]
+    st.dataframe(pd.DataFrame(spot_rows), hide_index=True, use_container_width=True)
+    
+    # Deaths per level bar chart (compact)
+    st.divider()
+    st.caption("📊 TOTAL DEATHS PER LEVEL")
     
     level_deaths = {
         level: sum(buckets.values()) 
         for level, buckets in death_hotspots.items()
     }
+    sorted_levels = sorted(level_deaths.items(), key=lambda x: x[0])
     
-    if level_deaths:
-        sorted_levels = sorted(level_deaths.items(), key=lambda x: x[0])
-        
-        fig = go.Figure()
-        fig.add_trace(go.Bar(
-            x=[l[0] for l in sorted_levels],
-            y=[l[1] for l in sorted_levels],
-            marker_color=COLORS["red"],
-        ))
-        
-        fig.update_layout(
-            title="Total Deaths per Level",
-            xaxis_title="Level",
-            yaxis_title="Total Deaths",
-            height=300,
-            template="plotly_dark",
-            paper_bgcolor="rgba(0,0,0,0)",
-            plot_bgcolor="rgba(0,0,0,0)",
-            xaxis=dict(gridcolor="#313244"),
-            yaxis=dict(gridcolor="#313244"),
-            margin=dict(l=0, r=0, t=50, b=0),
-        )
-        
-        st.plotly_chart(fig, use_container_width=True)
+    fig = go.Figure()
+    fig.add_trace(go.Bar(
+        x=[l[0] for l in sorted_levels],
+        y=[l[1] for l in sorted_levels],
+        marker_color=COLORS["red"],
+        hovertemplate="Level %{x}<br>Deaths: %{y}<extra></extra>",
+    ))
+    
+    fig.update_layout(
+        height=200,
+        template="plotly_dark",
+        paper_bgcolor="rgba(0,0,0,0)",
+        plot_bgcolor="rgba(0,0,0,0)",
+        xaxis=dict(gridcolor="#313244"),
+        yaxis=dict(gridcolor="#313244"),
+        margin=dict(l=0, r=0, t=10, b=0),
+    )
+    
+    st.plotly_chart(fig, use_container_width=True)
 
 
 def render_analysis_tab(df: pd.DataFrame, workers: dict[int, pd.DataFrame]) -> None:
