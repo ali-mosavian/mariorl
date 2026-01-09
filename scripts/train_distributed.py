@@ -64,7 +64,7 @@ class Config:
     lr_min: float = 1e-5
     lr_decay_steps: int = 1_000_000
     gamma: float = 0.99
-    tau: float = 0.001  # Lower tau like working script for smooth updates
+    tau: float = 0.004  # 4x higher to compensate for averaging 4 gradients into 1 update
     max_grad_norm: float = 10.0
     weight_decay: float = 1e-4
     buffer_capacity: int = 10_000
