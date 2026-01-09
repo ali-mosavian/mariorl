@@ -9,7 +9,7 @@ from mario_rl.metrics.schema import (
     CoordinatorMetrics,
 )
 from mario_rl.metrics.logger import MetricLogger
-from mario_rl.metrics.levels import LevelStats, LevelTracker
+from mario_rl.metrics.levels import LevelStats, LevelTracker, DeathHotspotAggregate
 from mario_rl.metrics.aggregator import MetricAggregator
 
 __all__ = [
@@ -25,6 +25,7 @@ __all__ = [
     # Levels
     "LevelStats",
     "LevelTracker",
+    "DeathHotspotAggregate",
     # Aggregator
     "MetricAggregator",
 ]

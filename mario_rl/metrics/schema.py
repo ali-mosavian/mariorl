@@ -42,7 +42,8 @@ class CommonMetrics:
     
     EPISODES = MetricDef("episodes", MetricType.COUNTER)
     STEPS = MetricDef("steps", MetricType.COUNTER)
-    REWARD = MetricDef("reward", MetricType.ROLLING)
+    REWARD = MetricDef("reward", MetricType.ROLLING)  # Rolling average of episode rewards
+    EPISODE_REWARD = MetricDef("episode_reward", MetricType.GAUGE)  # Last episode's reward
     EPISODE_LENGTH = MetricDef("episode_length", MetricType.ROLLING)
     EPSILON = MetricDef("epsilon", MetricType.GAUGE)
     STEPS_PER_SEC = MetricDef("steps_per_sec", MetricType.GAUGE)
@@ -66,6 +67,7 @@ class CommonMetrics:
             cls.EPISODES,
             cls.STEPS,
             cls.REWARD,
+            cls.EPISODE_REWARD,
             cls.EPISODE_LENGTH,
             cls.EPSILON,
             cls.STEPS_PER_SEC,
@@ -156,6 +158,14 @@ class CoordinatorMetrics:
     LOSS = MetricDef("loss", MetricType.ROLLING)
     GRAD_NORM = MetricDef("grad_norm", MetricType.ROLLING)
     
+    # Aggregated metrics from workers (for graphs/UI)
+    AVG_REWARD = MetricDef("avg_reward", MetricType.GAUGE)
+    AVG_SPEED = MetricDef("avg_speed", MetricType.GAUGE)
+    AVG_LOSS = MetricDef("avg_loss", MetricType.GAUGE)
+    Q_MEAN = MetricDef("q_mean", MetricType.GAUGE)
+    TD_ERROR = MetricDef("td_error", MetricType.GAUGE)
+    TOTAL_EPISODES = MetricDef("total_episodes", MetricType.COUNTER)
+    
     @classmethod
     def definitions(cls) -> list[MetricDef]:
         """Return list of all coordinator metric definitions."""
@@ -167,4 +177,10 @@ class CoordinatorMetrics:
             cls.WEIGHT_VERSION,
             cls.LOSS,
             cls.GRAD_NORM,
+            cls.AVG_REWARD,
+            cls.AVG_SPEED,
+            cls.AVG_LOSS,
+            cls.Q_MEAN,
+            cls.TD_ERROR,
+            cls.TOTAL_EPISODES,
         ]

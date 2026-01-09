@@ -900,7 +900,10 @@ class TrainingUI:
         if ws:
             # Support both old and new field names
             episode = ws.get("episode", ws.get("episodes", 0))
-            reward = ws.get("reward", 0)
+            # episode_reward = last episode's reward (GAUGE)
+            # reward = rolling average (ROLLING)
+            episode_reward = ws.get("episode_reward", ws.get("reward", 0))
+            rolling_avg_reward = ws.get("reward", 0)  # Rolling average from schema
             x_pos = ws.get("x_pos", 0)
             best_x = ws.get("best_x", 0)
             deaths = ws.get("deaths", 0)
@@ -917,8 +920,8 @@ class TrainingUI:
             snapshot_restores = ws.get("snapshot_restores", 0)
             restores_without_progress = ws.get("restores_without_progress", 0)
             max_restores = ws.get("max_restores", 3)
-            # Convergence metrics
-            rolling_avg_reward = ws.get("rolling_avg_reward", ws.get("reward", 0))
+            # Also support old rolling_avg_reward field
+            rolling_avg_reward = ws.get("rolling_avg_reward", rolling_avg_reward)
             ws.get("first_flag_time", 0)
             best_x_ever = ws.get("best_x_ever", 0)
 
@@ -943,7 +946,7 @@ class TrainingUI:
             death_color = curses.color_pair(3) if deaths > 0 else curses.A_NORMAL
             flag_color = curses.color_pair(1) if flags > 0 else curses.A_NORMAL
 
-            stdscr.addstr(y + 2, 4, f"r={reward:8.0f}  💀=")
+            stdscr.addstr(y + 2, 4, f"r={episode_reward:7.1f}  💀=")
             stdscr.addstr(f"{deaths:2d}", death_color)
             # Show restores: total(stuck/max) - color red if near limit
             restore_color = curses.color_pair(3) if restores_without_progress >= max_restores - 1 else curses.A_NORMAL
@@ -951,7 +954,7 @@ class TrainingUI:
             stdscr.addstr(f"({restores_without_progress}/{max_restores})", restore_color)
             stdscr.addstr("  🏁=")
             stdscr.addstr(f"{flags:2d}", flag_color)
-            grads_sent = ws.get("gradients_sent", 0)
+            grads_sent = ws.get("gradients_sent", ws.get("grads_sent", 0))
             stdscr.addstr(f"  ε={epsilon:.3f}  Exp={exp:,}  ↑{grads_sent} ↓{weight_sync_count}")
 
             # Convergence metrics line (rolling avg + speed + flag time)
@@ -967,7 +970,7 @@ class TrainingUI:
             can_train = ws.get("can_train", False)
 
             stdscr.addstr(y + 3, 4, "r̄=")
-            stdscr.addstr(f"{rolling_avg_reward:6.0f}", avg_color)
+            stdscr.addstr(f"{rolling_avg_reward:6.1f}", avg_color)
             stdscr.addstr(f"  BestX={best_x_ever:4d}")
             stdscr.addstr(f"  Spd={avg_speed:4.1f}x/t")
             stdscr.addstr(f"  💀X̄={avg_x_at_death:4.0f}")
@@ -1139,10 +1142,12 @@ class TrainingUI:
         best_x_ever = ws.get("best_x_ever", 0)
         epsilon = ws.get("epsilon", 1.0)
         steps_per_sec = ws.get("steps_per_sec", 0)
-        reward = ws.get("reward", 0)
+        # episode_reward = last episode's reward (GAUGE), reward = rolling average
+        episode_reward = ws.get("episode_reward", ws.get("reward", 0))
+        rolling_avg_reward = ws.get("reward", 0)
+        rolling_avg_reward = ws.get("rolling_avg_reward", rolling_avg_reward)  # Support old field
         deaths = ws.get("deaths", 0)
         flags = ws.get("flags", 0)
-        rolling_avg_reward = ws.get("rolling_avg_reward", ws.get("reward", 0))
         buffer_fill_pct = ws.get("buffer_fill_pct", 0)
         buffer_size = ws.get("buffer_size", 0)
         # Compute buffer fill % from buffer_size if available
@@ -1169,7 +1174,7 @@ class TrainingUI:
             stdscr.addstr(y, x + header_length, line1[: width - header_length - 1])
 
             # Line 2: reward, deaths, flags, restores, epsilon
-            stdscr.addstr(y + 1, x, f"r={reward:6.0f} 💀 ")
+            stdscr.addstr(y + 1, x, f"r={episode_reward:6.1f} 💀 ")
 
             death_color = curses.color_pair(3) if deaths > 0 else curses.A_DIM
             stdscr.addstr(f"{deaths:2d}", death_color)
@@ -1184,7 +1189,7 @@ class TrainingUI:
             # Line 3: avg reward, BestX, Spd, Buf%, sync
             stdscr.addstr(y + 2, x, "r̄=")
             avg_color = curses.color_pair(1) if rolling_avg_reward > 0 else curses.color_pair(3)
-            stdscr.addstr(f"{rolling_avg_reward:5.0f}", avg_color)
+            stdscr.addstr(f"{rolling_avg_reward:6.1f}", avg_color)
 
             stdscr.addstr(f" Bst:{best_x_ever:4d}")
             stdscr.addstr(f" Spd:{avg_speed:4.1f}")
@@ -1258,7 +1263,7 @@ class TrainingUI:
         # Third line: Min/max for the sparklines
         if self.reward_history and len(self.reward_history) >= 2:
             r_min, r_max = min(self.reward_history), max(self.reward_history)
-            stdscr.addstr(y + 3, 4, f"r∈[{r_min:.0f},{r_max:.0f}]", curses.A_DIM)
+            stdscr.addstr(y + 3, 4, f"r∈[{r_min:.1f},{r_max:.1f}]", curses.A_DIM)
 
             if self.x_pos_history and len(self.x_pos_history) >= 2:
                 x_min, x_max = min(self.x_pos_history), max(self.x_pos_history)

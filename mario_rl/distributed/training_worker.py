@@ -187,8 +187,12 @@ class TrainingWorker:
             self.logger.gauge("steps_per_sec", steps_per_sec)
 
             # Track episode rewards
-            for reward in info.get("episode_rewards", []):
-                self.logger.observe("reward", reward)
+            episode_rewards = info.get("episode_rewards", [])
+            for reward in episode_rewards:
+                self.logger.observe("reward", reward)  # Rolling average
+            # Store last episode's reward as gauge for UI display
+            if episode_rewards:
+                self.logger.gauge("episode_reward", episode_rewards[-1])
 
             # Flush periodically
             if self._steps_since_flush >= self.flush_every:

@@ -42,7 +42,7 @@ from mario_rl.distributed.events import (
     event_to_ui_message,
     make_endpoint,
 )
-from mario_rl.metrics import MetricAggregator
+from mario_rl.metrics import MetricAggregator, DeathHotspotAggregate
 
 
 # =============================================================================
@@ -63,7 +63,7 @@ class Config:
     lr_min: float = 1e-5
     lr_decay_steps: int = 1_000_000
     gamma: float = 0.99
-    tau: float = 0.005
+    tau: float = 0.001  # Lower tau like working script for smooth updates
     max_grad_norm: float = 10.0
     weight_decay: float = 1e-4
     buffer_capacity: int = 10_000
@@ -75,7 +75,7 @@ class Config:
     epsilon_decay_steps: int = 1_000_000
     q_scale: float = 100.0
     latent_dim: int = 128
-    target_update_interval: int = 100
+    target_update_interval: int = 1  # Update target every step like working script
     checkpoint_interval: int = 10_000
 
 
@@ -251,29 +251,80 @@ def run_worker(
         total_episodes = 0
         best_x = 0
         grads_sent = 0
+        
+        # Load death hotspots for snapshot decisions (refreshed periodically)
+        hotspot_path = run_dir / "death_hotspots.json"
+        hotspots: DeathHotspotAggregate | None = None
+        last_hotspot_load = 0.0
 
         while True:
             heartbeat.update(worker_id)
             worker.sync_weights(weights_path)
+            
+            # Refresh death hotspots every 30 seconds for snapshot decisions
+            now = time.time()
+            if now - last_hotspot_load > 30 and hotspot_path.exists():
+                try:
+                    hotspots = DeathHotspotAggregate.load(hotspot_path)
+                    last_hotspot_load = now
+                except Exception:
+                    pass  # File may be being written
 
             result = worker.run_cycle(
                 collect_steps=config.collect_steps,
                 train_steps=config.train_steps,
             )
 
-            # Update stats
+            # Update stats from raw env info dicts
             info = result["collection_info"]
             total_episodes += info.get("episodes_completed", 0)
-            x_pos = info.get("final_x_pos", 0)
-            best_x = max(best_x, x_pos)
-            game_time = info.get("game_time", 0)
-            current_level = info.get("current_level", "")
             
-            # Track deaths and flags
-            deaths_this_cycle = info.get("deaths", 0)
-            flags_this_cycle = info.get("flags", 0)
+            # Extract game-specific metrics from step_infos (raw env info dicts)
+            step_infos = info.get("step_infos", [])
+            episode_end_infos = info.get("episode_end_infos", [])
+            
+            # Get current game state from last step's info
+            if step_infos:
+                last_info = step_infos[-1]
+                x_pos = last_info.get("x_pos", 0)
+                game_time = last_info.get("time", 0)
+                world = last_info.get("world", 1)
+                stage = last_info.get("stage", 1)
+            else:
+                x_pos = 0
+                game_time = 0
+                world = 1
+                stage = 1
+            
+            best_x = max(best_x, x_pos)
+            
+            # Count deaths (life transitions from >0 to 0) and flags from step infos
+            # Also track death positions for hotspot aggregation
+            deaths_this_cycle = 0
+            death_positions: list[int] = []
+            flags_this_cycle = 0
+            prev_life = None
+            prev_x = 0
+            for step_info in step_infos:
+                life = step_info.get("life", 0)
+                curr_x = step_info.get("x_pos", prev_x)
+                if prev_life is not None and prev_life > 0 and life == 0:
+                    deaths_this_cycle += 1
+                    death_positions.append(prev_x)  # Position just before death
+                prev_life = life
+                prev_x = curr_x
+                
+                if step_info.get("flag_get", False):
+                    flags_this_cycle += 1
+            
             if deaths_this_cycle > 0:
                 logger.count("deaths", n=deaths_this_cycle)
+                # Publish death positions for aggregation
+                level_id = f"{world}-{stage}"
+                events.publish("death_positions", {
+                    "level_id": level_id,
+                    "positions": death_positions,
+                })
             if flags_this_cycle > 0:
                 logger.count("flags", n=flags_this_cycle)
 
@@ -282,20 +333,16 @@ def run_worker(
             logger.gauge("best_x", best_x)
             logger.gauge("best_x_ever", best_x)
             logger.gauge("game_time", game_time)
+            logger.gauge("world", world)
+            logger.gauge("stage", stage)
             
-            # Log episode speeds (x_pos / time_spent, calculated at episode end)
-            for speed in info.get("episode_speeds", []):
-                logger.observe("speed", speed)
-            
-            # Parse level string (e.g. "1-1") into world/stage
-            if current_level and "-" in current_level:
-                try:
-                    w, s = current_level.split("-")
-                    logger.gauge("world", int(w))
-                    logger.gauge("stage", int(s))
-                except ValueError:
-                    pass
-            logger.count("grads_sent", n=0)  # Will increment below if gradient sent
+            # Calculate speed from episode end infos (x_pos / time_spent)
+            for ep_info in episode_end_infos:
+                ep_time = ep_info.get("time", 0)
+                ep_x = ep_info.get("x_pos", 0)
+                if ep_time > 0:
+                    speed = ep_x / ep_time
+                    logger.observe("speed", speed)
 
             # Write gradients to shared memory
             if grads := result["gradients"]:
@@ -388,6 +435,7 @@ def run_coordinator(
             lr_decay_steps=config.lr_decay_steps,
             weight_decay=config.weight_decay,
             max_grad_norm=config.max_grad_norm,
+            tau=config.tau,
             target_update_interval=config.target_update_interval,
             checkpoint_interval=config.checkpoint_interval,
             create_shm=False,
@@ -596,9 +644,16 @@ def main(
     # Metrics aggregator for combining worker/coordinator stats
     aggregator = MetricAggregator(num_workers=workers)
     
+    # Death hotspot aggregator for snapshot/restore decisions
+    hotspot_path = run_dir / "death_hotspots.json"
+    hotspot_aggregator = DeathHotspotAggregate.load_or_create(hotspot_path)
+    last_hotspot_save = time.time()
+    
     # Cleanup ZMQ on exit
     def cleanup_zmq():
         event_sub.close()
+        # Save hotspots on exit
+        hotspot_aggregator.save_if_dirty()
     atexit.register(cleanup_zmq)
 
     # UI setup (only queue for forwarding to UI process)
@@ -683,11 +738,31 @@ def main(
             
             # Poll events from ZMQ (non-blocking)
             for event in event_sub.poll(timeout_ms=50):
+                msg_type = event.get("msg_type", "")
+                
                 # Update aggregator with metrics events
-                if event.get("msg_type") == "metrics":
+                if msg_type == "metrics":
                     source = event.get("data", {}).get("source", "")
                     snapshot = event.get("data", {}).get("snapshot", {})
                     aggregator.update(source, snapshot)
+                
+                # Aggregate death positions for snapshot/restore hints
+                if msg_type == "death_positions":
+                    level_id = event.get("data", {}).get("level_id", "")
+                    positions = event.get("data", {}).get("positions", [])
+                    if level_id and positions:
+                        hotspot_aggregator.record_deaths_batch(level_id, positions)
+                
+                # Enhance learner_status with aggregated worker metrics
+                if msg_type == "learner_status":
+                    agg = aggregator.aggregate()
+                    event["data"]["avg_reward"] = agg.get("mean_reward", 0.0)
+                    event["data"]["avg_speed"] = agg.get("mean_speed", 0.0)
+                    event["data"]["avg_loss"] = agg.get("mean_loss", 0.0)
+                    event["data"]["loss"] = agg.get("mean_loss", 0.0)
+                    event["data"]["q_mean"] = agg.get("mean_q_mean", 0.0)
+                    event["data"]["td_error"] = agg.get("mean_td_error", 0.0)
+                    event["data"]["total_episodes"] = agg.get("total_episodes", 0)
                 
                 if ui_queue:
                     # Forward to UI process
@@ -700,6 +775,13 @@ def main(
                     text = format_event(event)
                     if text:
                         print(text, flush=True)
+            
+            # Periodically save death hotspots (every 60 seconds)
+            now = time.time()
+            if now - last_hotspot_save > 60:
+                if hotspot_aggregator.save_if_dirty():
+                    pass  # Saved successfully
+                last_hotspot_save = now
             
             time.sleep(0.01)
     except KeyboardInterrupt:

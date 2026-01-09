@@ -59,9 +59,10 @@ class TrainingCoordinator:
     lr_decay_steps: int = 1_000_000
     weight_decay: float = 1e-4
     max_grad_norm: float = 10.0
+    tau: float = 0.001  # Soft update coefficient for target network
 
     # Update intervals
-    target_update_interval: int = 100
+    target_update_interval: int = 1  # Update target every step
     checkpoint_interval: int = 10_000
 
     # Whether to create shm files (False = attach to existing)
@@ -194,7 +195,7 @@ class TrainingCoordinator:
     def maybe_update_targets(self) -> None:
         """Update target networks if at interval."""
         if self._update_count > 0 and self._update_count % self.target_update_interval == 0:
-            self.learner.update_targets()
+            self.learner.update_targets(tau=self.tau)
 
     def save_checkpoint(self) -> Path:
         """Save checkpoint to disk.

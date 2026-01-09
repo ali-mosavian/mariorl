@@ -11,21 +11,228 @@ A modular deep reinforcement learning framework featuring distributed A3C-style 
 - 🎯 **Dueling Double DQN** - Advanced Q-learning with target networks
 - 🔄 **Prioritized Experience Replay** - Sample important transitions more frequently
 - 📊 **Real-time Monitoring** - ncurses-based training dashboard
+- 📈 **Unified Metrics System** - Collectors pattern with ZMQ pub/sub
+- 💀 **Death Hotspot Tracking** - Aggregates death positions for curriculum learning
 - 🐳 **Docker Support** - Ready for deployment on cloud services
 
-## 🏗️ Architecture
+## 🏗️ Architecture Overview
+
+The system is built with a modular, layered architecture following SOLID principles:
+
+```
+┌────────────────────────────────────────────────────────────────────────────────┐
+│                              TRAINING SYSTEM                                   │
+├────────────────────────────────────────────────────────────────────────────────┤
+│                                                                                │
+│  ┌─────────────────────────────────────────────────────────────────────────┐   │
+│  │                         MAIN PROCESS                                    │   │
+│  │                                                                         │   │
+│  │  ┌──────────────────┐  ┌──────────────────┐  ┌────────────────────────┐ │   │
+│  │  │ Event Subscriber │  │ MetricAggregator │  │ DeathHotspotAggregate  │ │   │
+│  │  │ (ZMQ PULL)       │──│ (combine workers)│  │ (25px buckets/level)   │ │   │
+│  │  └──────────────────┘  └──────────────────┘  └────────────────────────┘ │   │
+│  │           │                     │                       │               │   │
+│  │           ▼                     ▼                       ▼               │   │
+│  │  ┌─────────────────────────────────────────────────────────────────────┐│   │
+│  │  │                    Training UI (curses)                             ││   │
+│  │  │  Workers: steps, rewards, ε, best_x, deaths, grads_sent             ││   │
+│  │  │  Learner: loss, q_mean, td_error, lr, updates/sec                   ││   │
+│  │  └─────────────────────────────────────────────────────────────────────┘│   │
+│  └─────────────────────────────────────────────────────────────────────────┘   │
+│                                                                                │
+│  ┌─────────────────────────────────────────────────────────────────────────┐   │
+│  │                      Shared Memory Gradient Pool                        │   │
+│  │               (lock-free mmap, ~2MB per worker gradient packet)         │   │
+│  └─────────────────────────────────────────────────────────────────────────┘   │
+│         │                         │                         │                  │
+│         ▼                         ▼                         ▼                  │
+│  ┌─────────────┐          ┌─────────────┐           ┌─────────────┐            │
+│  │  WORKER 0   │          │  WORKER 1   │           │  WORKER N   │            │
+│  │             │          │             │           │             │            │
+│  │ EnvRunner   │          │ EnvRunner   │           │ EnvRunner   │            │
+│  │ ReplayBuffer│          │ ReplayBuffer│           │ ReplayBuffer│            │
+│  │ Collectors  │          │ Collectors  │           │ Collectors  │            │
+│  │ MetricLogger│──ZMQ────▶│ MetricLogger│──ZMQ─────▶│ MetricLogger│───┐        │
+│  └─────────────┘          └─────────────┘           └─────────────┘   │        │
+│         │                         │                         │         │        │
+│         └─────────────────────────┼─────────────────────────┘         │        │
+│                                   ▼                                   │        │
+│                      ┌─────────────────────┐                          │        │
+│                      │    COORDINATOR      │◀─────────────────────────┘        │
+│                      │                     │                                   │
+│                      │  GradientPool.poll()│                                   │
+│                      │  Optimizer.step()   │                                   │
+│                      │  LR Scheduler       │                                   │
+│                      │  Target sync (τ)    │                                   │
+│                      │  Checkpointing      │                                   │
+│                      └─────────────────────┘                                   │
+└────────────────────────────────────────────────────────────────────────────────┘
+```
+
+## 📊 Metrics System Architecture
+
+The metrics system follows the **Collector Pattern** for clean separation of concerns:
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                           METRICS DATA FLOW                                 │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                             │
+│   WORKER PROCESS                           MAIN PROCESS                     │
+│   ═══════════════                         ═════════════                     │
+│                                                                             │
+│   ┌─────────────┐     on_step()           ┌──────────────────┐              │
+│   │ Environment │────────────────────────▶│ EventSubscriber  │              │
+│   │  step(a)    │                         │   (ZMQ PULL)     │              │
+│   └─────────────┘                         └────────┬─────────┘              │
+│          │                                         │                        │
+│          ▼                                         ▼                        │
+│   ┌─────────────────────────────────┐     ┌──────────────────┐              │
+│   │    CompositeCollector           │     │ MetricAggregator │              │
+│   │  ┌──────────────────────────┐   │     │  - per worker    │              │
+│   │  │ MarioCollector           │   │     │  - mean/sum/max  │              │
+│   │  │  - x_pos, deaths, flags  │   │     │  - rolling stats │              │
+│   │  │  - speed, game_time      │   │     └────────┬─────────┘              │
+│   │  └──────────────────────────┘   │              │                        │
+│   │  ┌──────────────────────────┐   │              ▼                        │
+│   │  │ DDQNCollector            │   │     ┌──────────────────┐              │
+│   │  │  - loss, q_mean, q_max   │   │     │   Training UI    │              │
+│   │  │  - td_error, grad_norm   │   │     │  (real-time)     │              │
+│   │  └──────────────────────────┘   │     └──────────────────┘              │
+│   │  ┌──────────────────────────┐   │                                       │
+│   │  │ SystemCollector          │   │     ┌──────────────────┐              │
+│   │  │  - steps, episodes       │   │     │ death_hotspots   │              │
+│   │  │  - buffer_size, sps      │   │────▶│    .json         │              │
+│   │  └──────────────────────────┘   │     │ (25px buckets)   │              │
+│   └──────────────┬──────────────────┘     └──────────────────┘              │
+│                  │                                                          │
+│                  ▼                                                          │
+│   ┌─────────────────────────────────┐                                       │
+│   │        MetricLogger             │                                       │
+│   │  - Counter: deaths, flags       │     ┌──────────────────┐              │
+│   │  - Gauge: x_pos, epsilon        │────▶│ worker_N.csv     │              │
+│   │  - Rolling: reward, loss        │     │ (on-the-fly)     │              │
+│   │  - publish() → ZMQ PUSH         │     └──────────────────┘              │
+│   └─────────────────────────────────┘                                       │
+│                                                                             │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+### Metric Types
+
+| Type | Description | Example |
+|------|-------------|---------|
+| **Counter** | Monotonically increasing | `deaths`, `flags`, `grads_sent` |
+| **Gauge** | Current value (can go up/down) | `x_pos`, `epsilon`, `buffer_size` |
+| **Rolling** | Rolling average over window | `reward`, `loss`, `speed` |
+
+### Collector Protocol
+
+```python
+class MetricCollector(Protocol):
+    """Worker-side metric collector."""
+    
+    def on_step(self, info: dict[str, Any]) -> None:
+        """Called after each env step."""
+        
+    def on_episode_end(self, info: dict[str, Any]) -> None:
+        """Called at episode end."""
+        
+    def on_train_step(self, metrics: dict[str, Any]) -> None:
+        """Called after each training step."""
+        
+    def flush(self) -> None:
+        """Publish accumulated metrics."""
+```
+
+### Available Collectors
+
+| Collector | Metrics | Usage |
+|-----------|---------|-------|
+| `MarioCollector` | x_pos, deaths, flags, speed | Game-specific |
+| `DDQNCollector` | loss, q_mean, q_max, td_error | DDQN training |
+| `DreamerCollector` | wm_loss, actor_loss, critic_loss | Dreamer training |
+| `SystemCollector` | steps, episodes, buffer_size, sps | System metrics |
+| `CompositeCollector` | Combines multiple collectors | Composition |
+
+## 💀 Death Hotspot Aggregation
+
+Tracks where Mario dies to enable curriculum learning via emulator snapshots:
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                     DEATH HOTSPOT SYSTEM                                    │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                             │
+│   WORKER                                    MAIN PROCESS                    │
+│   ══════                                    ════════════                    │
+│                                                                             │
+│   Mario dies at x=523           ZMQ         ┌────────────────────────────┐  │
+│       │                   ─────────────────▶│ DeathHotspotAggregate      │  │
+│       ▼                                     │                            │  │
+│   death_positions:                          │  Level 1-1:                │  │
+│     level_id: "1-1"                         │   bucket[500]: 47 deaths   │  │
+│     positions: [523]                        │   bucket[525]: 23 deaths   │  │
+│                                             │   bucket[775]: 12 deaths   │  │
+│                                             │                            │  │
+│                                             │  → Save every 60s          │  │
+│   ┌───────────────────────┐                 └────────────┬───────────────┘  │
+│   │ Worker loads hotspots │◀─────────────────────────────┘                  │
+│   │ every 30 seconds      │       death_hotspots.json                       │
+│   └───────────┬───────────┘                                                 │
+│               │                                                             │
+│               ▼                                                             │
+│   ┌───────────────────────────────────────────────────────────────────────┐ │
+│   │  Snapshot Decisions                                                   │ │
+│   │                                                                       │ │
+│   │  suggest_snapshot_positions("1-1", count=3)                           │ │
+│   │    → [475, 750]  # Positions BEFORE hotspots                          │ │
+│   │                                                                       │ │
+│   │  suggest_restore_position("1-1", death_x=530)                         │ │
+│   │    → 450  # Position to restore from for practice                     │ │
+│   └───────────────────────────────────────────────────────────────────────┘ │
+│                                                                             │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+### Usage
+
+```python
+from mario_rl.metrics import DeathHotspotAggregate
+
+# Load or create
+agg = DeathHotspotAggregate.load_or_create(Path("death_hotspots.json"))
+
+# Record deaths
+agg.record_death("1-1", x_pos=523)
+agg.record_deaths_batch("1-1", [525, 530, 520])
+
+# Get hotspots (positions with >= 3 deaths)
+hotspots = agg.get_hotspots("1-1", min_deaths=3)
+# → [(500, 47), (525, 23), (775, 12)]
+
+# Suggest where to save emulator state
+positions = agg.suggest_snapshot_positions("1-1", count=3, min_spacing=100)
+# → [475, 750] - positions BEFORE death hotspots
+
+# After dying, suggest where to restore
+restore = agg.suggest_restore_position("1-1", death_x=530)
+# → 450 - position to restore for practice
+```
+
+## 🔄 Distributed Training Architecture
 
 The distributed training system uses **gradient sharing** (A3C-style) where workers compute gradients locally and send them to a central coordinator.
 
 ```
 ┌─────────────────────────────────────────────────────────────────────────┐
-│                           MAIN PROCESS                                   │
-│                                                                          │
+│                           MAIN PROCESS                                  │
+│                                                                         │
 │   ┌─────────────────────────────────────────────────────────────────┐   │
-│   │              Shared Memory Gradient Pool                         │   │
-│   │              (workers → coordinator, ~2MB per packet)            │   │
+│   │              Shared Memory Gradient Pool                        │   │
+│   │              (workers → coordinator, ~2MB per packet)           │   │
 │   └─────────────────────────────────────────────────────────────────┘   │
-│                                                                          │
+│                                                                         │
 └─────────────────────────────────────────────────────────────────────────┘
           │                    │                    │
           ▼                    ▼                    ▼
@@ -66,8 +273,13 @@ The distributed training system uses **gradient sharing** (A3C-style) where work
 | **SharedGradientPool** | `mario_rl/distributed/shm_gradient_pool.py` | Lock-free gradient sharing via mmap |
 | **SharedHeartbeat** | `mario_rl/distributed/shm_heartbeat.py` | Worker health monitoring |
 | **ReplayBuffer** | `mario_rl/core/replay_buffer.py` | N-step returns with optional PER |
-| **EnvRunner** | `mario_rl/core/env_runner.py` | Environment step collection |
-| **TrainingUI** | `mario_rl/ui/training_ui.py` | ncurses monitoring dashboard |
+| **EnvRunner** | `mario_rl/core/env_runner.py` | Game-agnostic environment step collection |
+| **MetricLogger** | `mario_rl/metrics/logger.py` | Per-worker metrics tracking with ZMQ publish |
+| **MetricAggregator** | `mario_rl/metrics/aggregator.py` | Combines metrics from all workers |
+| **MetricCollector** | `mario_rl/metrics/collectors/` | Collector pattern for metrics extraction |
+| **DeathHotspotAggregate** | `mario_rl/metrics/levels.py` | Death position aggregation for curriculum learning |
+| **TrainingUI** | `mario_rl/training/training_ui.py` | ncurses monitoring dashboard |
+| **EventPublisher** | `mario_rl/distributed/events.py` | ZMQ-based event publishing |
 
 ### Model Types
 
@@ -173,47 +385,73 @@ uv run python scripts/watch.py checkpoints/<run-name>/weights.pt --level 1-2
 ```
 mario-rl/
 ├── mario_rl/                      # Main package
-│   ├── models/                    # Model definitions (new modular)
+│   ├── models/                    # Model definitions
 │   │   ├── base.py                # Model protocol
 │   │   ├── ddqn.py                # DoubleDQN model
 │   │   └── dreamer.py             # Dreamer world model
-│   ├── learners/                  # Learning algorithms (new modular)
+│   │
+│   ├── learners/                  # Learning algorithms
 │   │   ├── base.py                # Learner protocol
 │   │   ├── ddqn.py                # DDQN learner (loss, targets)
 │   │   └── dreamer.py             # Dreamer learner (world + behavior)
-│   ├── distributed/               # Distributed training (new modular)
+│   │
+│   ├── distributed/               # Distributed training
+│   │   ├── events.py              # ZMQ event pub/sub system
 │   │   ├── worker.py              # Base gradient worker
 │   │   ├── coordinator.py         # Base gradient coordinator
 │   │   ├── training_worker.py     # Full worker with env + buffer
 │   │   ├── training_coordinator.py # Full coordinator with scheduling
 │   │   ├── shm_gradient_pool.py   # Shared memory gradient buffers
 │   │   └── shm_heartbeat.py       # Worker health monitoring
+│   │
+│   ├── metrics/                   # Unified metrics system
+│   │   ├── schema.py              # Metric definitions (MetricType, MetricDef)
+│   │   ├── logger.py              # MetricLogger (track, save CSV, publish)
+│   │   ├── aggregator.py          # MetricAggregator (combine workers)
+│   │   ├── levels.py              # Per-level stats + DeathHotspotAggregate
+│   │   └── collectors/            # Collector pattern implementations
+│   │       ├── protocol.py        # MetricCollector protocol
+│   │       ├── mario.py           # MarioCollector (game metrics)
+│   │       ├── ddqn.py            # DDQNCollector (training metrics)
+│   │       ├── dreamer.py         # DreamerCollector (world model metrics)
+│   │       ├── system.py          # SystemCollector (steps, episodes)
+│   │       ├── composite.py       # CompositeCollector (combines collectors)
+│   │       └── coordinator.py     # Coordinator-side collectors
+│   │
 │   ├── core/                      # Core components
 │   │   ├── replay_buffer.py       # Unified buffer (N-step + PER)
-│   │   ├── env_runner.py          # Environment step collection
-│   │   ├── config.py              # Configuration dataclasses
-│   │   └── types.py               # Core data types
-│   ├── ui/                        # Monitoring UI
-│   │   ├── training_ui.py         # ncurses dashboard
-│   │   └── metrics.py             # Metrics aggregation
-│   ├── env/                       # Environment wrappers
-│   │   └── mario_env.py           # Mario environment creation
-│   ├── agent/                     # Legacy networks (being deprecated)
-│   │   ├── ddqn_net.py            # Legacy DDQN
-│   │   └── world_model.py         # Legacy world model
-│   └── training/                  # Legacy training (being deprecated)
-│       ├── ddqn_worker.py         # Legacy worker
-│       ├── ddqn_learner.py        # Legacy learner
-│       └── shared_gradient_tensor.py  # Shared memory implementation
+│   │   ├── env_runner.py          # Game-agnostic env step collection
+│   │   └── config.py              # Configuration dataclasses
+│   │
+│   ├── environment/               # Environment wrappers
+│   │   └── factory.py             # Mario environment creation
+│   │
+│   ├── training/                  # Training utilities
+│   │   ├── training_ui.py         # ncurses monitoring dashboard
+│   │   └── shared_gradient_tensor.py  # Shared memory implementation
+│   │
+│   ├── buffers/                   # Replay buffers
+│   │   └── nstep.py               # N-step transition buffer
+│   │
+│   └── agent/                     # Neural network architectures
+│       └── neural.py              # FrameNet, DuelingDQNNet
+│
 ├── scripts/                       # Command-line scripts
-│   ├── train_distributed.py       # New modular training script
+│   ├── train_distributed.py       # Main distributed training script
 │   ├── train_ddqn_distributed.py  # Legacy distributed training
 │   └── watch.py                   # Watch agent play
-├── tests/                         # Comprehensive test suite
+│
+├── tests/                         # Comprehensive test suite (~500 tests)
 │   ├── models/                    # Model tests
 │   ├── learners/                  # Learner tests
 │   ├── distributed/               # Distributed component tests
+│   ├── metrics/                   # Metrics system tests
+│   │   ├── collectors/            # Collector tests
+│   │   ├── test_logger.py         # MetricLogger tests
+│   │   ├── test_aggregator.py     # MetricAggregator tests
+│   │   └── test_levels.py         # LevelStats + DeathHotspotAggregate tests
 │   └── core/                      # Core component tests
+│
 └── docker/                        # Docker configuration
 ```
 
@@ -237,19 +475,31 @@ mario-rl/
 ### Training Cycle
 
 Each worker runs this loop:
-1. **Collect** 64 steps from environment
-2. **Sample** batch from local replay buffer
-3. **Compute** gradients via backprop
-4. **Send** gradients to coordinator via shared memory
-5. **Sync** weights from coordinator's file
+1. **Collect** 64 steps from environment (via EnvRunner)
+2. **Extract** metrics via collectors (MarioCollector, DDQNCollector, etc.)
+3. **Sample** batch from local replay buffer
+4. **Compute** gradients via backprop
+5. **Send** gradients to coordinator via shared memory
+6. **Publish** metrics to ZMQ (every 5 gradient sends)
+7. **Send** death positions for hotspot aggregation
+8. **Sync** weights from coordinator's file
+9. **Reload** death hotspots periodically (every 30s)
 
 The coordinator:
-1. **Polls** gradients from all workers
+1. **Polls** gradients from all workers (SharedGradientPool)
 2. **Aggregates** gradients (averaging)
 3. **Applies** optimizer step with gradient clipping
 4. **Updates** learning rate (cosine annealing)
 5. **Saves** weights for workers to sync
-6. **Updates** target network periodically
+6. **Updates** target network (soft update with τ)
+7. **Publishes** learner metrics to ZMQ
+
+The main process:
+1. **Receives** events via ZMQ subscriber
+2. **Aggregates** worker metrics (MetricAggregator)
+3. **Aggregates** death positions (DeathHotspotAggregate)
+4. **Updates** Training UI
+5. **Saves** death hotspots to disk (every 60s)
 
 ### Dreamer Training
 
@@ -265,6 +515,49 @@ When using `--model dreamer`, training includes:
    - Imagine trajectories using learned dynamics
    - Train actor to maximize imagined returns
    - Train critic on lambda-returns (TD(λ))
+
+## 🔌 Inter-Process Communication
+
+### ZMQ Event System
+
+Workers and coordinator communicate metrics and events via ZeroMQ:
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                         ZMQ PUB/SUB TOPOLOGY                                │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                             │
+│   WORKER 0          WORKER 1          COORDINATOR                           │
+│   ════════          ════════          ═══════════                           │
+│                                                                             │
+│   EventPublisher    EventPublisher    EventPublisher                        │
+│   (ZMQ PUSH)        (ZMQ PUSH)        (ZMQ PUSH)                            │
+│        │                 │                 │                                │
+│        └─────────────────┼─────────────────┘                                │
+│                          │                                                  │
+│                          ▼                                                  │
+│                  ┌───────────────┐                                          │
+│                  │  ZMQ PULL     │                                          │
+│                  │  (main proc)  │                                          │
+│                  └───────┬───────┘                                          │
+│                          │                                                  │
+│                          ▼                                                  │
+│                  ┌───────────────┐      ┌───────────────┐                   │
+│                  │ Aggregator    │─────▶│  Training UI  │                   │
+│                  └───────────────┘      └───────────────┘                   │
+│                                                                             │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+### Event Types
+
+| Event Type | Source | Data |
+|------------|--------|------|
+| `metrics` | Workers/Coordinator | Metric snapshot (counters, gauges, rolling) |
+| `log` | Any | Log message |
+| `death_positions` | Workers | Level ID + death x positions |
+| `worker_status` | Workers | Steps, episodes, ε, best_x |
+| `learner_status` | Coordinator | Loss, q_mean, lr, updates |
 
 ## 🔄 Shared Memory IPC
 
@@ -296,13 +589,39 @@ By default, training shows an ncurses-based dashboard with:
 - Recent log messages
 - Optional: reward/loss graphs
 
-### Log Files
+### Log Files & Checkpoints
 
 All runs save to `checkpoints/<timestamp>/`:
-- `weights.pt` - Latest network weights
-- `checkpoint.pt` - Full training state (for resumption)
-- `training.csv` - Metrics logged every 100 steps
-- `training.log` - Full training log
+
+| File | Description |
+|------|-------------|
+| `weights.pt` | Latest network weights (for workers to sync) |
+| `checkpoint.pt` | Full training state (model, optimizer, step count) |
+| `worker_N.csv` | Per-worker metrics (written on-the-fly) |
+| `coordinator.csv` | Coordinator metrics |
+| `death_hotspots.json` | Aggregated death positions per level |
+| `training.log` | Full training log |
+
+### Checkpoint Contents
+
+```python
+# checkpoint.pt contains:
+{
+    "model_state_dict": {...},      # Network weights
+    "optimizer_state_dict": {...},   # Optimizer state
+    "global_step": 100000,           # Training step
+    "weight_version": 1500,          # Weight update count
+    "lr_scheduler_state": {...},     # LR scheduler state
+}
+```
+
+### Resuming Training
+
+```bash
+# Resume from checkpoint
+uv run python scripts/train_distributed.py \
+  --resume checkpoints/2025-01-08_123456/checkpoint.pt
+```
 
 ### Plot Metrics
 
@@ -387,7 +706,8 @@ uv run pytest -k "select_action" -v
 |----------|-------|-------------|
 | `tests/models/` | ~50 | Model protocols, DDQN, Dreamer |
 | `tests/learners/` | ~60 | DDQN learner, Dreamer learner |
-| `tests/distributed/` | ~90 | Workers, coordinators, shared memory |
+| `tests/distributed/` | ~90 | Workers, coordinators, shared memory, events |
+| `tests/metrics/` | ~200 | Logger, aggregator, collectors, levels, schema |
 | `tests/core/` | ~45 | Replay buffer, env runner |
 
 ## 🔌 Extending the Framework
