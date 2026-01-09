@@ -301,12 +301,21 @@ def run_worker(
             
             best_x = max(best_x, x_pos)
             
-            # Count deaths and flags from episode_end_infos
-            # Death = episode ended without capturing flag
+            # Count deaths and flags
+            # Include both: deaths where we restored AND deaths where episode ended
             deaths_this_cycle = 0
             death_positions: list[int] = []
             flags_this_cycle = 0
             
+            # Count deaths that were restored (from step_infos)
+            for step_info in step_infos:
+                if step_info.get("snapshot_restored", False):
+                    death_x = step_info.get("death_position", step_info.get("x_pos", 0))
+                    if death_x > 0:
+                        deaths_this_cycle += 1
+                        death_positions.append(death_x)
+            
+            # Count deaths from actual episode endings
             for ep_info in episode_end_infos:
                 if ep_info.get("flag_get", False):
                     # Completed level

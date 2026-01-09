@@ -951,8 +951,8 @@ class TrainingUI:
             stdscr.addstr(f"{deaths:2d}", death_color)
             # Show saves and restores: saves/restores(stuck/max) - color red if near limit
             restore_color = curses.color_pair(3) if restores_without_progress >= max_restores - 1 else curses.A_NORMAL
-            stdscr.addstr(f"  💾={snapshot_saves:2d}")
-            stdscr.addstr(f"  ⏮={snapshot_restores:2d}")
+            stdscr.addstr(f"  💾 {snapshot_saves:2d}")
+            stdscr.addstr(f"  ⏮ {snapshot_restores:2d}")
             stdscr.addstr(f"({restores_without_progress}/{max_restores})", restore_color)
             stdscr.addstr("  🏁=")
             stdscr.addstr(f"{flags:2d}", flag_color)
@@ -1186,7 +1186,7 @@ class TrainingUI:
             stdscr.addstr(" 🏁 ")
             stdscr.addstr(f"{flags}", flag_color)
 
-            stdscr.addstr(f" 💾{snapshot_saves} ⏮{snapshot_restores}")
+            stdscr.addstr(f" 💾 {snapshot_saves} ⏮ {snapshot_restores}")
             stdscr.addstr(f" ε={epsilon:.2f}")
 
             # Line 3: avg reward, BestX, Spd, Buf%, sync

@@ -195,6 +195,8 @@ class SnapshotMarioEnvironment:
             self._current_obs = result.observation
             # Important: Reset the done flag on the base env
             self.env.base_env.env._done = False
+            # Record the death position for hotspot learning (even though we restored)
+            info["death_position"] = info.get("x_pos", 0)
             return result.observation, reward, False, False, info
 
         if result.episode_ended:
