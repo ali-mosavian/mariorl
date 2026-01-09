@@ -620,64 +620,53 @@ def render_workers_tab(workers: dict[int, pd.DataFrame]) -> None:
             st.info("⏳ Action entropy tracking not yet available...")
 
     with col10:
-        # Action distribution stacked bar (latest snapshot per worker)
+        # Action distribution heatmap over time (aggregated across workers)
         # Actions: NOOP, right, right+A, right+B, right+A+B, A, left, left+A, left+B, left+A+B, down, up
         action_names = ["NOOP", "→", "→A", "→B", "→AB", "A", "←", "←A", "←B", "←AB", "↓", "↑"]
-        action_colors = [
-            "#6c7086",  # NOOP - gray
-            COLORS["green"],   # right
-            COLORS["teal"],    # right+A
-            COLORS["blue"],    # right+B
-            COLORS["sky"],     # right+A+B
-            COLORS["yellow"],  # A (jump)
-            COLORS["red"],     # left
-            COLORS["peach"],   # left+A
-            COLORS["mauve"],   # left+B
-            "#f5c2e7",         # left+A+B
-            "#94e2d5",         # down
-            "#cba6f7",         # up
-        ]
         
-        # Parse action_dist from latest row of each worker
-        worker_action_dists = []
+        # Collect all action_dist data with timestamps
+        all_action_data = []
         for wid, df in sorted(workers.items()):
             if len(df) > 0 and "action_dist" in df.columns:
-                latest_dist = df.iloc[-1].get("action_dist", "")
-                if latest_dist and isinstance(latest_dist, str):
-                    try:
-                        pcts = [float(p) for p in latest_dist.split(",")]
-                        if len(pcts) == 12:  # Expecting 12 actions
-                            worker_action_dists.append((wid, pcts))
-                    except (ValueError, TypeError):
-                        pass
+                for idx, row in df.iterrows():
+                    dist_str = row.get("action_dist", "")
+                    if dist_str and isinstance(dist_str, str):
+                        try:
+                            pcts = [float(p) for p in dist_str.split(",")]
+                            if len(pcts) == 12:
+                                steps = row.get("steps", idx)
+                                all_action_data.append((steps, pcts))
+                        except (ValueError, TypeError):
+                            pass
         
-        if worker_action_dists:
-            fig = go.Figure()
+        if all_action_data:
+            # Sort by steps and sample to ~50 time points for clean heatmap
+            all_action_data.sort(key=lambda x: x[0])
+            sample_size = min(50, len(all_action_data))
+            sample_indices = [int(i * len(all_action_data) / sample_size) for i in range(sample_size)]
+            sampled_data = [all_action_data[i] for i in sample_indices]
             
-            # Create stacked bars for each action type
-            worker_ids = [f"W{wid}" for wid, _ in worker_action_dists]
+            # Build heatmap matrix: rows = actions, cols = time
+            x_labels = [f"{int(d[0]//1000)}k" for d in sampled_data]  # Steps in k
+            z_data = [[d[1][action_idx] for d in sampled_data] for action_idx in range(12)]
             
-            for action_idx in range(12):
-                pct_values = [pcts[action_idx] for _, pcts in worker_action_dists]
-                fig.add_trace(go.Bar(
-                    name=action_names[action_idx],
-                    x=worker_ids,
-                    y=pct_values,
-                    marker_color=action_colors[action_idx],
-                    hovertemplate=f"{action_names[action_idx]}: " + "%{y:.1f}%<extra></extra>",
-                ))
+            fig = go.Figure(data=go.Heatmap(
+                z=z_data,
+                x=x_labels,
+                y=action_names,
+                colorscale="Viridis",
+                hovertemplate="Action: %{y}<br>Steps: %{x}<br>%{z:.1f}%<extra></extra>",
+            ))
             
             fig.update_layout(
-                title="Action Distribution by Worker (%)",
-                barmode="stack",
+                title="Action Distribution Over Time (%)",
                 height=280,
                 margin=dict(l=0, r=0, t=30, b=0),
                 template="plotly_dark",
                 paper_bgcolor="rgba(0,0,0,0)",
                 plot_bgcolor="rgba(0,0,0,0)",
-                xaxis=dict(gridcolor="#313244"),
-                yaxis=dict(title="%", gridcolor="#313244", range=[0, 105]),
-                legend=dict(orientation="h", yanchor="bottom", y=1.02, font=dict(size=9)),
+                xaxis=dict(title="Steps", gridcolor="#313244"),
+                yaxis=dict(gridcolor="#313244"),
             )
             st.plotly_chart(fig, use_container_width=True)
         else:
@@ -782,31 +771,31 @@ def render_levels_tab(workers: dict[int, pd.DataFrame], death_hotspots: dict[str
             level_names = [l for l, _ in levels_with_data]
             episode_counts = [s["episodes"] for _, s in levels_with_data]
             
-            fig = go.Figure()
-            fig.add_trace(go.Bar(
+        fig = go.Figure()
+        fig.add_trace(go.Bar(
                 x=level_names,
                 y=episode_counts,
                 marker_color=COLORS["mauve"],
                 hovertemplate="Level %{x}<br>Episodes: %{y}<extra></extra>",
             ))
             
-            fig.update_layout(
+        fig.update_layout(
                 title="Episodes per Level",
                 yaxis_title="Episodes",
                 height=350,
-                template="plotly_dark",
-                paper_bgcolor="rgba(0,0,0,0)",
-                plot_bgcolor="rgba(0,0,0,0)",
+            template="plotly_dark",
+            paper_bgcolor="rgba(0,0,0,0)",
+            plot_bgcolor="rgba(0,0,0,0)",
                 xaxis=dict(gridcolor="#313244"),
                 yaxis=dict(gridcolor="#313244"),
                 margin=dict(l=0, r=0, t=50, b=0),
-            )
+        )
             
-            st.plotly_chart(fig, use_container_width=True)
-        
+        st.plotly_chart(fig, use_container_width=True)
+    
         with chart_col2:
             # Reward distribution box plot
-            fig = go.Figure()
+        fig = go.Figure()
             
             for level, stats in levels_with_data:
                 rewards = stats["rewards"]
@@ -818,27 +807,27 @@ def render_levels_tab(workers: dict[int, pd.DataFrame], death_hotspots: dict[str
                     line_color=COLORS["teal"],
                 ))
             
-            fig.update_layout(
+        fig.update_layout(
                 title="Reward Distribution per Level",
                 yaxis_title="Reward",
                 height=350,
-                template="plotly_dark",
-                paper_bgcolor="rgba(0,0,0,0)",
-                plot_bgcolor="rgba(0,0,0,0)",
+            template="plotly_dark",
+            paper_bgcolor="rgba(0,0,0,0)",
+            plot_bgcolor="rgba(0,0,0,0)",
                 xaxis=dict(gridcolor="#313244"),
                 yaxis=dict(gridcolor="#313244"),
                 margin=dict(l=0, r=0, t=50, b=0),
                 showlegend=False,
             )
             
-            st.plotly_chart(fig, use_container_width=True)
+        st.plotly_chart(fig, use_container_width=True)
     
     # Progress chart (best X over time per level)
     col1, col2 = st.columns(2)
     
     with col1:
         if levels_with_data:
-            fig = go.Figure()
+        fig = go.Figure()
             
             for i, (level, stats) in enumerate(levels_with_data):
                 x_positions = stats["x_positions"]
@@ -859,26 +848,26 @@ def render_levels_tab(workers: dict[int, pd.DataFrame], death_hotspots: dict[str
                         line=dict(color=colors[i % len(colors)], width=2),
                     ))
             
-            fig.update_layout(
+        fig.update_layout(
                 title="Best X Progression by Level",
                 xaxis_title="Episode",
                 yaxis_title="Best X Position",
-                height=300,
-                template="plotly_dark",
-                paper_bgcolor="rgba(0,0,0,0)",
-                plot_bgcolor="rgba(0,0,0,0)",
+            height=300,
+            template="plotly_dark",
+            paper_bgcolor="rgba(0,0,0,0)",
+            plot_bgcolor="rgba(0,0,0,0)",
                 xaxis=dict(gridcolor="#313244"),
                 yaxis=dict(gridcolor="#313244"),
                 margin=dict(l=0, r=0, t=50, b=0),
                 legend=dict(orientation="h", yanchor="bottom", y=1.02),
             )
             
-            st.plotly_chart(fig, use_container_width=True)
+        st.plotly_chart(fig, use_container_width=True)
     
     with col2:
         # Speed distribution per level (box plot)
         if any(len(s["speeds"]) > 0 for _, s in levels_with_data):
-            fig = go.Figure()
+        fig = go.Figure()
             
             for level, stats in levels_with_data:
                 speeds = stats["speeds"]
@@ -891,20 +880,20 @@ def render_levels_tab(workers: dict[int, pd.DataFrame], death_hotspots: dict[str
                         line_color=COLORS["blue"],
                     ))
             
-            fig.update_layout(
+        fig.update_layout(
                 title="Speed Distribution by Level",
                 yaxis_title="Speed (x/time)",
-                height=300,
-                template="plotly_dark",
-                paper_bgcolor="rgba(0,0,0,0)",
-                plot_bgcolor="rgba(0,0,0,0)",
+            height=300,
+            template="plotly_dark",
+            paper_bgcolor="rgba(0,0,0,0)",
+            plot_bgcolor="rgba(0,0,0,0)",
                 xaxis=dict(gridcolor="#313244"),
                 yaxis=dict(gridcolor="#313244"),
                 margin=dict(l=0, r=0, t=50, b=0),
                 showlegend=False,
             )
             
-            st.plotly_chart(fig, use_container_width=True)
+        st.plotly_chart(fig, use_container_width=True)
     
     st.divider()
     
@@ -999,17 +988,17 @@ def render_levels_tab(workers: dict[int, pd.DataFrame], death_hotspots: dict[str
         aspect="auto",
     )
     
-    fig.update_layout(
+                fig.update_layout(
         title="Death Heatmap",
         height=max(400, len(sorted_bins) * 12),
-        template="plotly_dark",
-        paper_bgcolor="rgba(0,0,0,0)",
-        plot_bgcolor="rgba(0,0,0,0)",
+                    template="plotly_dark",
+                    paper_bgcolor="rgba(0,0,0,0)",
+                    plot_bgcolor="rgba(0,0,0,0)",
         margin=dict(l=0, r=0, t=50, b=0),
-    )
+                )
     
-    st.plotly_chart(fig, use_container_width=True)
-    
+                st.plotly_chart(fig, use_container_width=True)
+            
     # Top death zones table (across all levels)
     st.divider()
     st.caption("🔥 TOP DEATH ZONES (ALL LEVELS)")
@@ -1041,7 +1030,7 @@ def render_levels_tab(workers: dict[int, pd.DataFrame], death_hotspots: dict[str
     }
     sorted_levels = sorted(level_deaths.items(), key=lambda x: x[0])
     
-    fig = go.Figure()
+                fig = go.Figure()
     fig.add_trace(go.Bar(
         x=[l[0] for l in sorted_levels],
         y=[l[1] for l in sorted_levels],
@@ -1049,17 +1038,17 @@ def render_levels_tab(workers: dict[int, pd.DataFrame], death_hotspots: dict[str
         hovertemplate="Level %{x}<br>Deaths: %{y}<extra></extra>",
     ))
     
-    fig.update_layout(
+                fig.update_layout(
         height=200,
-        template="plotly_dark",
-        paper_bgcolor="rgba(0,0,0,0)",
-        plot_bgcolor="rgba(0,0,0,0)",
+                    template="plotly_dark",
+                    paper_bgcolor="rgba(0,0,0,0)",
+                    plot_bgcolor="rgba(0,0,0,0)",
         xaxis=dict(gridcolor="#313244"),
         yaxis=dict(gridcolor="#313244"),
         margin=dict(l=0, r=0, t=10, b=0),
     )
     
-    st.plotly_chart(fig, use_container_width=True)
+                st.plotly_chart(fig, use_container_width=True)
 
 
 def render_analysis_tab(df: pd.DataFrame, workers: dict[int, pd.DataFrame]) -> None:
@@ -1156,18 +1145,18 @@ def render_analysis_tab(df: pd.DataFrame, workers: dict[int, pd.DataFrame]) -> N
             line=dict(color=COLORS["mauve"]),
         ), row=1, col=2)
 
-    fig.update_layout(
-        height=250,
-        showlegend=False,
-        template="plotly_dark",
-        paper_bgcolor="rgba(0,0,0,0)",
-        plot_bgcolor="rgba(0,0,0,0)",
-        margin=dict(l=0, r=0, t=30, b=0),
-    )
-    fig.update_xaxes(title_text="Time (min)", gridcolor="#313244")
-    fig.update_yaxes(gridcolor="#313244")
+        fig.update_layout(
+            height=250,
+            showlegend=False,
+            template="plotly_dark",
+            paper_bgcolor="rgba(0,0,0,0)",
+            plot_bgcolor="rgba(0,0,0,0)",
+            margin=dict(l=0, r=0, t=30, b=0),
+        )
+        fig.update_xaxes(title_text="Time (min)", gridcolor="#313244")
+        fig.update_yaxes(gridcolor="#313244")
 
-    st.plotly_chart(fig, use_container_width=True)
+        st.plotly_chart(fig, use_container_width=True)
 
 
 def render_dashboard_content(checkpoint_dir: str, refresh_sec: int) -> None:
