@@ -737,42 +737,40 @@ def render_levels_tab(workers: dict[int, pd.DataFrame], death_hotspots: dict[str
     # Death hotspots visualization
     st.subheader("💀 Death Hotspots")
     
-    # If no hotspots file, try to infer from worker data
+    # If no hotspots file, try to read from CSV death_positions column
     if death_hotspots is None or len(death_hotspots) == 0:
-        # Try to infer death locations from x_pos patterns (where progress resets)
-        inferred_hotspots: dict[str, dict[int, int]] = {}
+        # Read death positions from worker CSVs (format: "level:pos1,pos2,pos3")
+        csv_hotspots: dict[str, dict[int, int]] = {}
         
         for wid, df in workers.items():
-            if len(df) < 2:
+            if "death_positions" not in df.columns:
                 continue
             
-            # Detect deaths by looking for x_pos drops (Mario died and restarted)
-            if "x_pos" in df.columns and "world" in df.columns and "stage" in df.columns:
-                prev_x = None
-                prev_level = None
+            for _, row in df.iterrows():
+                death_str = row.get("death_positions", "")
+                if not death_str or not isinstance(death_str, str) or ":" not in death_str:
+                    continue
                 
-                for _, row in df.iterrows():
-                    try:
-                        level = f"{int(row['world'])}-{int(row['stage'])}"
-                        x_pos = int(row.get("x_pos", 0))
-                    except (ValueError, TypeError):
+                try:
+                    # Parse "level:pos1,pos2,pos3" format
+                    level, positions_str = death_str.split(":", 1)
+                    if not positions_str:
                         continue
                     
-                    # If same level but x_pos dropped significantly, likely a death
-                    if prev_level == level and prev_x is not None:
-                        if prev_x > 100 and x_pos < prev_x - 200:
-                            # Death occurred at prev_x
-                            if level not in inferred_hotspots:
-                                inferred_hotspots[level] = {}
-                            bucket = (prev_x // 25) * 25
-                            inferred_hotspots[level][bucket] = inferred_hotspots[level].get(bucket, 0) + 1
+                    positions = [int(p.strip()) for p in positions_str.split(",") if p.strip()]
                     
-                    prev_x = x_pos
-                    prev_level = level
+                    if level not in csv_hotspots:
+                        csv_hotspots[level] = {}
+                    
+                    for pos in positions:
+                        bucket = (pos // 25) * 25
+                        csv_hotspots[level][bucket] = csv_hotspots[level].get(bucket, 0) + 1
+                except (ValueError, TypeError):
+                    continue
         
-        if inferred_hotspots:
-            st.info("💡 Death hotspots inferred from x_pos patterns (file not yet created)")
-            death_hotspots = inferred_hotspots
+        if csv_hotspots:
+            st.info("💡 Death hotspots loaded from worker CSV files")
+            death_hotspots = csv_hotspots
         else:
             st.info("No death hotspot data available yet. Deaths will be tracked as training progresses.")
             return

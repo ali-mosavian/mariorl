@@ -15,6 +15,7 @@ class MetricType(Enum):
     COUNTER = auto()   # Monotonically increasing (episodes, deaths)
     GAUGE = auto()     # Current value (epsilon, learning_rate)
     ROLLING = auto()   # Rolling average (reward, loss)
+    TEXT = auto()      # Arbitrary text (e.g., comma-separated positions)
 
 
 @dataclass(frozen=True)
@@ -64,6 +65,9 @@ class CommonMetrics:
     SNAPSHOT_SAVES = MetricDef("snapshot_saves", MetricType.COUNTER)
     SNAPSHOT_RESTORES = MetricDef("snapshot_restores", MetricType.COUNTER)
     
+    # Death tracking (positions stored as comma-separated string)
+    DEATH_POSITIONS = MetricDef("death_positions", MetricType.TEXT)
+    
     @classmethod
     def definitions(cls) -> list[MetricDef]:
         """Return list of all common metric definitions."""
@@ -87,6 +91,7 @@ class CommonMetrics:
             cls.GRADS_SENT,
             cls.SNAPSHOT_SAVES,
             cls.SNAPSHOT_RESTORES,
+            cls.DEATH_POSITIONS,
         ]
 
 

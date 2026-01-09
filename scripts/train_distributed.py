@@ -327,14 +327,21 @@ def run_worker(
                     if death_x > 0:
                         death_positions.append(death_x)
             
+            # Log deaths to CSV and publish for aggregation
+            level_id = f"{world}-{stage}"
             if deaths_this_cycle > 0:
                 logger.count("deaths", n=deaths_this_cycle)
-                # Publish death positions for aggregation
-                level_id = f"{world}-{stage}"
+                # Log death positions to CSV (format: "level:pos1,pos2,pos3")
+                positions_str = ",".join(str(p) for p in death_positions)
+                logger.text("death_positions", f"{level_id}:{positions_str}")
+                # Publish for main process aggregation
                 events.publish("death_positions", {
                     "level_id": level_id,
                     "positions": death_positions,
                 })
+            else:
+                # Clear death positions if no deaths this cycle
+                logger.text("death_positions", "")
             if flags_this_cycle > 0:
                 logger.count("flags", n=flags_this_cycle)
 

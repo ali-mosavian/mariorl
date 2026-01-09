@@ -61,6 +61,7 @@ class MetricLogger:
     _gauges: dict[str, float] = field(default_factory=dict, init=False, repr=False)
     _rolling: dict[str, deque] = field(default_factory=dict, init=False, repr=False)
     _rolling_windows: dict[str, int] = field(default_factory=dict, init=False, repr=False)
+    _text: dict[str, str] = field(default_factory=dict, init=False, repr=False)
     
     # CSV state
     _csv_file: TextIO | None = field(default=None, init=False, repr=False)
@@ -78,6 +79,8 @@ class MetricLogger:
                 case MetricType.ROLLING:
                     self._rolling[defn.name] = deque(maxlen=defn.window)
                     self._rolling_windows[defn.name] = defn.window
+                case MetricType.TEXT:
+                    self._text[defn.name] = ""
     
     def count(self, name: str, n: int = 1) -> None:
         """Increment a counter metric.
@@ -109,12 +112,23 @@ class MetricLogger:
         if name in self._rolling:
             self._rolling[name].append(value)
     
+    def text(self, name: str, value: str) -> None:
+        """Set a text metric (e.g., comma-separated positions).
+        
+        Args:
+            name: Metric name (must be TEXT type in schema)
+            value: Text value to store
+        """
+        if name in self._text:
+            self._text[name] = value
+    
     def snapshot(self) -> dict[str, Any]:
         """Get current snapshot of all metrics.
         
         Returns:
             Dict with timestamp and all metric values.
             Rolling metrics return their current average.
+            Text metrics return their current string value.
         """
         snap: dict[str, Any] = {"timestamp": time.time()}
         
@@ -127,6 +141,8 @@ class MetricLogger:
                 case MetricType.ROLLING:
                     buf = self._rolling.get(defn.name, deque())
                     snap[defn.name] = sum(buf) / len(buf) if buf else 0.0
+                case MetricType.TEXT:
+                    snap[defn.name] = self._text.get(defn.name, "")
         
         return snap
     
