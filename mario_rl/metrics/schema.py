@@ -110,6 +110,8 @@ class DDQNMetrics(CommonMetrics):
     GRAD_NORM = MetricDef("grad_norm", MetricType.ROLLING)
     BUFFER_SIZE = MetricDef("buffer_size", MetricType.GAUGE)
     PER_BETA = MetricDef("per_beta", MetricType.GAUGE)
+    ACTION_ENTROPY = MetricDef("action_entropy", MetricType.GAUGE)
+    ACTION_DIST = MetricDef("action_dist", MetricType.TEXT)
     
     @classmethod
     def definitions(cls) -> list[MetricDef]:
@@ -122,6 +124,8 @@ class DDQNMetrics(CommonMetrics):
             cls.GRAD_NORM,
             cls.BUFFER_SIZE,
             cls.PER_BETA,
+            cls.ACTION_ENTROPY,
+            cls.ACTION_DIST,
         ]
 
 
