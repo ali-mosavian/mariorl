@@ -32,6 +32,7 @@ class MetricsLogger(Protocol):
     def count(self, name: str, n: int = 1) -> None: ...
     def gauge(self, name: str, value: float) -> None: ...
     def observe(self, name: str, value: float) -> None: ...
+    def text(self, name: str, value: str) -> None: ...
     def flush(self) -> None: ...
     def save_state(self) -> dict[str, Any]: ...
     def load_state(self, state: dict[str, Any]) -> None: ...
@@ -76,6 +77,7 @@ class TrainingWorker:
     _env_runner: EnvRunner = field(init=False, repr=False)
     _last_weights_mtime: float = field(init=False, default=0.0)
     _steps_since_flush: int = field(init=False, default=0)
+    _action_counts: np.ndarray = field(init=False, repr=False)  # Action distribution tracking
 
     def __post_init__(self) -> None:
         """Initialize buffer and env runner."""
@@ -98,6 +100,9 @@ class TrainingWorker:
             env=self.env,
             action_fn=self._get_action,
         )
+
+        # Initialize action counts (for distribution tracking)
+        self._action_counts = np.zeros(self.model.num_actions, dtype=np.int64)
 
     @property
     def model(self):
@@ -128,13 +133,17 @@ class TrainingWorker:
         eps = self.epsilon_at(self.total_steps)
 
         if np.random.random() < eps:
-            return int(np.random.randint(0, self.model.num_actions))
+            action = int(np.random.randint(0, self.model.num_actions))
+        else:
+            state = self._preprocess_state(state)
+            with torch.no_grad():
+                state_t = torch.from_numpy(state).unsqueeze(0).float().to(self.device)
+                q_values = self.model(state_t)
+                action = int(q_values.argmax(dim=1).item())
 
-        state = self._preprocess_state(state)
-        with torch.no_grad():
-            state_t = torch.from_numpy(state).unsqueeze(0).float().to(self.device)
-            q_values = self.model(state_t)
-            return int(q_values.argmax(dim=1).item())
+        # Track action distribution
+        self._action_counts[action] += 1
+        return action
 
     def epsilon_at(self, steps: int) -> float:
         """Get epsilon for given step count."""
@@ -191,6 +200,23 @@ class TrainingWorker:
             self.logger.gauge("buffer_size", len(self._buffer))
             self.logger.gauge("steps_per_sec", steps_per_sec)
             self.logger.gauge("per_beta", self._buffer._current_beta)  # Log PER beta for dashboard
+
+            # Log action distribution metrics
+            total_actions = self._action_counts.sum()
+            if total_actions > 0:
+                # Compute action entropy (entropy of actual taken actions)
+                action_probs = self._action_counts / total_actions
+                # Avoid log(0) by filtering zero probabilities
+                nonzero = action_probs > 0
+                action_entropy = -np.sum(action_probs[nonzero] * np.log(action_probs[nonzero]))
+                # Normalize by max entropy (log of num_actions) for 0-1 scale
+                max_entropy = np.log(len(self._action_counts))
+                normalized_entropy = action_entropy / max_entropy if max_entropy > 0 else 0.0
+                self.logger.gauge("action_entropy", float(normalized_entropy))
+
+                # Log action distribution as percentages (for CSV)
+                pct_str = ",".join(f"{p * 100:.1f}" for p in action_probs)
+                self.logger.text("action_dist", pct_str)
 
             # Track episode rewards
             episode_rewards = info.get("episode_rewards", [])

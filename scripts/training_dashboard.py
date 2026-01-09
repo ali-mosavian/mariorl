@@ -586,6 +586,103 @@ def render_workers_tab(workers: dict[int, pd.DataFrame]) -> None:
             )
             st.plotly_chart(fig, use_container_width=True)
 
+    # Row 5: Action entropy and distribution
+    col9, col10 = st.columns(2)
+
+    with col9:
+        # Action entropy over time
+        fig = go.Figure()
+        has_action_entropy = False
+        for i, (wid, df) in enumerate(sorted(workers.items())):
+            if len(df) > 0 and "action_entropy" in df.columns:
+                has_action_entropy = True
+                x_axis = df["steps"] if "steps" in df.columns else df.get("episodes", range(len(df)))
+                fig.add_trace(go.Scatter(
+                    x=x_axis, y=df["action_entropy"],
+                    name=f"W{wid}", line=dict(color=colors[i % len(colors)], width=1.5),
+                    opacity=0.8,
+                ))
+        
+        if has_action_entropy:
+            fig.update_layout(
+                title="Action Entropy by Worker (0=deterministic, 1=uniform)",
+                height=280,
+                margin=dict(l=0, r=0, t=30, b=0),
+                template="plotly_dark",
+                paper_bgcolor="rgba(0,0,0,0)",
+                plot_bgcolor="rgba(0,0,0,0)",
+                xaxis=dict(title="Steps", gridcolor="#313244"),
+                yaxis=dict(title="Entropy", gridcolor="#313244", range=[0, 1.05]),
+                legend=dict(orientation="h", yanchor="bottom", y=1.02),
+            )
+            st.plotly_chart(fig, use_container_width=True)
+        else:
+            st.info("⏳ Action entropy tracking not yet available...")
+
+    with col10:
+        # Action distribution stacked bar (latest snapshot per worker)
+        # Actions: NOOP, right, right+A, right+B, right+A+B, A, left, left+A, left+B, left+A+B, down, up
+        action_names = ["NOOP", "→", "→A", "→B", "→AB", "A", "←", "←A", "←B", "←AB", "↓", "↑"]
+        action_colors = [
+            "#6c7086",  # NOOP - gray
+            COLORS["green"],   # right
+            COLORS["teal"],    # right+A
+            COLORS["blue"],    # right+B
+            COLORS["sky"],     # right+A+B
+            COLORS["yellow"],  # A (jump)
+            COLORS["red"],     # left
+            COLORS["peach"],   # left+A
+            COLORS["mauve"],   # left+B
+            "#f5c2e7",         # left+A+B
+            "#94e2d5",         # down
+            "#cba6f7",         # up
+        ]
+        
+        # Parse action_dist from latest row of each worker
+        worker_action_dists = []
+        for wid, df in sorted(workers.items()):
+            if len(df) > 0 and "action_dist" in df.columns:
+                latest_dist = df.iloc[-1].get("action_dist", "")
+                if latest_dist and isinstance(latest_dist, str):
+                    try:
+                        pcts = [float(p) for p in latest_dist.split(",")]
+                        if len(pcts) == 12:  # Expecting 12 actions
+                            worker_action_dists.append((wid, pcts))
+                    except (ValueError, TypeError):
+                        pass
+        
+        if worker_action_dists:
+            fig = go.Figure()
+            
+            # Create stacked bars for each action type
+            worker_ids = [f"W{wid}" for wid, _ in worker_action_dists]
+            
+            for action_idx in range(12):
+                pct_values = [pcts[action_idx] for _, pcts in worker_action_dists]
+                fig.add_trace(go.Bar(
+                    name=action_names[action_idx],
+                    x=worker_ids,
+                    y=pct_values,
+                    marker_color=action_colors[action_idx],
+                    hovertemplate=f"{action_names[action_idx]}: " + "%{y:.1f}%<extra></extra>",
+                ))
+            
+            fig.update_layout(
+                title="Action Distribution by Worker (%)",
+                barmode="stack",
+                height=280,
+                margin=dict(l=0, r=0, t=30, b=0),
+                template="plotly_dark",
+                paper_bgcolor="rgba(0,0,0,0)",
+                plot_bgcolor="rgba(0,0,0,0)",
+                xaxis=dict(gridcolor="#313244"),
+                yaxis=dict(title="%", gridcolor="#313244", range=[0, 105]),
+                legend=dict(orientation="h", yanchor="bottom", y=1.02, font=dict(size=9)),
+            )
+            st.plotly_chart(fig, use_container_width=True)
+        else:
+            st.info("⏳ Action distribution tracking not yet available...")
+
 
 def render_levels_tab(workers: dict[int, pd.DataFrame], death_hotspots: dict[str, dict[int, int]] | None) -> None:
     """Render levels tab with death hotspot visualization."""
