@@ -81,7 +81,7 @@ class DDQNLearner:
             "loss": loss.item(),
             "q_mean": current_q_selected.mean().item(),
             "q_max": current_q_selected.max().item(),
-            "td_error_mean": td_errors.mean().item(),
+            "td_error": td_errors.mean().item(),  # Mean TD error for logging
             "target_q_mean": target_q.mean().item(),
         }
 

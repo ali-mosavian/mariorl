@@ -219,8 +219,8 @@ def test_metrics_include_td_error(ddqn_learner, sample_batch: dict[str, Tensor])
     """Metrics should include TD error for prioritized replay."""
     _, metrics = ddqn_learner.compute_loss(**sample_batch)
 
-    assert "td_error_mean" in metrics
-    assert metrics["td_error_mean"] >= 0  # Absolute error
+    assert "td_error" in metrics
+    assert metrics["td_error"] >= 0  # Absolute error
 
 
 # =============================================================================
