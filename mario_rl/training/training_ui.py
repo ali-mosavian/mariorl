@@ -917,6 +917,7 @@ class TrainingUI:
             ws.get("curr_step", 0)
             last_weight_sync = ws.get("last_weight_sync", 0)
             weight_sync_count = ws.get("weight_sync_count", 0)
+            snapshot_saves = ws.get("snapshot_saves", 0)
             snapshot_restores = ws.get("snapshot_restores", 0)
             restores_without_progress = ws.get("restores_without_progress", 0)
             max_restores = ws.get("max_restores", 3)
@@ -948,8 +949,9 @@ class TrainingUI:
 
             stdscr.addstr(y + 2, 4, f"r={episode_reward:7.1f}  💀=")
             stdscr.addstr(f"{deaths:2d}", death_color)
-            # Show restores: total(stuck/max) - color red if near limit
+            # Show saves and restores: saves/restores(stuck/max) - color red if near limit
             restore_color = curses.color_pair(3) if restores_without_progress >= max_restores - 1 else curses.A_NORMAL
+            stdscr.addstr(f"  💾={snapshot_saves:2d}")
             stdscr.addstr(f"  ⏮={snapshot_restores:2d}")
             stdscr.addstr(f"({restores_without_progress}/{max_restores})", restore_color)
             stdscr.addstr("  🏁=")
@@ -1157,6 +1159,7 @@ class TrainingUI:
         # Support both old (avg_speed) and new (speed) field names
         avg_speed = ws.get("avg_speed", ws.get("speed", 0))
         total_deaths = ws.get("total_deaths", ws.get("deaths", 0))
+        snapshot_saves = ws.get("snapshot_saves", 0)
         snapshot_restores = ws.get("snapshot_restores", 0)
         last_weight_sync = ws.get("last_weight_sync", 0)
 
@@ -1183,7 +1186,7 @@ class TrainingUI:
             stdscr.addstr(" 🏁 ")
             stdscr.addstr(f"{flags}", flag_color)
 
-            stdscr.addstr(f" ⏮ {snapshot_restores}")
+            stdscr.addstr(f" 💾{snapshot_saves} ⏮{snapshot_restores}")
             stdscr.addstr(f" ε={epsilon:.2f}")
 
             # Line 3: avg reward, BestX, Spd, Buf%, sync

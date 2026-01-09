@@ -350,6 +350,8 @@ def render_workers_tab(workers: dict[int, pd.DataFrame]) -> None:
             "TD Err": f"{latest.get('td_error', 0):.3f}",
             "Deaths": int(latest.get("deaths", 0)),
             "Flags": int(latest.get("flags", 0)),
+            "Saves": int(latest.get("snapshot_saves", 0)),
+            "Restores": int(latest.get("snapshot_restores", 0)),
             "Grads": int(latest.get("grads_sent", 0)),
         })
 

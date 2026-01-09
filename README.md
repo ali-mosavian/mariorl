@@ -13,6 +13,7 @@ A modular deep reinforcement learning framework featuring distributed A3C-style 
 - 📊 **Real-time Monitoring** - ncurses-based training dashboard
 - 📈 **Unified Metrics System** - Collectors pattern with ZMQ pub/sub
 - 💀 **Death Hotspot Tracking** - Aggregates death positions for curriculum learning
+- 💾 **Snapshot State Machine** - Intelligent save/restore for practicing difficult sections
 - 🐳 **Docker Support** - Ready for deployment on cloud services
 
 ## 🏗️ Architecture Overview
@@ -220,6 +221,124 @@ restore = agg.suggest_restore_position("1-1", death_x=530)
 # → 450 - position to restore for practice
 ```
 
+## 💾 Snapshot State Machine
+
+The snapshot system uses a state machine to intelligently save and restore emulator states based on death hotspots. This allows the agent to practice difficult sections without restarting from the beginning.
+
+### State Machine Diagram
+
+```
+                                    ┌─────────────────┐
+                                    │                 │
+                                    │    RUNNING      │◄──────────────────────┐
+                                    │                 │                       │
+                                    └────────┬────────┘                       │
+                                             │                                │
+                    ┌────────────────────────┼────────────────────────┐       │
+                    │                        │                        │       │
+                    ▼                        ▼                        ▼       │
+        ┌───────────────────┐    ┌───────────────────┐    ┌──────────────┐    │
+        │                   │    │                   │    │              │    │
+        │ APPROACHING_      │    │  CHECKPOINT_DUE   │    │    DEAD      │    │
+        │ HOTSPOT           │    │  (time-based)     │    │              │    │
+        │                   │    │                   │    └──────┬───────┘    │
+        └─────────┬─────────┘    └─────────┬─────────┘           │            │
+                  │                        │                     │            │
+                  │                        │           ┌─────────┴─────────┐  │
+                  ▼                        ▼           ▼                   ▼  │
+        ┌───────────────────┐    ┌───────────────────────────┐   ┌─────────────────┐
+        │                   │    │                           │   │                 │
+        │  SAVE_SNAPSHOT    │───►│      SNAPSHOT_SAVED       │   │  EVALUATE_      │
+        │  (near hotspot)   │    │                           │   │  RESTORE        │
+        │                   │    └─────────────┬─────────────┘   │                 │
+        └───────────────────┘                  │                 └────────┬────────┘
+                                               │                          │
+                                               │              ┌───────────┴───────────┐
+                                               │              │                       │
+                                               │              ▼                       ▼
+                                               │    ┌─────────────────┐     ┌─────────────────┐
+                                               │    │                 │     │                 │
+                                               │    │   RESTORING     │     │   GIVE_UP       │
+                                               │    │                 │     │                 │
+                                               │    └────────┬────────┘     └────────┬────────┘
+                                               │             │                       │
+                                               │             │ (success)             │
+                                               └─────────────┴───────────────────────┘
+                                                             │
+                                                             ▼
+                                                      (back to RUNNING
+                                                       or episode ends)
+```
+
+### State Descriptions
+
+| State | Description | Transitions To |
+|-------|-------------|----------------|
+| **RUNNING** | Normal gameplay | APPROACHING_HOTSPOT, CHECKPOINT_DUE, DEAD |
+| **APPROACHING_HOTSPOT** | Near a known death hotspot | SAVE_SNAPSHOT, DEAD, RUNNING |
+| **CHECKPOINT_DUE** | Time-based checkpoint triggered | SAVE_SNAPSHOT, DEAD |
+| **SAVE_SNAPSHOT** | Saving emulator state | SNAPSHOT_SAVED |
+| **SNAPSHOT_SAVED** | Save completed | RUNNING |
+| **DEAD** | Death detected | EVALUATE_RESTORE |
+| **EVALUATE_RESTORE** | Deciding whether to restore | RESTORING, GIVE_UP |
+| **RESTORING** | Loading snapshot | RUNNING |
+| **GIVE_UP** | Too many failed restores | Episode ends |
+
+### Snapshot Strategy
+
+**When to Save:**
+1. **Hotspot-based**: Save when approaching a death hotspot (100 pixels before), at optimal position (50 pixels before the hotspot)
+2. **Time-based**: Fallback saves every 500 game ticks in unexplored areas
+
+**When to Restore:**
+1. On death, evaluate if restoration is beneficial
+2. Use hotspot data to suggest optimal restore position
+3. Track progress - if restored 3+ times without progress, give up
+
+**When to Give Up:**
+1. Max restores without progress exceeded (default: 3)
+2. No snapshots available
+3. Restore position too close to death position
+
+### Usage
+
+The snapshot system is integrated as an environment wrapper:
+
+```python
+from mario_rl.environment.snapshot_wrapper import create_snapshot_mario_env
+
+# Create environment with automatic snapshot handling
+env = create_snapshot_mario_env(
+    level=(1, 1),
+    hotspot_path=Path("death_hotspots.json"),
+    checkpoint_interval=500,
+    max_restores_without_progress=3,
+)
+
+# Use like a normal Gym environment
+obs, info = env.reset()
+for _ in range(1000):
+    action = agent.act(obs)
+    obs, reward, done, truncated, info = env.step(action)
+    # Snapshots are handled automatically!
+    
+    # Check what happened
+    if info.get("snapshot_saved"):
+        print(f"Saved snapshot at x={info['x_pos']}")
+    if info.get("snapshot_restored"):
+        print(f"Restored from snapshot!")
+
+# Access statistics
+print(f"Total saves: {env.total_saves}")
+print(f"Total restores: {env.total_restores}")
+```
+
+### Monitoring
+
+Snapshot metrics are displayed in:
+- **Text UI**: `💾=12 ⏮=8(2/3)` shows saves, restores, and stuck/max counters
+- **Dashboard**: "Saves" and "Restores" columns in worker table
+
 ## 🔄 Distributed Training Architecture
 
 The distributed training system uses **gradient sharing** (A3C-style) where workers compute gradients locally and send them to a central coordinator.
@@ -278,6 +397,9 @@ The distributed training system uses **gradient sharing** (A3C-style) where work
 | **MetricAggregator** | `mario_rl/metrics/aggregator.py` | Combines metrics from all workers |
 | **MetricCollector** | `mario_rl/metrics/collectors/` | Collector pattern for metrics extraction |
 | **DeathHotspotAggregate** | `mario_rl/metrics/levels.py` | Death position aggregation for curriculum learning |
+| **SnapshotStateMachine** | `mario_rl/training/snapshot_state_machine.py` | State machine for save/restore decisions |
+| **SnapshotHandler** | `mario_rl/training/snapshot_handler.py` | High-level snapshot coordination |
+| **SnapshotMarioEnvironment** | `mario_rl/environment/snapshot_wrapper.py` | Environment wrapper with auto snapshot |
 | **TrainingUI** | `mario_rl/training/training_ui.py` | ncurses monitoring dashboard |
 | **EventPublisher** | `mario_rl/distributed/events.py` | ZMQ-based event publishing |
 
@@ -424,11 +546,15 @@ mario-rl/
 │   │   └── config.py              # Configuration dataclasses
 │   │
 │   ├── environment/               # Environment wrappers
-│   │   └── factory.py             # Mario environment creation
+│   │   ├── factory.py             # Mario environment creation
+│   │   └── snapshot_wrapper.py    # Snapshot-enabled environment wrapper
 │   │
 │   ├── training/                  # Training utilities
 │   │   ├── training_ui.py         # ncurses monitoring dashboard
-│   │   └── shared_gradient_tensor.py  # Shared memory implementation
+│   │   ├── shared_gradient_tensor.py  # Shared memory implementation
+│   │   ├── snapshot.py            # SnapshotManager for save/restore
+│   │   ├── snapshot_state_machine.py  # State machine for snapshot decisions
+│   │   └── snapshot_handler.py    # High-level snapshot handler
 │   │
 │   ├── buffers/                   # Replay buffers
 │   │   └── nstep.py               # N-step transition buffer
@@ -450,6 +576,9 @@ mario-rl/
 │   │   ├── test_logger.py         # MetricLogger tests
 │   │   ├── test_aggregator.py     # MetricAggregator tests
 │   │   └── test_levels.py         # LevelStats + DeathHotspotAggregate tests
+│   ├── training/                  # Training component tests
+│   │   ├── test_snapshot_state_machine.py  # State machine tests
+│   │   └── test_snapshot_handler.py        # Handler tests
 │   └── core/                      # Core component tests
 │
 └── docker/                        # Docker configuration
@@ -708,6 +837,7 @@ uv run pytest -k "select_action" -v
 | `tests/learners/` | ~60 | DDQN learner, Dreamer learner |
 | `tests/distributed/` | ~90 | Workers, coordinators, shared memory, events |
 | `tests/metrics/` | ~200 | Logger, aggregator, collectors, levels, schema |
+| `tests/training/` | ~60 | Snapshot state machine, snapshot handler |
 | `tests/core/` | ~45 | Replay buffer, env runner |
 
 ## 🔌 Extending the Framework

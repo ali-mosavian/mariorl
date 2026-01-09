@@ -89,14 +89,19 @@ class MockLearner:
         rewards: Tensor,
         next_states: Tensor,
         dones: Tensor,
+        weights: Tensor | None = None,
     ) -> tuple[Tensor, dict[str, Any]]:
         q_values = self.model(states)
         q_selected = q_values.gather(1, actions.unsqueeze(1)).squeeze(1)
         with torch.no_grad():
             q_next = self.model(next_states).max(dim=1).values
             targets = rewards + self.gamma * q_next * (1 - dones)
-        loss = torch.nn.functional.mse_loss(q_selected, targets)
-        return loss, {"loss": loss.item()}
+        element_wise_loss = torch.nn.functional.mse_loss(q_selected, targets, reduction="none")
+        if weights is not None:
+            loss = (weights * element_wise_loss).mean()
+        else:
+            loss = element_wise_loss.mean()
+        return loss, {"loss": loss.item(), "td_error": element_wise_loss.mean().item()}
 
     def update_targets(self, tau: float = 1.0) -> None:
         self._update_count += 1

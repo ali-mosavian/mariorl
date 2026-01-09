@@ -60,6 +60,10 @@ class CommonMetrics:
     FLAGS = MetricDef("flags", MetricType.COUNTER)
     GRADS_SENT = MetricDef("grads_sent", MetricType.COUNTER)
     
+    # Snapshot metrics
+    SNAPSHOT_SAVES = MetricDef("snapshot_saves", MetricType.COUNTER)
+    SNAPSHOT_RESTORES = MetricDef("snapshot_restores", MetricType.COUNTER)
+    
     @classmethod
     def definitions(cls) -> list[MetricDef]:
         """Return list of all common metric definitions."""
@@ -81,6 +85,8 @@ class CommonMetrics:
             cls.DEATHS,
             cls.FLAGS,
             cls.GRADS_SENT,
+            cls.SNAPSHOT_SAVES,
+            cls.SNAPSHOT_RESTORES,
         ]
 
 

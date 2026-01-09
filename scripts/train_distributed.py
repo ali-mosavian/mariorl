@@ -75,6 +75,7 @@ class Config:
     epsilon_decay_steps: int = 1_000_000
     q_scale: float = 100.0
     latent_dim: int = 128
+    entropy_coef: float = 0.01  # Entropy regularization for exploration
     target_update_interval: int = 1  # Update target every step like working script
     checkpoint_interval: int = 10_000
 
@@ -113,7 +114,12 @@ def create_model_and_learner(
         )
         if device:
             model = model.to(device)
-        learner = DDQNLearner(model=model, gamma=config.gamma)
+        learner = DDQNLearner(
+            model=model,
+            gamma=config.gamma,
+            n_step=config.n_step,
+            entropy_coef=config.entropy_coef,
+        )
     else:
         from mario_rl.models.dreamer import DreamerModel, DreamerConfig
         from mario_rl.learners.dreamer import DreamerLearner
@@ -188,7 +194,7 @@ def run_worker(
     events = make_event_publisher(zmq_endpoint, source_id=worker_id)
 
     try:
-        from mario_rl.environment.factory import create_mario_env
+        from mario_rl.environment.snapshot_wrapper import create_snapshot_mario_env
         from mario_rl.distributed.training_worker import TrainingWorker
         from mario_rl.distributed.shm_heartbeat import SharedHeartbeat
         from mario_rl.training.shared_gradient_tensor import attach_tensor_buffer
@@ -200,9 +206,17 @@ def run_worker(
         # Worker-specific epsilon for diverse exploration
         epsilon_end = config.eps_base ** (1 + (worker_id + 1) / config.num_workers)
 
-        # Create components
+        # Create components with snapshot support
         level = parse_level(config.level)
-        env = create_mario_env(level=level, render_frames=False)
+        hotspot_path = run_dir / "death_hotspots.json"
+        env = create_snapshot_mario_env(
+            level=level,
+            render_frames=False,
+            hotspot_path=hotspot_path,
+            checkpoint_interval=500,
+            max_restores_without_progress=3,
+            enabled=True,
+        )
         _, learner = create_model_and_learner(config, device)
 
         # Create metrics logger for this worker
@@ -251,23 +265,13 @@ def run_worker(
         best_x = 0
         grads_sent = 0
         
-        # Load death hotspots for snapshot decisions (refreshed periodically)
-        hotspot_path = run_dir / "death_hotspots.json"
-        hotspots: DeathHotspotAggregate | None = None
-        last_hotspot_load = 0.0
+        # Track snapshot stats (handled by wrapper, but we log them)
+        last_snapshot_saves = 0
+        last_snapshot_restores = 0
 
         while True:
             heartbeat.update(worker_id)
             worker.sync_weights(weights_path)
-            
-            # Refresh death hotspots every 30 seconds for snapshot decisions
-            now = time.time()
-            if now - last_hotspot_load > 30 and hotspot_path.exists():
-                try:
-                    hotspots = DeathHotspotAggregate.load(hotspot_path)
-                    last_hotspot_load = now
-                except Exception:
-                    pass  # File may be being written
 
             result = worker.run_cycle(
                 collect_steps=config.collect_steps,
@@ -340,6 +344,24 @@ def run_worker(
                 if ep_time > 0:
                     speed = ep_x / ep_time
                     logger.observe("speed", speed)
+
+            # Log snapshot metrics (from the wrapper)
+            if hasattr(worker.env, "snapshot_stats"):
+                stats = worker.env.snapshot_stats
+                current_saves = stats.get("snapshot_saves", 0)
+                current_restores = stats.get("snapshot_restores", 0)
+                
+                # Log incremental counts
+                new_saves = current_saves - last_snapshot_saves
+                new_restores = current_restores - last_snapshot_restores
+                
+                if new_saves > 0:
+                    logger.count("snapshot_saves", n=new_saves)
+                if new_restores > 0:
+                    logger.count("snapshot_restores", n=new_restores)
+                
+                last_snapshot_saves = current_saves
+                last_snapshot_restores = current_restores
 
             # Write gradients to shared memory
             if grads := result["gradients"]:
@@ -861,9 +883,11 @@ def main(
                     write_main_metrics(event["data"])
                 
                 if ui_queue:
-                    # Forward to UI process
+                    # Forward to UI process (skip None messages)
                     try:
-                        ui_queue.put_nowait(event_to_ui_message(event))
+                        ui_msg = event_to_ui_message(event)
+                        if ui_msg is not None:
+                            ui_queue.put_nowait(ui_msg)
                     except Exception:
                         pass
                 else:

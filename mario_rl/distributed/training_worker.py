@@ -225,13 +225,14 @@ class TrainingWorker:
         # Zero gradients
         self.model.zero_grad()
 
-        # Compute loss
+        # Compute loss with importance sampling weights for PER bias correction
         loss, metrics = self.learner.compute_loss(
             states=batch.states,
             actions=batch.actions,
             rewards=batch.rewards,
             next_states=batch.next_states,
             dones=batch.dones,
+            weights=batch.weights,  # Pass PER importance sampling weights
         )
 
         # Backprop
@@ -244,9 +245,22 @@ class TrainingWorker:
             if param.grad is not None
         }
 
-        # Update priorities if using PER
-        if batch.weights is not None and self.alpha > 0:
-            td_errors = (batch.states.sum(dim=(1, 2, 3)).abs() * 0.01).detach().cpu().numpy()
+        # Update priorities if using PER - use actual TD errors from loss computation
+        if batch.indices is not None and self.alpha > 0 and "td_error" in metrics:
+            # Recompute TD errors for each sample (need per-sample errors, not mean)
+            with torch.no_grad():
+                current_q = self.model(batch.states)
+                current_q_selected = current_q.gather(1, batch.actions.unsqueeze(1)).squeeze(1)
+                
+                next_q_online = self.model(batch.next_states)
+                best_actions = next_q_online.argmax(dim=1)
+                next_q_target = self.model(batch.next_states, network="target") if hasattr(self.model, "target") else next_q_online
+                next_q_selected = next_q_target.gather(1, best_actions.unsqueeze(1)).squeeze(1)
+                
+                n_step_gamma = self.gamma ** self.n_step
+                target_q = batch.rewards + n_step_gamma * next_q_selected * (1.0 - batch.dones.float())
+                td_errors = (current_q_selected - target_q).abs().cpu().numpy()
+            
             self._buffer.update_priorities(batch.indices, td_errors)
 
         # Track training metrics
@@ -257,6 +271,8 @@ class TrainingWorker:
                 self.logger.observe("q_mean", float(metrics["q_mean"]))
             if "td_error" in metrics:
                 self.logger.observe("td_error", float(metrics["td_error"]))
+            if "entropy" in metrics:
+                self.logger.observe("entropy", float(metrics["entropy"]))
 
         return gradients, metrics
 

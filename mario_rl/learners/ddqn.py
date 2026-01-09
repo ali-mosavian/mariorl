@@ -2,12 +2,16 @@
 
 Implements the Learner protocol for Double DQN:
 - Computes TD loss using Double DQN targets
+- Supports N-step returns with correct gamma discounting
+- Uses importance sampling weights for PER correction
+- Includes entropy regularization for exploration
 - Supports soft and hard target updates
 - Returns training metrics for logging
 """
 
 from typing import Any
 from dataclasses import dataclass
+from dataclasses import field
 
 import torch
 from torch import Tensor
@@ -20,15 +24,28 @@ from mario_rl.models import DoubleDQN
 class DDQNLearner:
     """Learner for Double DQN training.
 
-    Computes Double DQN loss:
-        target = r + γ * Q_target(s', argmax_a Q_online(s', a)) * (1 - done)
-        loss = huber_loss(Q_online(s, a), target)
+    Computes Double DQN loss with N-step returns:
+        target = r + γ^n * Q_target(s', argmax_a Q_online(s', a)) * (1 - done)
+        loss = mean(weights * huber_loss(Q_online(s, a), target))
 
-    Uses Huber loss for robustness to outliers.
+    Features:
+    - N-step returns with correct gamma^n discounting
+    - Importance sampling weights for PER bias correction
+    - Entropy regularization for exploration
+    - Huber loss for robustness to outliers
     """
 
     model: DoubleDQN
     gamma: float = 0.99
+    n_step: int = 1
+    entropy_coef: float = 0.01
+
+    # Pre-computed n-step gamma (computed in __post_init__)
+    _n_step_gamma: float = field(init=False, repr=False)
+
+    def __post_init__(self) -> None:
+        """Pre-compute n-step gamma for efficiency."""
+        self._n_step_gamma = self.gamma ** self.n_step
 
     def compute_loss(
         self,
@@ -37,15 +54,17 @@ class DDQNLearner:
         rewards: Tensor,
         next_states: Tensor,
         dones: Tensor,
+        weights: Tensor | None = None,
     ) -> tuple[Tensor, dict[str, Any]]:
         """Compute Double DQN loss for a batch of transitions.
 
         Args:
             states: Current observations (batch, *obs_shape)
             actions: Actions taken (batch,)
-            rewards: Rewards received (batch,)
-            next_states: Next observations (batch, *obs_shape)
+            rewards: Rewards received (batch,) - N-step cumulative rewards
+            next_states: Next observations (batch, *obs_shape) - state after N steps
             dones: Episode termination flags (batch,)
+            weights: Importance sampling weights for PER (batch,), None for uniform
 
         Returns:
             loss: Scalar loss tensor for backpropagation
@@ -67,11 +86,28 @@ class DDQNLearner:
             next_q_target = self.model(next_states, network="target")  # (batch, num_actions)
             next_q_selected = next_q_target.gather(1, best_actions.unsqueeze(1)).squeeze(1)  # (batch,)
 
-            # TD target: r + γ * Q_target(s', a*) * (1 - done)
-            target_q = rewards + self.gamma * next_q_selected * (1.0 - dones.float())
+            # TD target with N-step gamma: r + γ^n * Q_target(s', a*) * (1 - done)
+            target_q = rewards + self._n_step_gamma * next_q_selected * (1.0 - dones.float())
 
-        # Huber loss (smooth L1) - more robust to outliers than MSE
-        loss = F.huber_loss(current_q_selected, target_q, delta=1.0)
+        # Compute element-wise Huber loss
+        element_wise_loss = F.huber_loss(
+            current_q_selected, target_q, reduction="none", delta=1.0
+        )
+
+        # Apply importance sampling weights for PER bias correction
+        if weights is not None:
+            td_loss = (weights * element_wise_loss).mean()
+        else:
+            td_loss = element_wise_loss.mean()
+
+        # Entropy regularization: encourage exploration by penalizing low entropy
+        # Convert Q-values to policy using softmax, then compute entropy
+        policy = F.softmax(current_q, dim=1)
+        log_policy = F.log_softmax(current_q, dim=1)
+        entropy = -(policy * log_policy).sum(dim=1).mean()
+
+        # Total loss: TD loss - entropy bonus (we want to maximize entropy)
+        loss = td_loss - self.entropy_coef * entropy
 
         # Compute TD errors for prioritized replay (absolute error)
         td_errors = (current_q_selected - target_q).abs().detach()
@@ -79,10 +115,12 @@ class DDQNLearner:
         # Training metrics
         metrics: dict[str, Any] = {
             "loss": loss.item(),
+            "td_loss": td_loss.item(),
             "q_mean": current_q_selected.mean().item(),
             "q_max": current_q_selected.max().item(),
-            "td_error": td_errors.mean().item(),  # Mean TD error for logging
+            "td_error": td_errors.mean().item(),
             "target_q_mean": target_q.mean().item(),
+            "entropy": entropy.item(),
         }
 
         return loss, metrics

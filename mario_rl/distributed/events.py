@@ -121,11 +121,18 @@ def format_event(event: dict[str, Any]) -> str | None:
             return None  # Status updates not printed to stdout
 
 
-def event_to_ui_message(event: dict[str, Any]) -> UIMessage:
-    """Convert event dict to UIMessage for UI queue."""
+def event_to_ui_message(event: dict[str, Any]) -> UIMessage | None:
+    """Convert event dict to UIMessage for UI queue.
+    
+    Returns None for events that shouldn't be displayed in the UI.
+    """
     msg_type_str = event.get("msg_type", "system_log")
     source_id = event.get("source_id", -1)
     data = event.get("data", {})
+    
+    # Skip events that are for internal aggregation only
+    if msg_type_str in ("death_positions",):
+        return None
     
     # Handle new metrics events
     if msg_type_str == "metrics":
