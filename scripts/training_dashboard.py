@@ -771,28 +771,28 @@ def render_levels_tab(workers: dict[int, pd.DataFrame], death_hotspots: dict[str
             level_names = [l for l, _ in levels_with_data]
             episode_counts = [s["episodes"] for _, s in levels_with_data]
             
-            fig = go.Figure()
-            fig.add_trace(go.Bar(
+        fig = go.Figure()
+        fig.add_trace(go.Bar(
                 x=level_names,
                 y=episode_counts,
                 marker_color=COLORS["mauve"],
                 hovertemplate="Level %{x}<br>Episodes: %{y}<extra></extra>",
             ))
             
-            fig.update_layout(
+        fig.update_layout(
                 title="Episodes per Level",
                 yaxis_title="Episodes",
                 height=350,
-                template="plotly_dark",
-                paper_bgcolor="rgba(0,0,0,0)",
-                plot_bgcolor="rgba(0,0,0,0)",
+            template="plotly_dark",
+            paper_bgcolor="rgba(0,0,0,0)",
+            plot_bgcolor="rgba(0,0,0,0)",
                 xaxis=dict(gridcolor="#313244"),
                 yaxis=dict(gridcolor="#313244"),
                 margin=dict(l=0, r=0, t=50, b=0),
-            )
+        )
             
-            st.plotly_chart(fig, use_container_width=True)
-        
+        st.plotly_chart(fig, use_container_width=True)
+    
         with chart_col2:
             # Reward distribution box plot
             fig = go.Figure()
@@ -894,6 +894,90 @@ def render_levels_tab(workers: dict[int, pd.DataFrame], death_hotspots: dict[str
             )
             
             st.plotly_chart(fig, use_container_width=True)
+    
+    st.divider()
+    
+    # Action distribution per level
+    st.subheader("🎮 Action Distribution by Level")
+    
+    # Collect action distributions grouped by level
+    action_names = ["NOOP", "→", "→A", "→B", "→AB", "A", "←", "←A", "←B", "←AB", "↓", "↑"]
+    level_action_data: dict[str, list[list[float]]] = {}
+    
+    for wid, df in workers.items():
+        if len(df) == 0 or "action_dist" not in df.columns:
+            continue
+        
+        for _, row in df.iterrows():
+            # Get level from row
+            level = row.get("current_level", "?")
+            if level == "?" and "world" in row and "stage" in row:
+                try:
+                    level = f"{int(row['world'])}-{int(row['stage'])}"
+                except (ValueError, TypeError):
+                    continue
+            
+            if level == "?" or pd.isna(level):
+                continue
+            
+            # Parse action distribution
+            dist_str = row.get("action_dist", "")
+            if dist_str and isinstance(dist_str, str):
+                try:
+                    pcts = [float(p) for p in dist_str.split(",")]
+                    if len(pcts) == 12:
+                        if level not in level_action_data:
+                            level_action_data[level] = []
+                        level_action_data[level].append(pcts)
+                except (ValueError, TypeError):
+                    pass
+    
+    if level_action_data:
+        # Compute average action distribution per level
+        level_avg_actions: dict[str, list[float]] = {}
+        for level, action_lists in level_action_data.items():
+            if action_lists:
+                # Average across all samples for this level
+                avg = [sum(a[i] for a in action_lists) / len(action_lists) for i in range(12)]
+                level_avg_actions[level] = avg
+        
+        if level_avg_actions:
+            # Build heatmap: rows = actions, cols = levels
+            sorted_levels = sorted(level_avg_actions.keys())
+            z_data = [[level_avg_actions[level][action_idx] for level in sorted_levels] for action_idx in range(12)]
+            
+            fig = go.Figure(data=go.Heatmap(
+                z=z_data,
+                x=sorted_levels,
+                y=action_names,
+                colorscale="Viridis",
+                hovertemplate="Level: %{x}<br>Action: %{y}<br>%{z:.1f}%<extra></extra>",
+            ))
+            
+            fig.update_layout(
+                title="Average Action Distribution by Level (%)",
+                height=350,
+                template="plotly_dark",
+                paper_bgcolor="rgba(0,0,0,0)",
+                plot_bgcolor="rgba(0,0,0,0)",
+                xaxis=dict(title="Level", gridcolor="#313244"),
+                yaxis=dict(gridcolor="#313244"),
+                margin=dict(l=0, r=0, t=50, b=0),
+            )
+            
+            st.plotly_chart(fig, use_container_width=True)
+            
+            # Show which actions dominate per level
+            st.caption("🏆 Dominant actions per level:")
+            dominant_actions = []
+            for level in sorted_levels:
+                avg = level_avg_actions[level]
+                top_idx = sorted(range(12), key=lambda i: avg[i], reverse=True)[:3]
+                top_actions = ", ".join(f"{action_names[i]} ({avg[i]:.0f}%)" for i in top_idx)
+                dominant_actions.append({"Level": level, "Top Actions": top_actions})
+            st.dataframe(pd.DataFrame(dominant_actions), hide_index=True, use_container_width=True)
+    else:
+        st.info("⏳ Action distribution data not yet available for levels...")
     
     st.divider()
     
