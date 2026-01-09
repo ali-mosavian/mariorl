@@ -77,7 +77,8 @@ class TrainingWorker:
     _env_runner: EnvRunner = field(init=False, repr=False)
     _last_weights_mtime: float = field(init=False, default=0.0)
     _steps_since_flush: int = field(init=False, default=0)
-    _action_counts: np.ndarray = field(init=False, repr=False)  # Action distribution tracking
+    _action_window: list = field(init=False, repr=False, default_factory=list)  # Rolling window of recent actions
+    _action_window_size: int = 10000  # Track last 10k actions for recent distribution
 
     def __post_init__(self) -> None:
         """Initialize buffer and env runner."""
@@ -101,8 +102,7 @@ class TrainingWorker:
             action_fn=self._get_action,
         )
 
-        # Initialize action counts (for distribution tracking)
-        self._action_counts = np.zeros(self.model.num_actions, dtype=np.int64)
+        # Action window is initialized by default_factory in field definition
 
     @property
     def model(self):
@@ -141,8 +141,10 @@ class TrainingWorker:
                 q_values = self.model(state_t)
                 action = int(q_values.argmax(dim=1).item())
 
-        # Track action distribution
-        self._action_counts[action] += 1
+        # Track action distribution (rolling window for recent distribution)
+        self._action_window.append(action)
+        if len(self._action_window) > self._action_window_size:
+            self._action_window.pop(0)
         return action
 
     def epsilon_at(self, steps: int) -> float:
@@ -201,16 +203,22 @@ class TrainingWorker:
             self.logger.gauge("steps_per_sec", steps_per_sec)
             self.logger.gauge("per_beta", self._buffer._current_beta)  # Log PER beta for dashboard
 
-            # Log action distribution metrics
-            total_actions = self._action_counts.sum()
-            if total_actions > 0:
+            # Log action distribution metrics (from rolling window of recent actions)
+            if len(self._action_window) > 100:  # Need enough samples for meaningful distribution
+                # Count actions in rolling window
+                action_counts = np.zeros(self.model.num_actions, dtype=np.int64)
+                for a in self._action_window:
+                    action_counts[a] += 1
+                
+                total_actions = action_counts.sum()
+                action_probs = action_counts / total_actions
+                
                 # Compute action entropy (entropy of actual taken actions)
-                action_probs = self._action_counts / total_actions
                 # Avoid log(0) by filtering zero probabilities
                 nonzero = action_probs > 0
                 action_entropy = -np.sum(action_probs[nonzero] * np.log(action_probs[nonzero]))
                 # Normalize by max entropy (log of num_actions) for 0-1 scale
-                max_entropy = np.log(len(self._action_counts))
+                max_entropy = np.log(self.model.num_actions)
                 normalized_entropy = action_entropy / max_entropy if max_entropy > 0 else 0.0
                 self.logger.gauge("action_entropy", float(normalized_entropy))
 
