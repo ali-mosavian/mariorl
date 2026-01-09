@@ -416,15 +416,7 @@ def run_coordinator(
 
         _, learner = create_model_and_learner(config, device)
 
-        # Create metrics logger for coordinator
-        csv_path = run_dir / "coordinator.csv"
-        logger = MetricLogger(
-            source_id="coordinator",
-            schema=CoordinatorMetrics,
-            csv_path=csv_path,
-            publisher=events,
-        )
-
+        # No logger here - main process writes aggregated metrics to coordinator.csv
         coordinator = TrainingCoordinator(
             learner=learner,
             num_workers=config.num_workers,
@@ -439,7 +431,7 @@ def run_coordinator(
             target_update_interval=config.target_update_interval,
             checkpoint_interval=config.checkpoint_interval,
             create_shm=False,
-            logger=logger,
+            logger=None,  # Main process handles CSV writing with aggregated metrics
         )
 
         events.log("Started")
@@ -644,6 +636,48 @@ def main(
     # Metrics aggregator for combining worker/coordinator stats
     aggregator = MetricAggregator(num_workers=workers)
     
+    # Main process CSV logger for aggregated metrics (coordinator only logs basic stats)
+    main_csv_path = run_dir / "coordinator.csv"
+    main_csv_file = None
+    main_csv_writer = None
+    main_csv_header_written = False
+    
+    def write_main_metrics(data: dict) -> None:
+        """Write aggregated metrics to coordinator CSV."""
+        nonlocal main_csv_file, main_csv_writer, main_csv_header_written
+        import csv
+        
+        if main_csv_file is None:
+            main_csv_file = open(main_csv_path, "w", newline="")
+            fieldnames = [
+                "timestamp", "update_count", "total_steps", "total_episodes",
+                "grads_per_sec", "learning_rate", "weight_version",
+                "avg_reward", "avg_speed", "avg_loss", "q_mean", "td_error", "grad_norm",
+            ]
+            main_csv_writer = csv.DictWriter(main_csv_file, fieldnames=fieldnames)
+        
+        if not main_csv_header_written:
+            main_csv_writer.writeheader()
+            main_csv_header_written = True
+        
+        row = {
+            "timestamp": time.time(),
+            "update_count": data.get("step", data.get("update_count", 0)),
+            "total_steps": data.get("timesteps", data.get("total_steps", 0)),
+            "total_episodes": data.get("total_episodes", 0),
+            "grads_per_sec": data.get("grads_per_sec", 0),
+            "learning_rate": data.get("lr", data.get("learning_rate", 0)),
+            "weight_version": data.get("weight_version", 0),
+            "avg_reward": data.get("avg_reward", 0),
+            "avg_speed": data.get("avg_speed", 0),
+            "avg_loss": data.get("avg_loss", 0),
+            "q_mean": data.get("q_mean", 0),
+            "td_error": data.get("td_error", 0),
+            "grad_norm": data.get("grad_norm", 0),
+        }
+        main_csv_writer.writerow(row)
+        main_csv_file.flush()
+    
     # Death hotspot aggregator for snapshot/restore decisions
     hotspot_path = run_dir / "death_hotspots.json"
     hotspot_aggregator = DeathHotspotAggregate.load_or_create(hotspot_path)
@@ -712,6 +746,9 @@ def main(
         print("\nShutting down...")
         manager.terminate_all()
         manager.cleanup()
+        # Close main process CSV
+        if main_csv_file is not None:
+            main_csv_file.close()
 
     def signal_handler(sig, frame):
         if os.getpid() == main_pid:
@@ -763,6 +800,9 @@ def main(
                     event["data"]["q_mean"] = agg.get("mean_q_mean", 0.0)
                     event["data"]["td_error"] = agg.get("mean_td_error", 0.0)
                     event["data"]["total_episodes"] = agg.get("total_episodes", 0)
+                    
+                    # Write enhanced metrics to CSV
+                    write_main_metrics(event["data"])
                 
                 if ui_queue:
                     # Forward to UI process
