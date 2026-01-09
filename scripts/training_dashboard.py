@@ -509,6 +509,83 @@ def render_workers_tab(workers: dict[int, pd.DataFrame]) -> None:
         )
         st.plotly_chart(fig, use_container_width=True)
 
+    # Row 4: Epsilon decay tracking
+    col7, col8 = st.columns(2)
+
+    with col7:
+        fig = go.Figure()
+        for i, (wid, df) in enumerate(sorted(workers.items())):
+            if len(df) > 0 and "epsilon" in df.columns:
+                # Use steps if available, else episodes
+                x_axis = df["steps"] if "steps" in df.columns else df.get("episodes", range(len(df)))
+                fig.add_trace(go.Scatter(
+                    x=x_axis, y=df["epsilon"],
+                    name=f"W{wid}", line=dict(color=colors[i % len(colors)], width=1.5),
+                    opacity=0.8,
+                ))
+        fig.update_layout(
+            title="Epsilon by Worker (vs Steps)",
+            height=280,
+            margin=dict(l=0, r=0, t=30, b=0),
+            template="plotly_dark",
+            paper_bgcolor="rgba(0,0,0,0)",
+            plot_bgcolor="rgba(0,0,0,0)",
+            xaxis=dict(title="Steps", gridcolor="#313244"),
+            yaxis=dict(title="ε", gridcolor="#313244", range=[0, 1.05]),
+            legend=dict(orientation="h", yanchor="bottom", y=1.02),
+        )
+        st.plotly_chart(fig, use_container_width=True)
+
+    with col8:
+        # Buffer size / PER beta if available
+        fig = go.Figure()
+        has_beta = False
+        for i, (wid, df) in enumerate(sorted(workers.items())):
+            if len(df) > 0 and "per_beta" in df.columns:
+                has_beta = True
+                x_axis = df["steps"] if "steps" in df.columns else df.get("episodes", range(len(df)))
+                fig.add_trace(go.Scatter(
+                    x=x_axis, y=df["per_beta"],
+                    name=f"W{wid}", line=dict(color=colors[i % len(colors)], width=1.5),
+                    opacity=0.8,
+                ))
+        
+        if has_beta:
+            fig.update_layout(
+                title="PER Beta by Worker (vs Steps)",
+                height=280,
+                margin=dict(l=0, r=0, t=30, b=0),
+                template="plotly_dark",
+                paper_bgcolor="rgba(0,0,0,0)",
+                plot_bgcolor="rgba(0,0,0,0)",
+                xaxis=dict(title="Steps", gridcolor="#313244"),
+                yaxis=dict(title="β", gridcolor="#313244", range=[0, 1.05]),
+                showlegend=False,
+            )
+            st.plotly_chart(fig, use_container_width=True)
+        else:
+            # Fallback to buffer size if no beta
+            fig = go.Figure()
+            for i, (wid, df) in enumerate(sorted(workers.items())):
+                if len(df) > 0 and "buffer_size" in df.columns:
+                    fig.add_trace(go.Scatter(
+                        x=df.get("episodes", range(len(df))), y=df["buffer_size"],
+                        name=f"W{wid}", line=dict(color=colors[i % len(colors)], width=1.5),
+                        opacity=0.8,
+                    ))
+            fig.update_layout(
+                title="Buffer Size by Worker",
+                height=280,
+                margin=dict(l=0, r=0, t=30, b=0),
+                template="plotly_dark",
+                paper_bgcolor="rgba(0,0,0,0)",
+                plot_bgcolor="rgba(0,0,0,0)",
+                xaxis=dict(title="Episode", gridcolor="#313244"),
+                yaxis=dict(gridcolor="#313244"),
+                showlegend=False,
+            )
+            st.plotly_chart(fig, use_container_width=True)
+
 
 def render_levels_tab(workers: dict[int, pd.DataFrame], death_hotspots: dict[str, dict[int, int]] | None) -> None:
     """Render levels tab with death hotspot visualization."""

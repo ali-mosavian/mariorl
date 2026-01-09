@@ -169,6 +169,11 @@ class TrainingWorker:
         self.total_steps += num_steps
         self._steps_since_flush += num_steps
 
+        # Update PER beta based on training progress
+        # Beta anneals from beta_start (0.4) to beta_end (1.0) to correct for sampling bias
+        progress = min(1.0, self.total_steps / self.epsilon_decay_steps)
+        self._buffer.update_beta(progress)
+
         # Calculate steps per second (actual collection duration)
         collect_end = time.time()
         elapsed = collect_end - collect_start
@@ -185,6 +190,7 @@ class TrainingWorker:
             self.logger.gauge("epsilon", self.epsilon_at(self.total_steps))
             self.logger.gauge("buffer_size", len(self._buffer))
             self.logger.gauge("steps_per_sec", steps_per_sec)
+            self.logger.gauge("per_beta", self._buffer._current_beta)  # Log PER beta for dashboard
 
             # Track episode rewards
             episode_rewards = info.get("episode_rewards", [])
