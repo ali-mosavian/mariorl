@@ -96,6 +96,10 @@ class MetricAggregator:
             if not values:
                 continue
             
+            # Skip non-numeric values (TEXT metrics like death_positions)
+            if any(isinstance(v, str) for v in values):
+                continue
+            
             if key in COUNTER_METRICS:
                 # Sum counters
                 result[f"total_{key}"] = sum(values)

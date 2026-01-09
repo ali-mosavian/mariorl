@@ -193,6 +193,7 @@ class MetricLogger:
             "counters": dict(self._counters),
             "gauges": dict(self._gauges),
             "rolling": {k: list(v) for k, v in self._rolling.items()},
+            "text": dict(self._text),
         }
     
     def load_state(self, state: dict[str, Any]) -> None:
@@ -216,3 +217,8 @@ class MetricLogger:
             if k in self._rolling:
                 self._rolling[k].clear()
                 self._rolling[k].extend(values)
+        
+        # Restore text fields
+        for k, v in state.get("text", {}).items():
+            if k in self._text:
+                self._text[k] = v
