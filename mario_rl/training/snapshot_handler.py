@@ -133,8 +133,11 @@ class SnapshotHandler:
         world = info.get("world", 1)
         stage = info.get("stage", 1)
         level_id = f"{world}-{stage}"
-        is_dead = done and not info.get("flag_get", False)
         flag_get = info.get("flag_get", False)
+        # Death is done without flag, but exclude timeouts (game_time <= 10)
+        # Timeout deaths shouldn't trigger restores - they're not skill failures
+        is_timeout = game_time <= 10
+        is_dead = done and not flag_get and not is_timeout
 
         # Track best x and level
         self._best_x = max(self._best_x, x_pos)

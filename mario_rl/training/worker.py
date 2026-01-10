@@ -318,8 +318,10 @@ class Worker:
             world_time = info.get("time", 0) // 2
             restore_time = world_time + 2
 
-            # RESTORE on death
-            if is_dead and (restore_time in time_to_slot) and world_time > 15:
+            # RESTORE on death (but not on timeout - game_time <= 10)
+            game_time = info.get("time", 0)
+            is_timeout = game_time <= 10
+            if is_dead and not is_timeout and (restore_time in time_to_slot) and world_time > 15:
                 slot_id = time_to_slot[restore_time]
                 saved_state, saved_frames, nes_snapshot = slot_to_state[slot_id]
 

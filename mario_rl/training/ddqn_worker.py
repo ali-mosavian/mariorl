@@ -465,9 +465,10 @@ class DDQNWorker:
             if self.snapshots:
                 self.snapshots.maybe_save(state, info)
 
-            # Try restore on death
-            if is_dead and self.snapshots:
-                game_time = info.get("time", 0)
+            # Try restore on death (but not on timeout)
+            game_time = info.get("time", 0)
+            is_timeout = game_time <= 10
+            if is_dead and not is_timeout and self.snapshots:
                 checkpoint_time = game_time // self.config.snapshot.interval
                 if checkpoint_time > 3:
                     try:
@@ -501,10 +502,10 @@ class DDQNWorker:
                     speed = x_pos / time_elapsed
                     self.metrics.add_speed(speed)
 
-                # Track death/flag
+                # Track death/flag (exclude timeouts from death tracking)
                 if info.get("flag_get", False):
                     self.metrics.add_flag(game_time)
-                elif is_dead:
+                elif is_dead and not is_timeout:
                     self.metrics.add_death(x_pos)
 
                 # Log episode to CSV
