@@ -162,6 +162,7 @@ class SnapshotHandler:
             level_id=level_id,
             game_time=game_time,
             is_dead=is_dead,
+            is_timeout=is_timeout,
             flag_get=flag_get,
             best_x=self._best_x,
             hotspot_positions=hotspot_positions,

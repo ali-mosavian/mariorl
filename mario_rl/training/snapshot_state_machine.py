@@ -14,40 +14,43 @@ State Machine Diagram
                                         │                 │                       │
                                         └────────┬────────┘                       │
                                                  │                                │
-                        ┌────────────────────────┼────────────────────────┐       │
-                        │                        │                        │       │
-                        ▼                        ▼                        ▼       │
-            ┌───────────────────┐    ┌───────────────────┐    ┌──────────────┐    │
-            │                   │    │                   │    │              │    │
-            │ APPROACHING_      │    │  CHECKPOINT_DUE   │    │    DEAD      │    │
-            │ HOTSPOT           │    │  (time-based)     │    │              │    │
-            │                   │    │                   │    └──────┬───────┘    │
-            └─────────┬─────────┘    └─────────┬─────────┘           │            │
-                      │                        │                     │            │
-                      │                        │           ┌─────────┴─────────┐  │
-                      ▼                        ▼           ▼                   ▼  │
-            ┌───────────────────┐    ┌───────────────────────────┐   ┌─────────────────┐
-            │                   │    │                           │   │                 │
-            │  SAVE_SNAPSHOT    │───►│      SNAPSHOT_SAVED       │   │  EVALUATE_      │
-            │  (near hotspot)   │    │                           │   │  RESTORE        │
-            │                   │    └─────────────┬─────────────┘   │                 │
-            └───────────────────┘                  │                 └────────┬────────┘
-                                                   │                          │
-                                                   │              ┌───────────┴───────────┐
-                                                   │              │                       │
-                                                   │              ▼                       ▼
-                                                   │    ┌─────────────────┐     ┌─────────────────┐
-                                                   │    │                 │     │                 │
-                                                   │    │   RESTORING     │     │   GIVE_UP       │
-                                                   │    │                 │     │                 │
-                                                   │    └────────┬────────┘     └────────┬────────┘
-                                                   │             │                       │
-                                                   │             │ (success)             │
-                                                   └─────────────┴───────────────────────┘
-                                                                 │
-                                                                 ▼
-                                                          (back to RUNNING
-                                                           or episode ends)
+                 ┌───────────────────────────────┼────────────────────────┐       │
+                 │                               │                        │       │
+                 │          ┌────────────────────┼────────────────────┐   │       │
+                 │          │                    │                    │   │       │
+                 ▼          ▼                    ▼                    ▼   ▼       │
+    ┌──────────────┐ ┌───────────────┐ ┌───────────────┐    ┌──────────────┐     │
+    │              │ │               │ │               │    │              │     │
+    │   TIMEOUT    │ │ APPROACHING_  │ │ CHECKPOINT_   │    │    DEAD      │     │
+    │  (timer out) │ │ HOTSPOT       │ │ DUE           │    │              │     │
+    │              │ │               │ │               │    └──────┬───────┘     │
+    └──────┬───────┘ └───────┬───────┘ └───────┬───────┘           │             │
+           │                 │                 │                   │             │
+           │                 │                 │         ┌─────────┴─────────┐   │
+           │                 ▼                 ▼         ▼                   ▼   │
+           │      ┌───────────────────┐ ┌─────────────────┐    ┌─────────────────┐
+           │      │                   │ │                 │    │                 │
+           │      │  SAVE_SNAPSHOT    │►│ SNAPSHOT_SAVED  │    │  EVALUATE_      │
+           │      │                   │ │                 │    │  RESTORE        │
+           │      └───────────────────┘ └────────┬────────┘    └────────┬────────┘
+           │                                     │                      │
+           │                                     │          ┌───────────┴───────────┐
+           │                                     │          │                       │
+           │                                     │          ▼                       ▼
+           │                                     │ ┌─────────────────┐     ┌─────────────────┐
+           │                                     │ │                 │     │                 │
+           │                                     │ │   RESTORING     │     │   GIVE_UP       │
+           │                                     │ │                 │     │                 │
+           │                                     │ └────────┬────────┘     └────────┬────────┘
+           │                                     │          │                       │
+           │                                     │          │ (success)             │
+           │  (end episode)                      └──────────┴───────────────────────┘
+           │                                                │
+           └────────────────────────────────────────────────┘
+                                                            │
+                                                            ▼
+                                                     (back to RUNNING
+                                                      or episode ends)
 
 State Descriptions
 ==================
@@ -55,14 +58,22 @@ State Descriptions
 RUNNING:
     Normal gameplay state. Mario is alive and moving through the level.
     Transitions to:
+    - TIMEOUT: When timer runs out (highest priority)
+    - DEAD: When death is detected (skill-based death)
     - APPROACHING_HOTSPOT: When x_pos enters approach zone before a death hotspot
     - CHECKPOINT_DUE: When time-based checkpoint interval is reached
-    - DEAD: When death is detected
+
+TIMEOUT:
+    Episode ended because the game timer ran out. This is NOT a skill failure -
+    it's a time management issue. No restore is attempted.
+    Transitions to:
+    - RUNNING: After END_EPISODE action (episode will reset externally)
 
 APPROACHING_HOTSPOT:
     Mario is approaching a known death hotspot. We're looking for the optimal
     position to save a snapshot.
     Transitions to:
+    - TIMEOUT: When timer runs out
     - SAVE_SNAPSHOT: When optimal snapshot position is reached
     - DEAD: When death is detected before reaching save point
     - RUNNING: When hotspot zone is passed without needing to save
@@ -70,6 +81,7 @@ APPROACHING_HOTSPOT:
 CHECKPOINT_DUE:
     Time-based checkpoint is due. Used as fallback in unexplored areas.
     Transitions to:
+    - TIMEOUT: When timer runs out
     - SAVE_SNAPSHOT: Immediately, to save the checkpoint
     - DEAD: If death occurs before save
 
@@ -84,7 +96,7 @@ SNAPSHOT_SAVED:
     - RUNNING: Immediately
 
 DEAD:
-    Mario just died. Need to decide whether to restore.
+    Mario just died (skill-based death). Need to decide whether to restore.
     Transitions to:
     - EVALUATE_RESTORE: Immediately
 
@@ -122,6 +134,7 @@ class SnapshotState(Enum):
     SAVE_SNAPSHOT = auto()
     SNAPSHOT_SAVED = auto()
     DEAD = auto()
+    TIMEOUT = auto()  # Episode ended due to timer running out
     EVALUATE_RESTORE = auto()
     RESTORING = auto()
     GIVE_UP = auto()
@@ -144,7 +157,8 @@ class SnapshotContext:
         x_pos: Mario's current x position in pixels.
         level_id: Current level identifier (e.g., "1-1").
         game_time: Current game time in ticks.
-        is_dead: Whether Mario just died.
+        is_dead: Whether Mario just died (skill-based death, excludes timeouts).
+        is_timeout: Whether the episode ended due to timer running out.
         flag_get: Whether Mario reached the flag (level complete).
         best_x: Best x position reached this episode.
         hotspot_positions: Suggested snapshot positions from DeathHotspotAggregate.
@@ -156,6 +170,7 @@ class SnapshotContext:
     level_id: str
     game_time: int
     is_dead: bool
+    is_timeout: bool
     flag_get: bool
     best_x: int
     hotspot_positions: tuple[int, ...]
@@ -224,6 +239,9 @@ class SnapshotStateMachine:
             case SnapshotState.DEAD:
                 return self._handle_dead(ctx)
 
+            case SnapshotState.TIMEOUT:
+                return self._handle_timeout(ctx)
+
             case SnapshotState.EVALUATE_RESTORE:
                 return self._handle_evaluate_restore(ctx)
 
@@ -239,7 +257,12 @@ class SnapshotStateMachine:
 
     def _handle_running(self, ctx: SnapshotContext) -> tuple[SnapshotState, SnapshotAction]:
         """Handle RUNNING state transitions."""
-        # Check for death first (highest priority)
+        # Check for timeout first (highest priority - clean episode end)
+        if ctx.is_timeout:
+            self.state = SnapshotState.TIMEOUT
+            return (SnapshotState.TIMEOUT, SnapshotAction.NONE)
+
+        # Check for death (second priority)
         if ctx.is_dead:
             self.state = SnapshotState.DEAD
             return (SnapshotState.DEAD, SnapshotAction.NONE)
@@ -263,6 +286,12 @@ class SnapshotStateMachine:
         self, ctx: SnapshotContext
     ) -> tuple[SnapshotState, SnapshotAction]:
         """Handle APPROACHING_HOTSPOT state transitions."""
+        # Timeout takes priority
+        if ctx.is_timeout:
+            self.state = SnapshotState.TIMEOUT
+            self._current_hotspot_target = None
+            return (SnapshotState.TIMEOUT, SnapshotAction.NONE)
+
         if ctx.is_dead:
             self.state = SnapshotState.DEAD
             self._current_hotspot_target = None
@@ -287,6 +316,11 @@ class SnapshotStateMachine:
         self, ctx: SnapshotContext
     ) -> tuple[SnapshotState, SnapshotAction]:
         """Handle CHECKPOINT_DUE state transitions."""
+        # Timeout takes priority
+        if ctx.is_timeout:
+            self.state = SnapshotState.TIMEOUT
+            return (SnapshotState.TIMEOUT, SnapshotAction.NONE)
+
         if ctx.is_dead:
             self.state = SnapshotState.DEAD
             return (SnapshotState.DEAD, SnapshotAction.NONE)
@@ -308,6 +342,18 @@ class SnapshotStateMachine:
         """Handle DEAD state transitions."""
         self.state = SnapshotState.EVALUATE_RESTORE
         return (SnapshotState.EVALUATE_RESTORE, SnapshotAction.NONE)
+
+    def _handle_timeout(self, ctx: SnapshotContext) -> tuple[SnapshotState, SnapshotAction]:
+        """Handle TIMEOUT state transitions.
+
+        Timeout means the timer ran out - this is a clean episode end.
+        No restore attempt is made since timeouts are time management issues,
+        not skill failures that can be fixed by practicing the same section.
+        """
+        # Reset restore counter since episode is ending
+        self._restores_without_progress = 0
+        self.state = SnapshotState.RUNNING
+        return (SnapshotState.TIMEOUT, SnapshotAction.END_EPISODE)
 
     def _handle_evaluate_restore(
         self, ctx: SnapshotContext

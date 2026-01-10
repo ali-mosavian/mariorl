@@ -19,6 +19,7 @@ def make_context(
     level_id: str = "1-1",
     game_time: int = 0,
     is_dead: bool = False,
+    is_timeout: bool = False,
     flag_get: bool = False,
     best_x: int = 100,
     hotspot_positions: tuple[int, ...] = (),
@@ -31,6 +32,7 @@ def make_context(
         level_id=level_id,
         game_time=game_time,
         is_dead=is_dead,
+        is_timeout=is_timeout,
         flag_get=flag_get,
         best_x=best_x,
         hotspot_positions=hotspot_positions,
@@ -670,3 +672,165 @@ class TestFullWorkflow:
         # Next checkpoint
         state, action = sm.transition(make_context(game_time=1000))
         assert state == SnapshotState.CHECKPOINT_DUE
+
+
+class TestTimeoutState:
+    """Tests for TIMEOUT state - when episode ends due to timer running out."""
+
+    def test_transitions_to_timeout_on_timeout(self) -> None:
+        """Should transition to TIMEOUT when is_timeout is True."""
+        sm = SnapshotStateMachine()
+        ctx = make_context(is_timeout=True)
+
+        state, action = sm.transition(ctx)
+
+        assert state == SnapshotState.TIMEOUT
+        assert action == SnapshotAction.NONE
+        assert sm.state == SnapshotState.TIMEOUT
+
+    def test_timeout_ends_episode(self) -> None:
+        """TIMEOUT should transition to RUNNING with END_EPISODE action."""
+        sm = SnapshotStateMachine()
+        sm.state = SnapshotState.TIMEOUT
+
+        ctx = make_context()
+        state, action = sm.transition(ctx)
+
+        assert state == SnapshotState.TIMEOUT
+        assert action == SnapshotAction.END_EPISODE
+        assert sm.state == SnapshotState.RUNNING  # Ready for next episode
+
+    def test_timeout_does_not_trigger_restore(self) -> None:
+        """Timeout should NOT attempt to restore from snapshot.
+
+        Timeouts are not skill failures - they're time management issues.
+        There's no point restoring when the timer ran out.
+        """
+        sm = SnapshotStateMachine()
+        ctx = make_context(is_timeout=True, snapshot_available=True)
+
+        # Transition to TIMEOUT
+        sm.transition(ctx)
+        assert sm.state == SnapshotState.TIMEOUT
+
+        # Process TIMEOUT - should end episode, NOT restore
+        state, action = sm.transition(ctx)
+        assert action == SnapshotAction.END_EPISODE
+        assert action != SnapshotAction.RESTORE_SNAPSHOT
+
+    def test_timeout_has_priority_over_checkpoint(self) -> None:
+        """Timeout should take priority over checkpoint due."""
+        sm = SnapshotStateMachine(checkpoint_interval=500)
+        ctx = make_context(game_time=600, is_timeout=True)
+
+        state, action = sm.transition(ctx)
+
+        assert state == SnapshotState.TIMEOUT
+
+    def test_timeout_has_priority_over_hotspot(self) -> None:
+        """Timeout should take priority over approaching hotspot."""
+        sm = SnapshotStateMachine(hotspot_approach_distance=100)
+        ctx = make_context(x_pos=420, hotspot_positions=(500,), is_timeout=True)
+
+        state, action = sm.transition(ctx)
+
+        assert state == SnapshotState.TIMEOUT
+
+    def test_timeout_while_approaching_hotspot(self) -> None:
+        """Should transition to TIMEOUT if timeout occurs while approaching hotspot."""
+        sm = SnapshotStateMachine(hotspot_approach_distance=100)
+        # Enter approach zone
+        ctx1 = make_context(x_pos=420, hotspot_positions=(500,))
+        sm.transition(ctx1)
+        assert sm.state == SnapshotState.APPROACHING_HOTSPOT
+
+        # Timeout while approaching
+        ctx2 = make_context(x_pos=440, hotspot_positions=(500,), is_timeout=True)
+        state, action = sm.transition(ctx2)
+
+        assert state == SnapshotState.TIMEOUT
+        assert action == SnapshotAction.NONE
+
+    def test_timeout_in_checkpoint_due(self) -> None:
+        """Should transition to TIMEOUT if timeout occurs during checkpoint."""
+        sm = SnapshotStateMachine(checkpoint_interval=500)
+        ctx1 = make_context(game_time=500)
+        sm.transition(ctx1)  # -> CHECKPOINT_DUE
+
+        ctx2 = make_context(game_time=500, is_timeout=True)
+        state, action = sm.transition(ctx2)
+
+        assert state == SnapshotState.TIMEOUT
+
+    def test_timeout_resets_restore_counter(self) -> None:
+        """Timeout should reset the restore counter.
+
+        Since we're ending the episode, any restore tracking should reset.
+        """
+        sm = SnapshotStateMachine()
+        sm._restores_without_progress = 2
+
+        # Trigger timeout
+        ctx = make_context(is_timeout=True)
+        sm.transition(ctx)  # -> TIMEOUT
+        sm.transition(ctx)  # Process TIMEOUT -> END_EPISODE
+
+        assert sm._restores_without_progress == 0
+
+    def test_dead_and_timeout_both_true_prefers_timeout(self) -> None:
+        """If both is_dead and is_timeout are True, should treat as timeout.
+
+        This shouldn't happen normally (is_dead should exclude timeouts),
+        but if it does, timeout should take priority since it's a cleaner exit.
+        """
+        sm = SnapshotStateMachine()
+        ctx = make_context(is_dead=True, is_timeout=True)
+
+        state, action = sm.transition(ctx)
+
+        assert state == SnapshotState.TIMEOUT
+
+
+class TestTimeoutWorkflow:
+    """Integration tests for timeout workflows."""
+
+    def test_timeout_during_normal_play(self) -> None:
+        """Test complete workflow: normal play until timeout."""
+        sm = SnapshotStateMachine()
+
+        # 1. Normal running
+        state, action = sm.transition(make_context(x_pos=300))
+        assert state == SnapshotState.RUNNING
+
+        # 2. More progress
+        state, action = sm.transition(make_context(x_pos=500))
+        assert state == SnapshotState.RUNNING
+
+        # 3. Timeout occurs (timer ran out at game_time=10 or less)
+        state, action = sm.transition(make_context(x_pos=600, is_timeout=True))
+        assert state == SnapshotState.TIMEOUT
+        assert action == SnapshotAction.NONE
+
+        # 4. Episode ends
+        state, action = sm.transition(make_context())
+        assert action == SnapshotAction.END_EPISODE
+        assert sm.state == SnapshotState.RUNNING  # Ready for next episode
+
+    def test_timeout_vs_death_different_paths(self) -> None:
+        """Verify timeout and death take different state machine paths."""
+        # Test death path
+        sm_death = SnapshotStateMachine()
+        sm_death.transition(make_context(is_dead=True))
+        assert sm_death.state == SnapshotState.DEAD
+
+        sm_death.transition(make_context())
+        assert sm_death.state == SnapshotState.EVALUATE_RESTORE
+
+        # Test timeout path - should skip EVALUATE_RESTORE entirely
+        sm_timeout = SnapshotStateMachine()
+        sm_timeout.transition(make_context(is_timeout=True))
+        assert sm_timeout.state == SnapshotState.TIMEOUT
+
+        sm_timeout.transition(make_context())
+        # Should go directly to RUNNING (after END_EPISODE), not EVALUATE_RESTORE
+        assert sm_timeout.state == SnapshotState.RUNNING
