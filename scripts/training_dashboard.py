@@ -897,12 +897,12 @@ def render_levels_tab(workers: dict[int, pd.DataFrame], death_hotspots: dict[str
     
     st.divider()
     
-    # Action distribution over time per level (like Workers tab but filtered by level)
-    st.subheader("🎮 Action Distribution by Level")
+    # Combined view: Action Distribution + Death Heatmap per level (side by side)
+    st.subheader("🎮 Per-Level Analysis: Actions & Deaths")
     
     action_names = ["NOOP", "→", "→A", "→B", "→AB", "A", "←", "←A", "←B", "←AB", "↓", "↑"]
     
-    # Collect action_dist data with steps, grouped by level
+    # ===== Collect Action Distribution Data =====
     # Format: {level: [(steps, [pcts...]), ...]}
     level_action_data: dict[str, list[tuple[int, list[float]]]] = {}
     
@@ -911,7 +911,6 @@ def render_levels_tab(workers: dict[int, pd.DataFrame], death_hotspots: dict[str
             continue
         
         for _, row in df.iterrows():
-            # Get level from row
             level = row.get("current_level", "?")
             if level == "?" and "world" in row and "stage" in row:
                 try:
@@ -922,7 +921,6 @@ def render_levels_tab(workers: dict[int, pd.DataFrame], death_hotspots: dict[str
             if level == "?" or pd.isna(level):
                 continue
             
-            # Parse action distribution
             dist_str = row.get("action_dist", "")
             steps = row.get("steps", 0)
             if dist_str and isinstance(dist_str, str):
@@ -935,64 +933,8 @@ def render_levels_tab(workers: dict[int, pd.DataFrame], death_hotspots: dict[str
                 except (ValueError, TypeError):
                     pass
     
-    if level_action_data:
-        # Sort levels and let user select
-        sorted_levels = sorted(level_action_data.keys())
-        selected_level = st.selectbox("Select Level", sorted_levels, key="action_dist_level")
-        
-        if selected_level and selected_level in level_action_data:
-            # Get data for selected level and sort by steps
-            level_data = sorted(level_action_data[selected_level], key=lambda x: x[0])
-            
-            if len(level_data) >= 2:
-                # Sample to ~50 time points for clean heatmap
-                sample_size = min(50, len(level_data))
-                sample_indices = [int(i * len(level_data) / sample_size) for i in range(sample_size)]
-                sampled_data = [level_data[i] for i in sample_indices]
-                
-                # Build heatmap matrix: rows = actions, cols = time
-                x_labels = [f"{int(d[0]//1000)}k" for d in sampled_data]
-                z_data = [[d[1][action_idx] for d in sampled_data] for action_idx in range(12)]
-                
-                fig = go.Figure(data=go.Heatmap(
-                    z=z_data,
-                    x=x_labels,
-                    y=action_names,
-                    colorscale="Viridis",
-                    hovertemplate="Action: %{y}<br>Steps: %{x}<br>%{z:.1f}%<extra></extra>",
-                ))
-                
-                fig.update_layout(
-                    title=f"Action Distribution Over Time - Level {selected_level}",
-                    height=350,
-                    template="plotly_dark",
-                    paper_bgcolor="rgba(0,0,0,0)",
-                    plot_bgcolor="rgba(0,0,0,0)",
-                    xaxis=dict(title="Steps", gridcolor="#313244"),
-                    yaxis=dict(gridcolor="#313244"),
-                    margin=dict(l=0, r=0, t=50, b=0),
-                )
-                
-                st.plotly_chart(fig, use_container_width=True)
-                
-                # Show current (most recent) action distribution for this level
-                latest = level_data[-1][1]
-                top_idx = sorted(range(12), key=lambda i: latest[i], reverse=True)[:3]
-                top_actions = ", ".join(f"{action_names[i]} ({latest[i]:.0f}%)" for i in top_idx)
-                st.caption(f"🏆 Current top actions for {selected_level}: {top_actions}")
-            else:
-                st.info(f"⏳ Not enough data points for level {selected_level} yet...")
-    else:
-        st.info("⏳ Action distribution data not yet available for levels...")
-    
-    st.divider()
-    
-    # Death hotspots visualization
-    st.subheader("💀 Death Hotspots")
-    
-    # If no hotspots file, try to read from CSV death_positions column
+    # ===== Collect Death Hotspot Data =====
     if death_hotspots is None or len(death_hotspots) == 0:
-        # Read death positions from worker CSVs (format: "level:pos1,pos2,pos3")
         csv_hotspots: dict[str, dict[int, int]] = {}
         
         for wid, df in workers.items():
@@ -1005,7 +947,6 @@ def render_levels_tab(workers: dict[int, pd.DataFrame], death_hotspots: dict[str
                     continue
                 
                 try:
-                    # Parse "level:pos1,pos2,pos3" format
                     level, positions_str = death_str.split(":", 1)
                     if not positions_str:
                         continue
@@ -1022,123 +963,176 @@ def render_levels_tab(workers: dict[int, pd.DataFrame], death_hotspots: dict[str
                     continue
         
         if csv_hotspots:
-            st.info("💡 Death hotspots loaded from worker CSV files")
             death_hotspots = csv_hotspots
-        else:
-            st.info("No death hotspot data available yet. Deaths will be tracked as training progresses.")
-            return
     
-    # Build heatmap data: X = level, Y = position bin, Z = death count
-    available_levels = sorted(death_hotspots.keys())
-    if not available_levels:
-        st.info("No death data collected yet.")
+    # ===== Get All Levels (union of both data sources) =====
+    all_levels: set[str] = set()
+    all_levels.update(level_action_data.keys())
+    if death_hotspots:
+        all_levels.update(death_hotspots.keys())
+    
+    if not all_levels:
+        st.info("⏳ No level data available yet...")
         return
     
-    # Find all unique position bins across all levels
-    all_bins: set[int] = set()
-    for buckets in death_hotspots.values():
-        all_bins.update(buckets.keys())
+    # Sort levels by world-stage (e.g., 1-1, 1-2, 1-3, 2-1, ...)
+    def level_sort_key(lvl: str) -> tuple:
+        try:
+            parts = lvl.split("-")
+            return (int(parts[0]), int(parts[1]))
+        except (ValueError, IndexError):
+            return (999, 999)
     
-    if not all_bins:
-        st.info("No death position data available.")
-        return
-    
-    # Create sorted bin labels (Y axis)
-    sorted_bins = sorted(all_bins)
-    bin_labels = [f"{b}-{b+25}" for b in sorted_bins]
-    
-    # Build heatmap matrix: rows = bins (Y), cols = levels (X)
-    z_data = []
-    for bin_start in sorted_bins:
-        row = []
-        for level in available_levels:
-            count = death_hotspots.get(level, {}).get(bin_start, 0)
-            row.append(count)
-        z_data.append(row)
+    sorted_levels = sorted(all_levels, key=level_sort_key)
     
     # Summary stats
-    total_deaths = sum(sum(buckets.values()) for buckets in death_hotspots.values())
-    max_deaths_level = max(death_hotspots.items(), key=lambda x: sum(x[1].values()))
-    
-    cols = st.columns(4)
-    cols[0].metric("Total Deaths", total_deaths)
-    cols[1].metric("Levels Tracked", len(available_levels))
-    cols[2].metric("Position Bins", len(sorted_bins))
-    cols[3].metric("Deadliest Level", max_deaths_level[0])
+    total_deaths = sum(sum(b.values()) for b in (death_hotspots or {}).values())
+    stats_cols = st.columns(3)
+    stats_cols[0].metric("Levels", len(sorted_levels))
+    stats_cols[1].metric("Total Deaths", total_deaths)
+    if death_hotspots:
+        deadliest = max(death_hotspots.items(), key=lambda x: sum(x[1].values()), default=("?", {}))
+        stats_cols[2].metric("Deadliest Level", deadliest[0])
     
     st.divider()
     
-    # Create heatmap using plotly express
-    fig = px.imshow(
-        z_data,
-        x=available_levels,
-        y=bin_labels,
-        color_continuous_scale="Turbo",
-        labels=dict(x="Level", y="Position Range", color="Deaths"),
-        aspect="auto",
-    )
+    # ===== Render Each Level as a Row =====
+    for level in sorted_levels:
+        st.markdown(f"### Level {level}")
+        col_actions, col_deaths = st.columns(2)
+        
+        # ----- Left Column: Action Distribution Over Time -----
+        with col_actions:
+            if level in level_action_data and len(level_action_data[level]) >= 2:
+                level_data = sorted(level_action_data[level], key=lambda x: x[0])
+                
+                # Sample to ~30 time points for compact heatmap
+                sample_size = min(30, len(level_data))
+                sample_indices = [int(i * len(level_data) / sample_size) for i in range(sample_size)]
+                sampled_data = [level_data[i] for i in sample_indices]
+                
+                x_labels = [f"{int(d[0]//1000)}k" for d in sampled_data]
+                z_data = [[d[1][action_idx] for d in sampled_data] for action_idx in range(12)]
+                
+                fig = go.Figure(data=go.Heatmap(
+                    z=z_data,
+                    x=x_labels,
+                    y=action_names,
+                    colorscale="Viridis",
+                    showscale=False,
+                    hovertemplate="Action: %{y}<br>Steps: %{x}<br>%{z:.1f}%<extra></extra>",
+                ))
+                
+                fig.update_layout(
+                    title=f"🎮 Actions Over Time",
+                    height=250,
+                    template="plotly_dark",
+                    paper_bgcolor="rgba(0,0,0,0)",
+                    plot_bgcolor="rgba(0,0,0,0)",
+                    xaxis=dict(title="Steps", gridcolor="#313244"),
+                    yaxis=dict(gridcolor="#313244"),
+                    margin=dict(l=0, r=0, t=30, b=0),
+                )
+                
+                st.plotly_chart(fig, use_container_width=True, key=f"actions_{level}")
+                
+                # Current top actions
+                latest = level_data[-1][1]
+                top_idx = sorted(range(12), key=lambda i: latest[i], reverse=True)[:3]
+                top_actions = ", ".join(f"{action_names[i]} ({latest[i]:.0f}%)" for i in top_idx)
+                st.caption(f"🏆 Current: {top_actions}")
+            else:
+                st.info("⏳ Not enough action data")
+        
+        # ----- Right Column: Death Heatmap (horizontal bar) -----
+        with col_deaths:
+            if death_hotspots and level in death_hotspots and death_hotspots[level]:
+                buckets = death_hotspots[level]
+                sorted_buckets = sorted(buckets.items(), key=lambda x: x[0])
+                
+                positions = [f"{b[0]}" for b in sorted_buckets]
+                counts = [b[1] for b in sorted_buckets]
+                
+                fig = go.Figure(data=go.Bar(
+                    x=counts,
+                    y=positions,
+                    orientation="h",
+                    marker_color="crimson",
+                    hovertemplate="Position: %{y}<br>Deaths: %{x}<extra></extra>",
+                ))
+                
+                fig.update_layout(
+                    title=f"💀 Deaths by Position",
+                    height=250,
+                    template="plotly_dark",
+                    paper_bgcolor="rgba(0,0,0,0)",
+                    plot_bgcolor="rgba(0,0,0,0)",
+                    xaxis=dict(title="Deaths", gridcolor="#313244"),
+                    yaxis=dict(title="X Position", gridcolor="#313244"),
+                    margin=dict(l=0, r=0, t=30, b=0),
+                )
+                
+                st.plotly_chart(fig, use_container_width=True, key=f"deaths_{level}")
+                
+                # Death stats
+                total_level_deaths = sum(counts)
+                hottest_pos = max(buckets.items(), key=lambda x: x[1])
+                st.caption(f"💀 Total: {total_level_deaths} | Hotspot: x={hottest_pos[0]}")
+            else:
+                st.info("⏳ No death data")
+        
+        st.divider()
     
-    fig.update_layout(
-        title="Death Heatmap",
-        height=max(400, len(sorted_bins) * 12),
-        template="plotly_dark",
-        paper_bgcolor="rgba(0,0,0,0)",
-        plot_bgcolor="rgba(0,0,0,0)",
-        margin=dict(l=0, r=0, t=50, b=0),
-    )
-    
-    st.plotly_chart(fig, use_container_width=True)
-    
-    # Top death zones table (across all levels)
-    st.divider()
-    st.caption("🔥 TOP DEATH ZONES (ALL LEVELS)")
-    
-    all_hotspots = []
-    for level, buckets in death_hotspots.items():
-        for pos, count in buckets.items():
-            all_hotspots.append((level, pos, count))
-    
-    top_spots = sorted(all_hotspots, key=lambda x: x[2], reverse=True)[:15]
-    spot_rows = [
-        {
-            "Level": level,
-            "Position": f"x={pos}-{pos+25}",
-            "Deaths": count,
-            "% of Total": f"{count/total_deaths*100:.1f}%" if total_deaths > 0 else "0%",
+    # ===== Global Death Hotspots Table =====
+    if death_hotspots:
+        st.caption("🔥 TOP DEATH ZONES (ALL LEVELS)")
+        
+        all_hotspots = []
+        for level, buckets in death_hotspots.items():
+            for pos, count in buckets.items():
+                all_hotspots.append((level, pos, count))
+        
+        top_spots = sorted(all_hotspots, key=lambda x: x[2], reverse=True)[:15]
+        spot_rows = [
+            {
+                "Level": level,
+                "Position": f"x={pos}-{pos+25}",
+                "Deaths": count,
+                "% of Total": f"{count/total_deaths*100:.1f}%" if total_deaths > 0 else "0%",
+            }
+            for level, pos, count in top_spots
+        ]
+        st.dataframe(pd.DataFrame(spot_rows), hide_index=True, use_container_width=True)
+        
+        # Deaths per level bar chart (compact)
+        st.divider()
+        st.caption("📊 TOTAL DEATHS PER LEVEL")
+        
+        level_deaths = {
+            level: sum(buckets.values()) 
+            for level, buckets in death_hotspots.items()
         }
-        for level, pos, count in top_spots
-    ]
-    st.dataframe(pd.DataFrame(spot_rows), hide_index=True, use_container_width=True)
-    
-    # Deaths per level bar chart (compact)
-    st.divider()
-    st.caption("📊 TOTAL DEATHS PER LEVEL")
-    
-    level_deaths = {
-        level: sum(buckets.values()) 
-        for level, buckets in death_hotspots.items()
-    }
-    sorted_levels = sorted(level_deaths.items(), key=lambda x: x[0])
-    
-    fig = go.Figure()
-    fig.add_trace(go.Bar(
-        x=[l[0] for l in sorted_levels],
-        y=[l[1] for l in sorted_levels],
-        marker_color=COLORS["red"],
-        hovertemplate="Level %{x}<br>Deaths: %{y}<extra></extra>",
-    ))
-    
-    fig.update_layout(
-        height=200,
-        template="plotly_dark",
-        paper_bgcolor="rgba(0,0,0,0)",
-        plot_bgcolor="rgba(0,0,0,0)",
-        xaxis=dict(gridcolor="#313244"),
-        yaxis=dict(gridcolor="#313244"),
-        margin=dict(l=0, r=0, t=10, b=0),
-    )
-    
-    st.plotly_chart(fig, use_container_width=True)
+        sorted_level_deaths = sorted(level_deaths.items(), key=lambda x: x[0])
+        
+        fig = go.Figure()
+        fig.add_trace(go.Bar(
+            x=[l[0] for l in sorted_level_deaths],
+            y=[l[1] for l in sorted_level_deaths],
+            marker_color=COLORS["red"],
+            hovertemplate="Level %{x}<br>Deaths: %{y}<extra></extra>",
+        ))
+        
+        fig.update_layout(
+            height=200,
+            template="plotly_dark",
+            paper_bgcolor="rgba(0,0,0,0)",
+            plot_bgcolor="rgba(0,0,0,0)",
+            xaxis=dict(gridcolor="#313244"),
+            yaxis=dict(gridcolor="#313244"),
+            margin=dict(l=0, r=0, t=10, b=0),
+        )
+        
+        st.plotly_chart(fig, use_container_width=True)
 
 
 def render_analysis_tab(df: pd.DataFrame, workers: dict[int, pd.DataFrame]) -> None:
