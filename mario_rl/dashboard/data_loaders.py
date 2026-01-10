@@ -25,7 +25,10 @@ def find_latest_checkpoint(base_dir: str = "checkpoints") -> str | None:
 @st.cache_data(ttl=2)
 def load_coordinator_metrics(checkpoint_dir: str) -> pd.DataFrame | None:
     """Load coordinator metrics CSV."""
+    # Try metrics subdirectory first, then root (for compatibility)
     csv_path = Path(checkpoint_dir) / "metrics" / "coordinator.csv"
+    if not csv_path.exists():
+        csv_path = Path(checkpoint_dir) / "coordinator.csv"
     if not csv_path.exists():
         return None
     try:
@@ -56,9 +59,12 @@ def load_death_hotspots(checkpoint_dir: str) -> dict[str, dict[int, int]] | None
 @st.cache_data(ttl=2)
 def load_worker_metrics(checkpoint_dir: str) -> dict[int, pd.DataFrame]:
     """Load all worker metrics CSVs."""
-    metrics_dir = Path(checkpoint_dir) / "metrics"
+    checkpoint_path = Path(checkpoint_dir)
+    
+    # Try metrics subdirectory first, then root (for compatibility)
+    metrics_dir = checkpoint_path / "metrics"
     if not metrics_dir.exists():
-        return {}
+        metrics_dir = checkpoint_path
     
     workers = {}
     for csv_file in sorted(metrics_dir.glob("worker_*.csv")):
