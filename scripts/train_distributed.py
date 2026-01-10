@@ -301,9 +301,10 @@ def run_worker(
             
             best_x = max(best_x, x_pos)
             
-            # Count deaths and flags
+            # Count deaths, timeouts, and flags
             # Include both: deaths where we restored AND deaths where episode ended
             deaths_this_cycle = 0
+            timeouts_this_cycle = 0
             death_positions: list[int] = []
             flags_this_cycle = 0
             
@@ -315,17 +316,20 @@ def run_worker(
                         deaths_this_cycle += 1
                         death_positions.append(death_x)
             
-            # Count deaths from actual episode endings
+            # Count deaths/timeouts from actual episode endings
             for ep_info in episode_end_infos:
                 if ep_info.get("flag_get", False):
                     # Completed level
                     flags_this_cycle += 1
                 else:
                     # Episode ended without flag = death or timeout
-                    # Exclude timeouts (game_time <= 10) from death tracking
                     ep_game_time = ep_info.get("time", 400)
                     is_timeout = ep_game_time <= 10
-                    if not is_timeout:
+                    if is_timeout:
+                        # Timeout - ran out of time
+                        timeouts_this_cycle += 1
+                    else:
+                        # Actual death
                         deaths_this_cycle += 1
                         death_x = ep_info.get("x_pos", 0)
                         if death_x > 0:
@@ -346,6 +350,8 @@ def run_worker(
             else:
                 # Clear death positions if no deaths this cycle
                 logger.text("death_positions", "")
+            if timeouts_this_cycle > 0:
+                logger.count("timeouts", n=timeouts_this_cycle)
             if flags_this_cycle > 0:
                 logger.count("flags", n=flags_this_cycle)
 

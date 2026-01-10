@@ -107,6 +107,7 @@ def _render_summary_table(workers: dict[int, pd.DataFrame]) -> None:
             "Q Mean": f"{latest.get('q_mean', 0):.1f}",
             "TD Err": f"{latest.get('td_error', 0):.3f}",
             "Deaths": int(latest.get("deaths", 0)),
+            "Timeouts": int(latest.get("timeouts", 0)),
             "Flags": int(latest.get("flags", 0)),
             "Saves": int(latest.get("snapshot_saves", 0)),
             "Restores": int(latest.get("snapshot_restores", 0)),

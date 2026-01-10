@@ -27,6 +27,7 @@ class MetricsTracker:
     episode_count: int = 0
     total_steps: int = 0
     deaths: int = 0
+    timeouts: int = 0
     flags: int = 0
     best_x_ever: int = 0
     gradients_sent: int = 0
@@ -63,6 +64,10 @@ class MetricsTracker:
         self.x_at_death_history.append(x_pos)
         if len(self.x_at_death_history) > 20:
             self.x_at_death_history.pop(0)
+
+    def add_timeout(self) -> None:
+        """Record timeout (ran out of game time)."""
+        self.timeouts += 1
 
     def add_flag(self, game_time: int) -> None:
         """Record flag capture."""

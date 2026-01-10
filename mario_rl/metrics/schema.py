@@ -58,6 +58,7 @@ class CommonMetrics:
     WORLD = MetricDef("world", MetricType.GAUGE)
     STAGE = MetricDef("stage", MetricType.GAUGE)
     DEATHS = MetricDef("deaths", MetricType.COUNTER)
+    TIMEOUTS = MetricDef("timeouts", MetricType.COUNTER)
     FLAGS = MetricDef("flags", MetricType.COUNTER)
     GRADS_SENT = MetricDef("grads_sent", MetricType.COUNTER)
     
@@ -87,6 +88,7 @@ class CommonMetrics:
             cls.WORLD,
             cls.STAGE,
             cls.DEATHS,
+            cls.TIMEOUTS,
             cls.FLAGS,
             cls.GRADS_SENT,
             cls.SNAPSHOT_SAVES,

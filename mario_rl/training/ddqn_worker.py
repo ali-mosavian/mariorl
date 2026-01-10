@@ -502,10 +502,12 @@ class DDQNWorker:
                     speed = x_pos / time_elapsed
                     self.metrics.add_speed(speed)
 
-                # Track death/flag (exclude timeouts from death tracking)
+                # Track death/timeout/flag
                 if info.get("flag_get", False):
                     self.metrics.add_flag(game_time)
-                elif is_dead and not is_timeout:
+                elif is_timeout:
+                    self.metrics.add_timeout()
+                elif is_dead:
                     self.metrics.add_death(x_pos)
 
                 # Log episode to CSV
