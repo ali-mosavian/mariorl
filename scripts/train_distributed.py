@@ -321,19 +321,15 @@ def run_worker(
                 if ep_info.get("flag_get", False):
                     # Completed level
                     flags_this_cycle += 1
+                elif ep_info.get("is_timeout", False):
+                    # Timeout - ran out of time (not a skill failure)
+                    timeouts_this_cycle += 1
                 else:
-                    # Episode ended without flag = death or timeout
-                    ep_game_time = ep_info.get("time", 400)
-                    is_timeout = ep_game_time <= 10
-                    if is_timeout:
-                        # Timeout - ran out of time
-                        timeouts_this_cycle += 1
-                    else:
-                        # Actual death
-                        deaths_this_cycle += 1
-                        death_x = ep_info.get("x_pos", 0)
-                        if death_x > 0:
-                            death_positions.append(death_x)
+                    # Actual death (skill failure)
+                    deaths_this_cycle += 1
+                    death_x = ep_info.get("x_pos", 0)
+                    if death_x > 0:
+                        death_positions.append(death_x)
             
             # Log deaths to CSV and publish for aggregation
             level_id = f"{world}-{stage}"

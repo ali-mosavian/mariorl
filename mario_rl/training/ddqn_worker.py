@@ -465,9 +465,9 @@ class DDQNWorker:
             if self.snapshots:
                 self.snapshots.maybe_save(state, info)
 
-            # Try restore on death (but not on timeout)
+            # Try restore on death (but not on timeout - timeouts aren't skill failures)
+            is_timeout = info.get("is_timeout", False)
             game_time = info.get("time", 0)
-            is_timeout = game_time <= 10
             if is_dead and not is_timeout and self.snapshots:
                 checkpoint_time = game_time // self.config.snapshot.interval
                 if checkpoint_time > 3:

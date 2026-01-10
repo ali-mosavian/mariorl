@@ -134,9 +134,9 @@ class SnapshotHandler:
         stage = info.get("stage", 1)
         level_id = f"{world}-{stage}"
         flag_get = info.get("flag_get", False)
-        # Death is done without flag, but exclude timeouts (game_time <= 10)
-        # Timeout deaths shouldn't trigger restores - they're not skill failures
-        is_timeout = game_time <= 10
+        # is_timeout from env = died because timer ran out (not skill failure)
+        is_timeout = info.get("is_timeout", False)
+        # Skill-based death = episode ended without flag and wasn't a timeout
         is_dead = done and not flag_get and not is_timeout
 
         # Track best x and level

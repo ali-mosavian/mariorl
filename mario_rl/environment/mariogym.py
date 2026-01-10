@@ -14,6 +14,9 @@ from gym_super_mario_bros import SuperMarioBrosEnv
 RomModes = Literal["vanilla", "pixel", "downsample"]
 LevelModes = Literal["sequential", "random"] | Tuple[Literal[1, 2, 3, 4, 5, 6, 7, 8], Literal[1, 2, 3, 4]]
 
+# Timeout threshold: if game time <= this value when dying, it's a timeout (not skill death)
+TIMEOUT_THRESHOLD = 10
+
 
 @dataclass(frozen=True)
 class State:
@@ -148,11 +151,16 @@ class MarioBrosLevel(SuperMarioBrosEnv):
         return SuperMarioBrosEnv.step(self, action)
 
     def _get_info(self):
+        # Timeout = died because timer ran out (not a skill-based death)
+        is_dying_or_dead = self._is_dying or self._is_dead
+        is_timeout = is_dying_or_dead and self._time <= TIMEOUT_THRESHOLD and not self._flag_get
+        
         return {
             "reward": dataclasses.asdict(self._reward_state),
             **SuperMarioBrosEnv._get_info(self),
             "is_dying": self._is_dying,
             "is_dead": self._is_dead,
+            "is_timeout": is_timeout,
             "state": dataclasses.asdict(self.state),
             "last_state": dataclasses.asdict(self._last_state) if self._last_state else None,
         }
