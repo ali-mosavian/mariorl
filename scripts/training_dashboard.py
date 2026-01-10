@@ -1145,23 +1145,27 @@ def render_levels_tab(workers: dict[int, pd.DataFrame], death_hotspots: dict[str
                 
                 x_labels = [f"{int(s//1000)}k" for s in steps_list]
                 
-                fig = go.Figure()
+                fig = make_subplots(specs=[[{"secondary_y": True}]])
                 
                 fig.add_trace(go.Scatter(
                     x=x_labels,
                     y=death_rates,
-                    name="Death Rate",
+                    name="💀 Death",
                     line=dict(color="crimson", width=2),
                     hovertemplate="Steps: %{x}<br>Death Rate: %{y:.1f}%<extra></extra>",
-                ))
+                ), secondary_y=False)
                 
                 fig.add_trace(go.Scatter(
                     x=x_labels,
                     y=completion_rates,
-                    name="Completion",
+                    name="🏁 Complete",
                     line=dict(color="lime", width=2),
                     hovertemplate="Steps: %{x}<br>Completion: %{y:.1f}%<extra></extra>",
-                ))
+                ), secondary_y=True)
+                
+                # Calculate appropriate ranges
+                death_max = max(death_rates) * 1.1 if death_rates and max(death_rates) > 0 else 100
+                completion_max = max(completion_rates) * 1.1 if completion_rates and max(completion_rates) > 0 else 100
                 
                 fig.update_layout(
                     title=f"📈 Death & Completion Rate",
@@ -1170,11 +1174,13 @@ def render_levels_tab(workers: dict[int, pd.DataFrame], death_hotspots: dict[str
                     paper_bgcolor="rgba(0,0,0,0)",
                     plot_bgcolor="rgba(0,0,0,0)",
                     xaxis=dict(title="Steps", gridcolor="#313244"),
-                    yaxis=dict(title="%", gridcolor="#313244", range=[0, max(100, max(death_rates + completion_rates) * 1.1)]),
                     margin=dict(l=0, r=0, t=30, b=0),
                     legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
                     showlegend=True,
                 )
+                
+                fig.update_yaxes(title_text="Death %", secondary_y=False, gridcolor="#313244", range=[0, death_max], title_font=dict(color="crimson"))
+                fig.update_yaxes(title_text="Complete %", secondary_y=True, gridcolor="#313244", range=[0, completion_max], title_font=dict(color="lime"))
                 
                 st.plotly_chart(fig, use_container_width=True, key=f"rates_{level}")
                 
