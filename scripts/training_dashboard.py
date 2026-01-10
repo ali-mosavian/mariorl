@@ -1123,22 +1123,19 @@ def render_levels_tab(workers: dict[int, pd.DataFrame], death_hotspots: dict[str
                 
                 steps_list = [d[0] for d in sampled]
                 
-                # Calculate cumulative sums and rates
-                cum_deaths = 0
-                cum_flags = 0
-                cum_episodes = 0
+                # Calculate rates (deaths/flags/episodes are already cumulative counters)
                 death_rates = []
                 completion_rates = []
                 
                 for d in sampled:
-                    cum_deaths += d[1]
-                    cum_flags += d[2]
-                    cum_episodes += d[3]
+                    deaths = d[1]
+                    flags = d[2]
+                    episodes = d[3]
                     
                     # Death rate = deaths / episodes (as percentage)
-                    death_rate = (cum_deaths / cum_episodes * 100) if cum_episodes > 0 else 0
+                    death_rate = (deaths / episodes * 100) if episodes > 0 else 0
                     # Completion rate = flags / episodes (as percentage)
-                    completion_rate = (cum_flags / cum_episodes * 100) if cum_episodes > 0 else 0
+                    completion_rate = (flags / episodes * 100) if episodes > 0 else 0
                     
                     death_rates.append(death_rate)
                     completion_rates.append(completion_rate)
