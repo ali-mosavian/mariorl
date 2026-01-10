@@ -121,6 +121,41 @@ def test_common_metrics_definitions_includes_core_metrics():
     assert "steps_per_sec" in names
 
 
+def test_common_metrics_has_deaths():
+    """CommonMetrics defines deaths counter."""
+    assert CommonMetrics.DEATHS.name == "deaths"
+    assert CommonMetrics.DEATHS.metric_type == MetricType.COUNTER
+
+
+def test_common_metrics_has_timeouts():
+    """CommonMetrics defines timeouts counter.
+    
+    Timeouts are distinct from deaths - they represent
+    running out of game time rather than skill-based deaths.
+    """
+    assert CommonMetrics.TIMEOUTS.name == "timeouts"
+    assert CommonMetrics.TIMEOUTS.metric_type == MetricType.COUNTER
+
+
+def test_common_metrics_has_flags():
+    """CommonMetrics defines flags counter."""
+    assert CommonMetrics.FLAGS.name == "flags"
+    assert CommonMetrics.FLAGS.metric_type == MetricType.COUNTER
+
+
+def test_common_metrics_definitions_includes_episode_end_metrics():
+    """CommonMetrics.definitions() includes all episode end metrics.
+    
+    Episodes can end in three ways: death, timeout, or flag.
+    All three should be tracked separately.
+    """
+    defs = CommonMetrics.definitions()
+    names = [d.name for d in defs]
+    assert "deaths" in names
+    assert "timeouts" in names
+    assert "flags" in names
+
+
 # =============================================================================
 # DDQNMetrics Tests
 # =============================================================================

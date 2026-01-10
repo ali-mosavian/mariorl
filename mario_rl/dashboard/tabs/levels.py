@@ -9,7 +9,6 @@ from mario_rl.dashboard.chart_helpers import (
     DARK_LAYOUT,
     GRID_STYLE,
     make_bar_chart,
-    make_box_plot,
     make_heatmap,
     make_dual_axis_chart,
 )
@@ -71,9 +70,6 @@ def _render_level_stats_table(level_stats: dict[str, LevelStats]) -> None:
     
     rows = []
     for level, stats in sorted(level_stats.items(), key=lambda x: level_sort_key(x[0])):
-        rewards = stats.rewards
-        speeds = stats.speeds
-        
         rows.append({
             "Level": level,
             "Episodes": stats.episodes,
@@ -81,8 +77,8 @@ def _render_level_stats_table(level_stats: dict[str, LevelStats]) -> None:
             "Deaths": stats.deaths,
             "Flags": stats.flags,
             "Avg Reward": f"{stats.avg_reward:.1f}",
-            "Min R": f"{min(rewards):.1f}" if rewards else "0.0",
-            "Max R": f"{max(rewards):.1f}" if rewards else "0.0",
+            "Min R": f"{stats.min_reward:.1f}",
+            "Max R": f"{stats.max_reward:.1f}",
             "Avg Speed": f"{stats.avg_speed:.2f}",
         })
     
@@ -93,7 +89,7 @@ def _render_performance_charts(level_stats: dict[str, LevelStats]) -> None:
     """Render level performance comparison charts."""
     levels_with_data = [
         (l, s) for l, s in sorted(level_stats.items(), key=lambda x: level_sort_key(x[0]))
-        if len(s.rewards) > 0
+        if s.episodes > 0
     ]
     
     if not levels_with_data:
@@ -117,70 +113,107 @@ def _render_performance_charts(level_stats: dict[str, LevelStats]) -> None:
         st.plotly_chart(fig, use_container_width=True)
     
     with chart_col2:
-        # Reward distribution box plot
-        data = {l: s.rewards for l, s in levels_with_data if s.rewards}
-        fig = make_box_plot(
-            data_by_category=data,
-            title="Reward Distribution per Level",
-            y_title="Reward",
-            height=350,
-        )
-        st.plotly_chart(fig, use_container_width=True)
+        # Reward range per level (avg with min/max indicators)
+        _render_reward_range_chart(levels_with_data)
     
-    # Second row: Best X progression and Speed distribution
+    # Second row: Best X and Speed
     col1, col2 = st.columns(2)
     
     with col1:
-        _render_best_x_progression(levels_with_data)
+        # Best X per level bar chart
+        level_names = [l for l, _ in levels_with_data]
+        best_x_values = [s.best_x for _, s in levels_with_data]
+        
+        fig = make_bar_chart(
+            x=level_names,
+            y=best_x_values,
+            title="Best X Position per Level",
+            y_title="X Position",
+            height=300,
+            color=COLORS["green"],
+        )
+        st.plotly_chart(fig, use_container_width=True)
     
     with col2:
-        # Speed distribution
-        data = {l: s.speeds for l, s in levels_with_data if s.speeds}
-        if data:
-            fig = make_box_plot(
-                data_by_category=data,
-                title="Speed Distribution by Level",
-                y_title="Speed (x/time)",
-                height=300,
-                color=COLORS["sky"],
-                line_color=COLORS["blue"],
-            )
-            st.plotly_chart(fig, use_container_width=True)
+        # Speed range per level
+        _render_speed_range_chart(levels_with_data)
 
 
-def _render_best_x_progression(levels_with_data: list[tuple[str, LevelStats]]) -> None:
-    """Render best X position progression chart."""
-    fig = go.Figure()
-    colors = list(COLORS.values())
+def _render_reward_range_chart(levels_with_data: list[tuple[str, LevelStats]]) -> None:
+    """Render reward range chart (avg with min/max error bars)."""
+    level_names = [l for l, _ in levels_with_data]
+    avg_rewards = [s.avg_reward for _, s in levels_with_data]
+    min_rewards = [s.min_reward for _, s in levels_with_data]
+    max_rewards = [s.max_reward for _, s in levels_with_data]
     
-    for i, (level, stats) in enumerate(levels_with_data):
-        x_positions = stats.x_positions
-        if x_positions:
-            # Show cumulative max
-            cummax = []
-            current_max = 0
-            for x in x_positions:
-                current_max = max(current_max, x)
-                cummax.append(current_max)
-            
-            fig.add_trace(go.Scatter(
-                x=list(range(len(cummax))),
-                y=cummax,
-                name=level,
-                mode="lines",
-                line=dict(color=colors[i % len(colors)], width=2),
-            ))
+    # Calculate error bar values (distance from avg)
+    error_minus = [avg - min_r for avg, min_r in zip(avg_rewards, min_rewards)]
+    error_plus = [max_r - avg for avg, max_r in zip(avg_rewards, max_rewards)]
+    
+    fig = go.Figure()
+    fig.add_trace(go.Bar(
+        x=level_names,
+        y=avg_rewards,
+        error_y=dict(
+            type="data",
+            symmetric=False,
+            array=error_plus,
+            arrayminus=error_minus,
+            color=COLORS["red"],
+        ),
+        marker_color=COLORS["peach"],
+        name="Avg Reward",
+    ))
     
     fig.update_layout(
-        title="Best X Progression by Level",
-        xaxis_title="Episode",
-        yaxis_title="Best X Position",
+        title="Reward Range per Level",
+        yaxis_title="Reward",
+        height=350,
+        **DARK_LAYOUT,
+        xaxis=dict(**GRID_STYLE),
+        yaxis=dict(**GRID_STYLE),
+        margin=dict(l=0, r=0, t=50, b=0),
+        showlegend=False,
+    )
+    
+    st.plotly_chart(fig, use_container_width=True)
+
+
+def _render_speed_range_chart(levels_with_data: list[tuple[str, LevelStats]]) -> None:
+    """Render speed range chart (avg with min/max error bars)."""
+    level_names = [l for l, _ in levels_with_data]
+    avg_speeds = [s.avg_speed for _, s in levels_with_data]
+    min_speeds = [s.min_speed for _, s in levels_with_data]
+    max_speeds = [s.max_speed for _, s in levels_with_data]
+    
+    # Calculate error bar values (distance from avg)
+    error_minus = [avg - min_s for avg, min_s in zip(avg_speeds, min_speeds)]
+    error_plus = [max_s - avg for avg, max_s in zip(avg_speeds, max_speeds)]
+    
+    fig = go.Figure()
+    fig.add_trace(go.Bar(
+        x=level_names,
+        y=avg_speeds,
+        error_y=dict(
+            type="data",
+            symmetric=False,
+            array=error_plus,
+            arrayminus=error_minus,
+            color=COLORS["blue"],
+        ),
+        marker_color=COLORS["sky"],
+        name="Avg Speed",
+    ))
+    
+    fig.update_layout(
+        title="Speed Range per Level",
+        yaxis_title="Speed (x/time)",
         height=300,
         **DARK_LAYOUT,
         xaxis=dict(**GRID_STYLE),
         yaxis=dict(**GRID_STYLE),
         margin=dict(l=0, r=0, t=50, b=0),
-        legend=dict(orientation="h", yanchor="bottom", y=1.02),
+        showlegend=False,
     )
     
     st.plotly_chart(fig, use_container_width=True)
@@ -294,13 +327,14 @@ def _render_level_death_chart(level: str, death_hotspots: dict[str, dict[int, in
 
 
 def _render_level_rate_chart(level: str, rate_data: dict[str, list]) -> None:
-    """Render death/completion rate chart for a single level."""
+    """Render death/timeout/completion rate chart for a single level."""
     if level in rate_data and len(rate_data[level]) >= 2:
         level_data = sorted(rate_data[level], key=lambda x: x.steps)
         sampled = sample_data(level_data, max_points=30)
         
         x_labels = [f"{int(d.steps // 1000)}k" for d in sampled]
         deaths_per_ep = [d.deaths_per_episode for d in sampled]
+        timeouts_per_ep = [d.timeouts_per_episode for d in sampled]
         completion_rates = [d.completion_rate for d in sampled]
         
         fig = make_dual_axis_chart(
@@ -309,15 +343,21 @@ def _render_level_rate_chart(level: str, rate_data: dict[str, list]) -> None:
             y2=completion_rates,
             name1="💀 Deaths/Ep",
             name2="🏁 Complete",
-            title="📈 Death & Completion Rate",
-            y1_title="Deaths/Ep",
+            title="📈 Death, Timeout & Completion Rate",
+            y1_title="Per Episode",
             y2_title="Complete %",
             height=250,
+            y1_extra=timeouts_per_ep,
+            name1_extra="⏰ Timeouts/Ep",
         )
         st.plotly_chart(fig, use_container_width=True, key=f"rates_{level}")
         
         # Current rates
-        st.caption(f"💀 Deaths/Ep: {deaths_per_ep[-1]:.2f} | 🏁 Complete: {completion_rates[-1]:.1f}%")
+        st.caption(
+            f"💀 Deaths/Ep: {deaths_per_ep[-1]:.2f} | "
+            f"⏰ Timeouts/Ep: {timeouts_per_ep[-1]:.2f} | "
+            f"🏁 Complete: {completion_rates[-1]:.1f}%"
+        )
     else:
         st.info("⏳ Not enough rate data")
 

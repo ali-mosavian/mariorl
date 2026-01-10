@@ -167,7 +167,9 @@ class TrainingConfig:
     gradient_queue_size_multiplier: int = 8
 
     # Exploration spread (for diverse exploration across workers)
-    epsilon_base: float = 0.4
+    # Epsilon base for per-worker spread: ε = base^(1 + i/N)
+    # 0.15 gives floor of ~2-9% across workers (vs 16-32% with 0.4)
+    epsilon_base: float = 0.15
 
     def create_worker_configs(self) -> list["WorkerConfig"]:
         """Create worker configs with spread epsilon values."""

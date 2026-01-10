@@ -71,7 +71,7 @@ class Config:
     batch_size: int = 32
     n_step: int = 3
     alpha: float = 0.6
-    eps_base: float = 0.4  # Base for per-worker epsilon
+    eps_base: float = 0.15  # Base for per-worker epsilon (floor ~2-9%)
     epsilon_decay_steps: int = 1_000_000
     q_scale: float = 100.0
     latent_dim: int = 128

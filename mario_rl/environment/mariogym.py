@@ -42,6 +42,8 @@ class Reward:
     score_reward: int = 0
     powerup_reward: int = 0
     finish_reward: int = 0
+    exploration_bonus: int = 0  # Bonus for reaching new max X
+    speed_bonus: int = 0  # Bonus for high forward velocity
 
     @staticmethod
     def calc(c: State, last: State) -> "Reward":
@@ -57,6 +59,21 @@ class Reward:
             # This avoids huge negative rewards after death when x resets
             x_delta = c.x_pos - last.x_pos
         
+        # Exploration bonus: reward for reaching new territory
+        # Triggers when current position exceeds previous max
+        exploration = 0
+        if c.x_pos > last.x_pos_max and c.is_alive:
+            # Bonus proportional to how far past the previous max
+            exploration = min(50, c.x_pos - last.x_pos_max)
+        
+        # Speed bonus: reward for high forward velocity
+        # Only applies when moving forward (x_delta > 0)
+        speed = 0
+        if x_delta > 0:
+            # Bonus scales with speed, capped to prevent exploitation
+            # Normal walking ~1-2 pixels/frame, running ~3-4 pixels/frame
+            speed = min(10, x_delta)  # Cap at 10 for very fast movement
+        
         return Reward(
             x_reward=min(100, max(-15, x_delta)),
             time_penalty=min(0, c.time - last.time),
@@ -65,6 +82,8 @@ class Reward:
             score_reward=min(3, max(0, c.score - last.score)),
             powerup_reward=(c.powerup_state - last.powerup_state) * 100,
             finish_reward=c.got_flag * 1000,
+            exploration_bonus=exploration,
+            speed_bonus=speed,
         )
 
     def total_reward(self) -> float:
@@ -73,9 +92,11 @@ class Reward:
         
         Design principles:
         - Forward progress is the PRIMARY signal (+0.1 to +1 per frame)
+        - Exploration bonus rewards reaching new territory (+0.5 max)
+        - Speed bonus rewards fast forward movement (+0.1 max)
         - Flag completion is a SIGNIFICANT bonus (+15) to incentivize finishing
         - Death is a moderate penalty (-2) - enough to discourage but not overwhelming
-        - Per-frame range: ~-0.15 to ~+1.0 (normal movement)
+        - Per-frame range: ~-0.15 to ~+1.6 (with bonuses)
         - Terminal events: death=-2, flag=+15
         
         With restarts/resume, the agent needs to relearn early, so keeping
@@ -84,6 +105,14 @@ class Reward:
         # Forward progress: main learning signal
         # x_reward ranges -15 to +100, scale to -0.15 to +1.0
         progress = self.x_reward / 100.0
+        
+        # Exploration bonus: reaching new territory
+        # exploration_bonus ranges 0 to 50, scale to 0 to +0.5
+        exploration = self.exploration_bonus / 100.0
+        
+        # Speed bonus: moving fast forward
+        # speed_bonus ranges 0 to 10, scale to 0 to +0.1
+        speed = self.speed_bonus / 100.0
         
         # Death penalty: moderate, not overwhelming
         # -2 is meaningful but allows recovery during exploration
@@ -97,7 +126,7 @@ class Reward:
         # Powerup: small bonus/penalty
         powerup = self.powerup_reward / 200.0  # -0.5 to +1
         
-        return progress + death + flag + powerup
+        return progress + exploration + speed + death + flag + powerup
 
 
 # -

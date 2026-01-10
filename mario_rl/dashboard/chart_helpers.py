@@ -157,8 +157,11 @@ def make_dual_axis_chart(
     color1: str = COLORS["red"],
     color2: str = COLORS["green"],
     height: int = 250,
+    y1_extra: list[float] | None = None,
+    name1_extra: str = "",
+    color1_extra: str = COLORS["peach"],
 ) -> go.Figure:
-    """Create a dual Y-axis line chart."""
+    """Create a dual Y-axis line chart with optional extra series on y1."""
     fig = make_subplots(specs=[[{"secondary_y": True}]])
     
     fig.add_trace(go.Scatter(
@@ -167,14 +170,23 @@ def make_dual_axis_chart(
         hovertemplate=f"{name1}: %{{y:.2f}}<extra></extra>",
     ), secondary_y=False)
     
+    # Optional extra series on y1 axis (e.g., timeouts alongside deaths)
+    if y1_extra is not None:
+        fig.add_trace(go.Scatter(
+            x=x, y=y1_extra, name=name1_extra,
+            line=dict(color=color1_extra, width=2, dash="dot"),
+            hovertemplate=f"{name1_extra}: %{{y:.2f}}<extra></extra>",
+        ), secondary_y=False)
+    
     fig.add_trace(go.Scatter(
         x=x, y=y2, name=name2,
         line=dict(color=color2, width=2),
         hovertemplate=f"{name2}: %{{y:.1f}}%<extra></extra>",
     ), secondary_y=True)
     
-    # Calculate ranges
-    y1_max = max(y1) * 1.1 if y1 and max(y1) > 0 else 1
+    # Calculate ranges - include y1_extra in range calculation
+    all_y1 = y1 + (y1_extra or [])
+    y1_max = max(all_y1) * 1.1 if all_y1 and max(all_y1) > 0 else 1
     y2_max = max(y2) * 1.1 if y2 and max(y2) > 0 else 100
     
     fig.update_layout(
