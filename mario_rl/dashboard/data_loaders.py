@@ -33,6 +33,10 @@ def load_coordinator_metrics(checkpoint_dir: str) -> pd.DataFrame | None:
         return None
     try:
         df = pd.read_csv(csv_path)
+        # Compute elapsed_min from timestamp if not present
+        if "elapsed_min" not in df.columns and "timestamp" in df.columns:
+            start_time = df["timestamp"].iloc[0]
+            df["elapsed_min"] = (df["timestamp"] - start_time) / 60.0
         return df
     except Exception:
         return None
