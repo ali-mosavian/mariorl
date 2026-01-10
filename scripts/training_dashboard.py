@@ -897,11 +897,22 @@ def render_levels_tab(workers: dict[int, pd.DataFrame], death_hotspots: dict[str
     
     st.divider()
     
-    # Action distribution per level
+    # Action distribution per level (using RECENT data only to show learned behavior)
     st.subheader("🎮 Action Distribution by Level")
     
     # Collect action distributions grouped by level
     action_names = ["NOOP", "→", "→A", "→B", "→AB", "A", "←", "←A", "←B", "←AB", "↓", "↑"]
+    
+    # First pass: find max steps across all workers to determine "recent" cutoff
+    max_steps = 0
+    for wid, df in workers.items():
+        if len(df) > 0 and "steps" in df.columns:
+            max_steps = max(max_steps, df["steps"].max())
+    
+    # Only use data from last 100k steps (shows learned behavior, not early random exploration)
+    recent_window = 100_000
+    min_steps_for_recent = max(0, max_steps - recent_window)
+    
     level_action_data: dict[str, list[list[float]]] = {}
     
     for wid, df in workers.items():
@@ -909,6 +920,11 @@ def render_levels_tab(workers: dict[int, pd.DataFrame], death_hotspots: dict[str
             continue
         
         for _, row in df.iterrows():
+            # Filter to recent data only
+            steps = row.get("steps", 0)
+            if steps < min_steps_for_recent:
+                continue
+            
             # Get level from row
             level = row.get("current_level", "?")
             if level == "?" and "world" in row and "stage" in row:
@@ -933,11 +949,11 @@ def render_levels_tab(workers: dict[int, pd.DataFrame], death_hotspots: dict[str
                     pass
     
     if level_action_data:
-        # Compute average action distribution per level
+        # Compute average action distribution per level (from recent data only)
         level_avg_actions: dict[str, list[float]] = {}
         for level, action_lists in level_action_data.items():
             if action_lists:
-                # Average across all samples for this level
+                # Average across recent samples for this level
                 avg = [sum(a[i] for a in action_lists) / len(action_lists) for i in range(12)]
                 level_avg_actions[level] = avg
         
@@ -955,7 +971,7 @@ def render_levels_tab(workers: dict[int, pd.DataFrame], death_hotspots: dict[str
             ))
             
             fig.update_layout(
-                title="Average Action Distribution by Level (%)",
+                title=f"Action Distribution by Level (last {recent_window//1000}k steps)",
                 height=350,
                 template="plotly_dark",
                 paper_bgcolor="rgba(0,0,0,0)",
