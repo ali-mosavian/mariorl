@@ -897,34 +897,20 @@ def render_levels_tab(workers: dict[int, pd.DataFrame], death_hotspots: dict[str
     
     st.divider()
     
-    # Action distribution per level (using RECENT data only to show learned behavior)
+    # Action distribution over time per level (like Workers tab but filtered by level)
     st.subheader("🎮 Action Distribution by Level")
     
-    # Collect action distributions grouped by level
     action_names = ["NOOP", "→", "→A", "→B", "→AB", "A", "←", "←A", "←B", "←AB", "↓", "↑"]
     
-    # First pass: find max steps across all workers to determine "recent" cutoff
-    max_steps = 0
-    for wid, df in workers.items():
-        if len(df) > 0 and "steps" in df.columns:
-            max_steps = max(max_steps, df["steps"].max())
-    
-    # Only use data from last 100k steps (shows learned behavior, not early random exploration)
-    recent_window = 100_000
-    min_steps_for_recent = max(0, max_steps - recent_window)
-    
-    level_action_data: dict[str, list[list[float]]] = {}
+    # Collect action_dist data with steps, grouped by level
+    # Format: {level: [(steps, [pcts...]), ...]}
+    level_action_data: dict[str, list[tuple[int, list[float]]]] = {}
     
     for wid, df in workers.items():
         if len(df) == 0 or "action_dist" not in df.columns:
             continue
         
         for _, row in df.iterrows():
-            # Filter to recent data only
-            steps = row.get("steps", 0)
-            if steps < min_steps_for_recent:
-                continue
-            
             # Get level from row
             level = row.get("current_level", "?")
             if level == "?" and "world" in row and "stage" in row:
@@ -938,60 +924,64 @@ def render_levels_tab(workers: dict[int, pd.DataFrame], death_hotspots: dict[str
             
             # Parse action distribution
             dist_str = row.get("action_dist", "")
+            steps = row.get("steps", 0)
             if dist_str and isinstance(dist_str, str):
                 try:
                     pcts = [float(p) for p in dist_str.split(",")]
                     if len(pcts) == 12:
                         if level not in level_action_data:
                             level_action_data[level] = []
-                        level_action_data[level].append(pcts)
+                        level_action_data[level].append((steps, pcts))
                 except (ValueError, TypeError):
                     pass
     
     if level_action_data:
-        # Compute average action distribution per level (from recent data only)
-        level_avg_actions: dict[str, list[float]] = {}
-        for level, action_lists in level_action_data.items():
-            if action_lists:
-                # Average across recent samples for this level
-                avg = [sum(a[i] for a in action_lists) / len(action_lists) for i in range(12)]
-                level_avg_actions[level] = avg
+        # Sort levels and let user select
+        sorted_levels = sorted(level_action_data.keys())
+        selected_level = st.selectbox("Select Level", sorted_levels, key="action_dist_level")
         
-        if level_avg_actions:
-            # Build heatmap: rows = actions, cols = levels
-            sorted_levels = sorted(level_avg_actions.keys())
-            z_data = [[level_avg_actions[level][action_idx] for level in sorted_levels] for action_idx in range(12)]
+        if selected_level and selected_level in level_action_data:
+            # Get data for selected level and sort by steps
+            level_data = sorted(level_action_data[selected_level], key=lambda x: x[0])
             
-            fig = go.Figure(data=go.Heatmap(
-                z=z_data,
-                x=sorted_levels,
-                y=action_names,
-                colorscale="Viridis",
-                hovertemplate="Level: %{x}<br>Action: %{y}<br>%{z:.1f}%<extra></extra>",
-            ))
-            
-            fig.update_layout(
-                title=f"Action Distribution by Level (last {recent_window//1000}k steps)",
-                height=350,
-                template="plotly_dark",
-                paper_bgcolor="rgba(0,0,0,0)",
-                plot_bgcolor="rgba(0,0,0,0)",
-                xaxis=dict(title="Level", gridcolor="#313244"),
-                yaxis=dict(gridcolor="#313244"),
-                margin=dict(l=0, r=0, t=50, b=0),
-            )
-            
-            st.plotly_chart(fig, use_container_width=True)
-            
-            # Show which actions dominate per level
-            st.caption("🏆 Dominant actions per level:")
-            dominant_actions = []
-            for level in sorted_levels:
-                avg = level_avg_actions[level]
-                top_idx = sorted(range(12), key=lambda i: avg[i], reverse=True)[:3]
-                top_actions = ", ".join(f"{action_names[i]} ({avg[i]:.0f}%)" for i in top_idx)
-                dominant_actions.append({"Level": level, "Top Actions": top_actions})
-            st.dataframe(pd.DataFrame(dominant_actions), hide_index=True, use_container_width=True)
+            if len(level_data) >= 2:
+                # Sample to ~50 time points for clean heatmap
+                sample_size = min(50, len(level_data))
+                sample_indices = [int(i * len(level_data) / sample_size) for i in range(sample_size)]
+                sampled_data = [level_data[i] for i in sample_indices]
+                
+                # Build heatmap matrix: rows = actions, cols = time
+                x_labels = [f"{int(d[0]//1000)}k" for d in sampled_data]
+                z_data = [[d[1][action_idx] for d in sampled_data] for action_idx in range(12)]
+                
+                fig = go.Figure(data=go.Heatmap(
+                    z=z_data,
+                    x=x_labels,
+                    y=action_names,
+                    colorscale="Viridis",
+                    hovertemplate="Action: %{y}<br>Steps: %{x}<br>%{z:.1f}%<extra></extra>",
+                ))
+                
+                fig.update_layout(
+                    title=f"Action Distribution Over Time - Level {selected_level}",
+                    height=350,
+                    template="plotly_dark",
+                    paper_bgcolor="rgba(0,0,0,0)",
+                    plot_bgcolor="rgba(0,0,0,0)",
+                    xaxis=dict(title="Steps", gridcolor="#313244"),
+                    yaxis=dict(gridcolor="#313244"),
+                    margin=dict(l=0, r=0, t=50, b=0),
+                )
+                
+                st.plotly_chart(fig, use_container_width=True)
+                
+                # Show current (most recent) action distribution for this level
+                latest = level_data[-1][1]
+                top_idx = sorted(range(12), key=lambda i: latest[i], reverse=True)[:3]
+                top_actions = ", ".join(f"{action_names[i]} ({latest[i]:.0f}%)" for i in top_idx)
+                st.caption(f"🏆 Current top actions for {selected_level}: {top_actions}")
+            else:
+                st.info(f"⏳ Not enough data points for level {selected_level} yet...")
     else:
         st.info("⏳ Action distribution data not yet available for levels...")
     
