@@ -1,9 +1,17 @@
 """
 Snapshot/Restore State Machine for Mario RL Training.
 
-This module implements a state machine to manage emulator snapshotting and
-restoring based on death hotspots. The goal is to improve learning efficiency
+This module implements a DFA-based state machine to manage emulator snapshotting
+and restoring based on death hotspots. The goal is to improve learning efficiency
 by allowing the agent to practice difficult sections identified by frequent deaths.
+
+DFA Design
+==========
+
+The state machine uses a table-driven approach:
+1. Events are computed from context (timeout, death, approaching hotspot, etc.)
+2. Transitions are defined as a table: (State, Event) → (State, Action)
+3. Side effects (counter updates) are handled separately on state entry/exit
 
 State Machine Diagram
 =====================
@@ -19,20 +27,20 @@ State Machine Diagram
                  │          ┌────────────────────┼────────────────────┐   │       │
                  │          │                    │                    │   │       │
                  ▼          ▼                    ▼                    ▼   ▼       │
-    ┌──────────────┐ ┌───────────────┐ ┌───────────────┐    ┌──────────────┐     │
-    │              │ │               │ │               │    │              │     │
-    │   TIMEOUT    │ │ APPROACHING_  │ │ CHECKPOINT_   │    │    DEAD      │     │
-    │  (timer out) │ │ HOTSPOT       │ │ DUE           │    │              │     │
-    │              │ │               │ │               │    └──────┬───────┘     │
-    └──────┬───────┘ └───────┬───────┘ └───────┬───────┘           │             │
-           │                 │                 │                   │             │
-           │                 │                 │         ┌─────────┴─────────┐   │
-           │                 ▼                 ▼         ▼                   ▼   │
-           │      ┌───────────────────┐ ┌─────────────────┐    ┌─────────────────┐
-           │      │                   │ │                 │    │                 │
-           │      │  SAVE_SNAPSHOT    │►│ SNAPSHOT_SAVED  │    │  EVALUATE_      │
-           │      │                   │ │                 │    │  RESTORE        │
-           │      └───────────────────┘ └────────┬────────┘    └────────┬────────┘
+    ┌──────────────┐ ┌───────────────┐ ┌───────────────┐    ┌──────────────┐      │
+    │              │ │               │ │               │    │              │      │
+    │   TIMEOUT    │ │ APPROACHING_  │ │ CHECKPOINT_   │    │    DEAD      │      │
+    │  (timer out) │ │ HOTSPOT       │ │ DUE           │    │              │      │
+    │              │ │               │ │               │    └──────┬───────┘      │
+    └──────┬───────┘ └───────┬───────┘ └───────┬───────┘           │              │
+           │                 │                 │                   │              │
+           │                 │                 │         ┌─────────┴─────────┐    │
+           │                 ▼                 ▼         ▼                   ▼    │
+           │      ┌───────────────────┐ ┌─────────────────┐    ┌───────────────────┐
+           │      │                   │ │                 │    │                   │
+           │      │  SAVE_SNAPSHOT    │►│ SNAPSHOT_SAVED  │    │ EVALUATE_RESTORE  │
+           │      │                   │ │                 │    │                   │
+           │      └───────────────────┘ └────────┬────────┘    └────────┬──────────┘
            │                                     │                      │
            │                                     │          ┌───────────┴───────────┐
            │                                     │          │                       │
@@ -52,69 +60,11 @@ State Machine Diagram
                                                      (back to RUNNING
                                                       or episode ends)
 
-State Descriptions
-==================
+Transition Table
+================
 
-RUNNING:
-    Normal gameplay state. Mario is alive and moving through the level.
-    Transitions to:
-    - TIMEOUT: When timer runs out (highest priority)
-    - DEAD: When death is detected (skill-based death)
-    - APPROACHING_HOTSPOT: When x_pos enters approach zone before a death hotspot
-    - CHECKPOINT_DUE: When time-based checkpoint interval is reached
-
-TIMEOUT:
-    Episode ended because the game timer ran out. This is NOT a skill failure -
-    it's a time management issue. No restore is attempted.
-    Transitions to:
-    - RUNNING: After END_EPISODE action (episode will reset externally)
-
-APPROACHING_HOTSPOT:
-    Mario is approaching a known death hotspot. We're looking for the optimal
-    position to save a snapshot.
-    Transitions to:
-    - TIMEOUT: When timer runs out
-    - SAVE_SNAPSHOT: When optimal snapshot position is reached
-    - DEAD: When death is detected before reaching save point
-    - RUNNING: When hotspot zone is passed without needing to save
-
-CHECKPOINT_DUE:
-    Time-based checkpoint is due. Used as fallback in unexplored areas.
-    Transitions to:
-    - TIMEOUT: When timer runs out
-    - SAVE_SNAPSHOT: Immediately, to save the checkpoint
-    - DEAD: If death occurs before save
-
-SAVE_SNAPSHOT:
-    Saving emulator state (NES state + frame stack).
-    Transitions to:
-    - SNAPSHOT_SAVED: After save completes
-
-SNAPSHOT_SAVED:
-    Transient state indicating save completed.
-    Transitions to:
-    - RUNNING: Immediately
-
-DEAD:
-    Mario just died (skill-based death). Need to decide whether to restore.
-    Transitions to:
-    - EVALUATE_RESTORE: Immediately
-
-EVALUATE_RESTORE:
-    Evaluating whether and where to restore from a snapshot.
-    Transitions to:
-    - RESTORING: If snapshot available and restore attempts not exhausted
-    - GIVE_UP: If no snapshot or too many failed restore attempts
-
-RESTORING:
-    Loading a snapshot and restoring emulator state.
-    Transitions to:
-    - RUNNING: After successful restore
-
-GIVE_UP:
-    No more restore attempts. Let the episode end naturally.
-    Transitions to:
-    - RUNNING: After episode reset (externally triggered)
+The complete transition table is defined in TRANSITIONS. Each entry maps
+(current_state, event) to (next_state, action).
 """
 
 from __future__ import annotations
@@ -134,7 +84,7 @@ class SnapshotState(Enum):
     SAVE_SNAPSHOT = auto()
     SNAPSHOT_SAVED = auto()
     DEAD = auto()
-    TIMEOUT = auto()  # Episode ended due to timer running out
+    TIMEOUT = auto()
     EVALUATE_RESTORE = auto()
     RESTORING = auto()
     GIVE_UP = auto()
@@ -147,6 +97,38 @@ class SnapshotAction(Enum):
     SAVE_SNAPSHOT = auto()
     RESTORE_SNAPSHOT = auto()
     END_EPISODE = auto()
+
+
+class Event(Enum):
+    """Events that trigger state transitions.
+
+    Events are computed from SnapshotContext and internal state.
+    Priority (highest first): TIMEOUT > DEATH > AT_SAVE_POSITION > etc.
+    """
+
+    # Episode-ending events (highest priority)
+    TIMEOUT = auto()  # Timer ran out
+    DEATH = auto()  # Skill-based death
+
+    # Hotspot-related events
+    APPROACHING_HOTSPOT = auto()  # Entering approach zone
+    AT_SAVE_POSITION = auto()  # At optimal save position
+    PASSED_HOTSPOT = auto()  # Passed hotspot without saving
+
+    # Checkpoint events
+    CHECKPOINT_DUE = auto()  # Time-based checkpoint interval reached
+
+    # Restore evaluation events
+    MAX_RESTORES_EXCEEDED = auto()  # Too many restore attempts
+    NO_SNAPSHOT = auto()  # No snapshot available
+    SNAPSHOT_AVAILABLE = auto()  # Snapshot available for restore
+
+    # Progress tracking
+    PROGRESS_MADE = auto()  # Made progress since last restore
+    NO_PROGRESS = auto()  # No progress since last restore
+
+    # Default/continuation
+    CONTINUE = auto()  # No event, stay in current state or auto-transition
 
 
 @dataclass(frozen=True)
@@ -178,12 +160,87 @@ class SnapshotContext:
     suggested_restore_x: int | None = None
 
 
+# Type alias for transition table
+_Transition = tuple[SnapshotState, SnapshotAction]
+
+# Transition table: (state, event) → (new_state, action)
+# Missing entries default to (current_state, NONE)
+TRANSITIONS: dict[tuple[SnapshotState, Event], _Transition] = {
+    # === RUNNING state ===
+    (SnapshotState.RUNNING, Event.TIMEOUT): (SnapshotState.TIMEOUT, SnapshotAction.NONE),
+    (SnapshotState.RUNNING, Event.DEATH): (SnapshotState.DEAD, SnapshotAction.NONE),
+    (SnapshotState.RUNNING, Event.APPROACHING_HOTSPOT): (
+        SnapshotState.APPROACHING_HOTSPOT,
+        SnapshotAction.NONE,
+    ),
+    (SnapshotState.RUNNING, Event.CHECKPOINT_DUE): (
+        SnapshotState.CHECKPOINT_DUE,
+        SnapshotAction.NONE,
+    ),
+    # === TIMEOUT state ===
+    (SnapshotState.TIMEOUT, Event.CONTINUE): (SnapshotState.RUNNING, SnapshotAction.END_EPISODE),
+    # === DEAD state ===
+    (SnapshotState.DEAD, Event.CONTINUE): (SnapshotState.EVALUATE_RESTORE, SnapshotAction.NONE),
+    # === APPROACHING_HOTSPOT state ===
+    (SnapshotState.APPROACHING_HOTSPOT, Event.TIMEOUT): (
+        SnapshotState.TIMEOUT,
+        SnapshotAction.NONE,
+    ),
+    (SnapshotState.APPROACHING_HOTSPOT, Event.DEATH): (SnapshotState.DEAD, SnapshotAction.NONE),
+    (SnapshotState.APPROACHING_HOTSPOT, Event.AT_SAVE_POSITION): (
+        SnapshotState.SAVE_SNAPSHOT,
+        SnapshotAction.SAVE_SNAPSHOT,
+    ),
+    (SnapshotState.APPROACHING_HOTSPOT, Event.PASSED_HOTSPOT): (
+        SnapshotState.RUNNING,
+        SnapshotAction.NONE,
+    ),
+    # === CHECKPOINT_DUE state ===
+    (SnapshotState.CHECKPOINT_DUE, Event.TIMEOUT): (SnapshotState.TIMEOUT, SnapshotAction.NONE),
+    (SnapshotState.CHECKPOINT_DUE, Event.DEATH): (SnapshotState.DEAD, SnapshotAction.NONE),
+    (SnapshotState.CHECKPOINT_DUE, Event.CONTINUE): (
+        SnapshotState.SAVE_SNAPSHOT,
+        SnapshotAction.SAVE_SNAPSHOT,
+    ),
+    # === SAVE_SNAPSHOT state ===
+    (SnapshotState.SAVE_SNAPSHOT, Event.CONTINUE): (
+        SnapshotState.SNAPSHOT_SAVED,
+        SnapshotAction.NONE,
+    ),
+    # === SNAPSHOT_SAVED state ===
+    (SnapshotState.SNAPSHOT_SAVED, Event.CONTINUE): (SnapshotState.RUNNING, SnapshotAction.NONE),
+    # === EVALUATE_RESTORE state ===
+    (SnapshotState.EVALUATE_RESTORE, Event.MAX_RESTORES_EXCEEDED): (
+        SnapshotState.GIVE_UP,
+        SnapshotAction.NONE,
+    ),
+    (SnapshotState.EVALUATE_RESTORE, Event.NO_SNAPSHOT): (
+        SnapshotState.GIVE_UP,
+        SnapshotAction.NONE,
+    ),
+    (SnapshotState.EVALUATE_RESTORE, Event.SNAPSHOT_AVAILABLE): (
+        SnapshotState.RESTORING,
+        SnapshotAction.RESTORE_SNAPSHOT,
+    ),
+    # === RESTORING state ===
+    (SnapshotState.RESTORING, Event.PROGRESS_MADE): (SnapshotState.RUNNING, SnapshotAction.NONE),
+    (SnapshotState.RESTORING, Event.NO_PROGRESS): (SnapshotState.RUNNING, SnapshotAction.NONE),
+    # === GIVE_UP state ===
+    (SnapshotState.GIVE_UP, Event.CONTINUE): (SnapshotState.RUNNING, SnapshotAction.END_EPISODE),
+}
+
+
 @dataclass
 class SnapshotStateMachine:
-    """State machine for managing emulator snapshots.
+    """DFA-based state machine for managing emulator snapshots.
 
     This state machine decides when to save snapshots and when/where to restore
     from them based on death hotspots and other heuristics.
+
+    The implementation uses a table-driven approach:
+    1. _compute_event() determines the current event from context
+    2. TRANSITIONS table defines state transitions
+    3. _on_exit()/_on_enter() handle side effects
 
     Attributes:
         hotspot_approach_distance: Pixels before hotspot to start tracking approach.
@@ -217,175 +274,166 @@ class SnapshotStateMachine:
             ctx: Current game context.
 
         Returns:
-            Tuple of (new_state, action) where action indicates what the caller should do.
+            Tuple of (state, action) where:
+            - For END_EPISODE actions: returns the terminal state that triggered the end
+            - Otherwise: returns the new state after transition
+        """
+        # Compute event from context
+        event = self._compute_event(ctx)
+
+        # Look up transition
+        key = (self.state, event)
+        if key not in TRANSITIONS:
+            # No transition defined - stay in current state
+            return (self.state, SnapshotAction.NONE)
+
+        new_state, action = TRANSITIONS[key]
+
+        # Execute side effects
+        self._on_exit(self.state, event, ctx)
+        old_state = self.state
+        self.state = new_state
+        self._on_enter(old_state, new_state, event, ctx)
+
+        # For END_EPISODE, return the terminal state that triggered it
+        # (TIMEOUT, GIVE_UP) so callers know why the episode ended
+        if action == SnapshotAction.END_EPISODE:
+            return (old_state, action)
+
+        return (new_state, action)
+
+    def _compute_event(self, ctx: SnapshotContext) -> Event:
+        """Compute the current event from context.
+
+        Events are checked in priority order (highest first).
         """
         match self.state:
             case SnapshotState.RUNNING:
-                return self._handle_running(ctx)
+                return self._compute_running_event(ctx)
 
             case SnapshotState.APPROACHING_HOTSPOT:
-                return self._handle_approaching_hotspot(ctx)
+                return self._compute_approaching_event(ctx)
 
             case SnapshotState.CHECKPOINT_DUE:
-                return self._handle_checkpoint_due(ctx)
-
-            case SnapshotState.SAVE_SNAPSHOT:
-                return self._handle_save_snapshot(ctx)
-
-            case SnapshotState.SNAPSHOT_SAVED:
-                self.state = SnapshotState.RUNNING
-                return (SnapshotState.RUNNING, SnapshotAction.NONE)
-
-            case SnapshotState.DEAD:
-                return self._handle_dead(ctx)
-
-            case SnapshotState.TIMEOUT:
-                return self._handle_timeout(ctx)
+                return self._compute_checkpoint_event(ctx)
 
             case SnapshotState.EVALUATE_RESTORE:
-                return self._handle_evaluate_restore(ctx)
+                return self._compute_restore_event(ctx)
 
             case SnapshotState.RESTORING:
-                return self._handle_restoring(ctx)
+                return self._compute_restoring_event(ctx)
 
-            case SnapshotState.GIVE_UP:
-                self.state = SnapshotState.RUNNING
-                self._restores_without_progress = 0
-                return (SnapshotState.GIVE_UP, SnapshotAction.END_EPISODE)
+            case _:
+                # States that auto-transition (DEAD, TIMEOUT, SAVE_SNAPSHOT, etc.)
+                return Event.CONTINUE
 
-        return (self.state, SnapshotAction.NONE)
-
-    def _handle_running(self, ctx: SnapshotContext) -> tuple[SnapshotState, SnapshotAction]:
-        """Handle RUNNING state transitions."""
-        # Check for timeout first (highest priority - clean episode end)
+    def _compute_running_event(self, ctx: SnapshotContext) -> Event:
+        """Compute event for RUNNING state."""
+        # Priority: timeout > death > approaching hotspot > checkpoint
         if ctx.is_timeout:
-            self.state = SnapshotState.TIMEOUT
-            return (SnapshotState.TIMEOUT, SnapshotAction.NONE)
-
-        # Check for death (second priority)
+            return Event.TIMEOUT
         if ctx.is_dead:
-            self.state = SnapshotState.DEAD
-            return (SnapshotState.DEAD, SnapshotAction.NONE)
+            return Event.DEATH
 
         # Check if approaching a hotspot
         for hotspot_x in ctx.hotspot_positions:
             approach_start = hotspot_x - self.hotspot_approach_distance
             if approach_start <= ctx.x_pos < hotspot_x:
-                self.state = SnapshotState.APPROACHING_HOTSPOT
                 self._current_hotspot_target = hotspot_x
-                return (SnapshotState.APPROACHING_HOTSPOT, SnapshotAction.NONE)
+                return Event.APPROACHING_HOTSPOT
 
         # Check for time-based checkpoint
         if ctx.game_time - self._last_checkpoint_time >= self.checkpoint_interval:
-            self.state = SnapshotState.CHECKPOINT_DUE
-            return (SnapshotState.CHECKPOINT_DUE, SnapshotAction.NONE)
+            return Event.CHECKPOINT_DUE
 
-        return (SnapshotState.RUNNING, SnapshotAction.NONE)
+        return Event.CONTINUE
 
-    def _handle_approaching_hotspot(
-        self, ctx: SnapshotContext
-    ) -> tuple[SnapshotState, SnapshotAction]:
-        """Handle APPROACHING_HOTSPOT state transitions."""
-        # Timeout takes priority
+    def _compute_approaching_event(self, ctx: SnapshotContext) -> Event:
+        """Compute event for APPROACHING_HOTSPOT state."""
+        # Priority: timeout > death > at save position > passed hotspot
         if ctx.is_timeout:
-            self.state = SnapshotState.TIMEOUT
-            self._current_hotspot_target = None
-            return (SnapshotState.TIMEOUT, SnapshotAction.NONE)
-
+            return Event.TIMEOUT
         if ctx.is_dead:
-            self.state = SnapshotState.DEAD
-            self._current_hotspot_target = None
-            return (SnapshotState.DEAD, SnapshotAction.NONE)
+            return Event.DEATH
 
-        # Check if we've reached optimal snapshot position
         if self._current_hotspot_target is not None:
             snapshot_x = self._current_hotspot_target - self.hotspot_save_offset
             if abs(ctx.x_pos - snapshot_x) <= self.hotspot_save_tolerance:
-                self.state = SnapshotState.SAVE_SNAPSHOT
-                return (SnapshotState.SAVE_SNAPSHOT, SnapshotAction.SAVE_SNAPSHOT)
-
-            # If we passed the hotspot, go back to running
+                return Event.AT_SAVE_POSITION
             if ctx.x_pos > self._current_hotspot_target:
-                self.state = SnapshotState.RUNNING
-                self._current_hotspot_target = None
-                return (SnapshotState.RUNNING, SnapshotAction.NONE)
+                return Event.PASSED_HOTSPOT
 
-        return (SnapshotState.APPROACHING_HOTSPOT, SnapshotAction.NONE)
+        return Event.CONTINUE
 
-    def _handle_checkpoint_due(
-        self, ctx: SnapshotContext
-    ) -> tuple[SnapshotState, SnapshotAction]:
-        """Handle CHECKPOINT_DUE state transitions."""
-        # Timeout takes priority
+    def _compute_checkpoint_event(self, ctx: SnapshotContext) -> Event:
+        """Compute event for CHECKPOINT_DUE state."""
         if ctx.is_timeout:
-            self.state = SnapshotState.TIMEOUT
-            return (SnapshotState.TIMEOUT, SnapshotAction.NONE)
-
+            return Event.TIMEOUT
         if ctx.is_dead:
-            self.state = SnapshotState.DEAD
-            return (SnapshotState.DEAD, SnapshotAction.NONE)
+            return Event.DEATH
+        return Event.CONTINUE
 
-        self._last_checkpoint_time = ctx.game_time
-        self.state = SnapshotState.SAVE_SNAPSHOT
-        return (SnapshotState.SAVE_SNAPSHOT, SnapshotAction.SAVE_SNAPSHOT)
-
-    def _handle_save_snapshot(
-        self, ctx: SnapshotContext
-    ) -> tuple[SnapshotState, SnapshotAction]:
-        """Handle SAVE_SNAPSHOT state transitions."""
-        # After save action is taken externally, mark as saved
-        self.state = SnapshotState.SNAPSHOT_SAVED
-        self._current_hotspot_target = None
-        return (SnapshotState.SNAPSHOT_SAVED, SnapshotAction.NONE)
-
-    def _handle_dead(self, ctx: SnapshotContext) -> tuple[SnapshotState, SnapshotAction]:
-        """Handle DEAD state transitions."""
-        self.state = SnapshotState.EVALUATE_RESTORE
-        return (SnapshotState.EVALUATE_RESTORE, SnapshotAction.NONE)
-
-    def _handle_timeout(self, ctx: SnapshotContext) -> tuple[SnapshotState, SnapshotAction]:
-        """Handle TIMEOUT state transitions.
-
-        Timeout means the timer ran out - this is a clean episode end.
-        No restore attempt is made since timeouts are time management issues,
-        not skill failures that can be fixed by practicing the same section.
-        """
-        # Reset restore counter since episode is ending
-        self._restores_without_progress = 0
-        self.state = SnapshotState.RUNNING
-        return (SnapshotState.TIMEOUT, SnapshotAction.END_EPISODE)
-
-    def _handle_evaluate_restore(
-        self, ctx: SnapshotContext
-    ) -> tuple[SnapshotState, SnapshotAction]:
-        """Handle EVALUATE_RESTORE state transitions."""
-        # Check if we should give up
+    def _compute_restore_event(self, ctx: SnapshotContext) -> Event:
+        """Compute event for EVALUATE_RESTORE state."""
         if self._restores_without_progress >= self.max_restores_without_progress:
-            self.state = SnapshotState.GIVE_UP
-            return (SnapshotState.GIVE_UP, SnapshotAction.NONE)
-
-        # Check if we have a snapshot to restore
+            return Event.MAX_RESTORES_EXCEEDED
         if not ctx.snapshot_available:
-            self.state = SnapshotState.GIVE_UP
-            return (SnapshotState.GIVE_UP, SnapshotAction.NONE)
+            return Event.NO_SNAPSHOT
+        return Event.SNAPSHOT_AVAILABLE
 
-        # Attempt restore
-        self.state = SnapshotState.RESTORING
-        return (SnapshotState.RESTORING, SnapshotAction.RESTORE_SNAPSHOT)
-
-    def _handle_restoring(
-        self, ctx: SnapshotContext
-    ) -> tuple[SnapshotState, SnapshotAction]:
-        """Handle RESTORING state transitions."""
-        # Check if we made progress since last restore
+    def _compute_restoring_event(self, ctx: SnapshotContext) -> Event:
+        """Compute event for RESTORING state."""
         if ctx.x_pos > self._last_restore_x + self.progress_threshold:
-            self._restores_without_progress = 0
-        else:
-            self._restores_without_progress += 1
+            return Event.PROGRESS_MADE
+        return Event.NO_PROGRESS
 
-        self._last_restore_x = ctx.x_pos
-        self.state = SnapshotState.RUNNING
-        return (SnapshotState.RUNNING, SnapshotAction.NONE)
+    def _on_exit(
+        self, state: SnapshotState, event: Event, ctx: SnapshotContext
+    ) -> None:
+        """Handle side effects when exiting a state."""
+        match state:
+            case SnapshotState.APPROACHING_HOTSPOT:
+                # Clear hotspot target when leaving
+                if event in (Event.TIMEOUT, Event.DEATH, Event.PASSED_HOTSPOT):
+                    self._current_hotspot_target = None
+
+            case SnapshotState.SAVE_SNAPSHOT:
+                # Clear hotspot target after saving
+                self._current_hotspot_target = None
+
+            case SnapshotState.CHECKPOINT_DUE:
+                # Update last checkpoint time
+                if event == Event.CONTINUE:
+                    self._last_checkpoint_time = ctx.game_time
+
+            case SnapshotState.TIMEOUT:
+                # Reset restore counter on timeout
+                self._restores_without_progress = 0
+
+            case SnapshotState.GIVE_UP:
+                # Reset restore counter on give up
+                self._restores_without_progress = 0
+
+            case SnapshotState.RESTORING:
+                # Track progress
+                if event == Event.PROGRESS_MADE:
+                    self._restores_without_progress = 0
+                else:
+                    self._restores_without_progress += 1
+                self._last_restore_x = ctx.x_pos
+
+    def _on_enter(
+        self,
+        old_state: SnapshotState,
+        new_state: SnapshotState,
+        event: Event,
+        ctx: SnapshotContext,
+    ) -> None:
+        """Handle side effects when entering a state.
+
+        Currently unused but available for future extensions.
+        """
+        pass
 
     def reset(self) -> None:
         """Reset state machine for a new episode."""
