@@ -965,9 +965,38 @@ def render_levels_tab(workers: dict[int, pd.DataFrame], death_hotspots: dict[str
         if csv_hotspots:
             death_hotspots = csv_hotspots
     
-    # ===== Get All Levels (union of both data sources) =====
+    # ===== Collect Death Rate & Completion Rate Over Time =====
+    # Format: {level: [(steps, cumulative_deaths, cumulative_flags, cumulative_episodes), ...]}
+    level_rate_data: dict[str, list[tuple[int, int, int, int]]] = {}
+    
+    for wid, df in workers.items():
+        if len(df) == 0:
+            continue
+        
+        for _, row in df.iterrows():
+            level = row.get("current_level", "?")
+            if level == "?" and "world" in row and "stage" in row:
+                try:
+                    level = f"{int(row['world'])}-{int(row['stage'])}"
+                except (ValueError, TypeError):
+                    continue
+            
+            if level == "?" or pd.isna(level):
+                continue
+            
+            steps = int(row.get("steps", 0))
+            deaths = int(row.get("deaths", 0))
+            flags = int(row.get("flags", 0))
+            episodes = int(row.get("episodes", 0))
+            
+            if level not in level_rate_data:
+                level_rate_data[level] = []
+            level_rate_data[level].append((steps, deaths, flags, episodes))
+    
+    # ===== Get All Levels (union of all data sources) =====
     all_levels: set[str] = set()
     all_levels.update(level_action_data.keys())
+    all_levels.update(level_rate_data.keys())
     if death_hotspots:
         all_levels.update(death_hotspots.keys())
     
@@ -999,7 +1028,7 @@ def render_levels_tab(workers: dict[int, pd.DataFrame], death_hotspots: dict[str
     # ===== Render Each Level as a Row =====
     for level in sorted_levels:
         st.markdown(f"### Level {level}")
-        col_actions, col_deaths = st.columns(2)
+        col_actions, col_deaths, col_rates = st.columns(3)
         
         # ----- Left Column: Action Distribution Over Time -----
         with col_actions:
@@ -1044,7 +1073,7 @@ def render_levels_tab(workers: dict[int, pd.DataFrame], death_hotspots: dict[str
             else:
                 st.info("⏳ Not enough action data")
         
-        # ----- Right Column: Death Heatmap (horizontal bar) -----
+        # ----- Middle Column: Death Heatmap (horizontal bar) -----
         with col_deaths:
             if death_hotspots and level in death_hotspots and death_hotspots[level]:
                 buckets = death_hotspots[level]
@@ -1079,7 +1108,80 @@ def render_levels_tab(workers: dict[int, pd.DataFrame], death_hotspots: dict[str
                 hottest_pos = max(buckets.items(), key=lambda x: x[1])
                 st.caption(f"💀 Total: {total_level_deaths} | Hotspot: x={hottest_pos[0]}")
             else:
-                st.info("⏳ No death data")
+                st.info("⏳ No death position data")
+        
+        # ----- Right Column: Death Rate & Completion Rate Over Time -----
+        with col_rates:
+            if level in level_rate_data and len(level_rate_data[level]) >= 2:
+                # Sort by steps and aggregate cumulative data
+                rate_data = sorted(level_rate_data[level], key=lambda x: x[0])
+                
+                # Sample to ~30 points for smooth chart
+                sample_size = min(30, len(rate_data))
+                sample_indices = [int(i * len(rate_data) / sample_size) for i in range(sample_size)]
+                sampled = [rate_data[i] for i in sample_indices]
+                
+                steps_list = [d[0] for d in sampled]
+                
+                # Calculate cumulative sums and rates
+                cum_deaths = 0
+                cum_flags = 0
+                cum_episodes = 0
+                death_rates = []
+                completion_rates = []
+                
+                for d in sampled:
+                    cum_deaths += d[1]
+                    cum_flags += d[2]
+                    cum_episodes += d[3]
+                    
+                    # Death rate = deaths / episodes (as percentage)
+                    death_rate = (cum_deaths / cum_episodes * 100) if cum_episodes > 0 else 0
+                    # Completion rate = flags / episodes (as percentage)
+                    completion_rate = (cum_flags / cum_episodes * 100) if cum_episodes > 0 else 0
+                    
+                    death_rates.append(death_rate)
+                    completion_rates.append(completion_rate)
+                
+                x_labels = [f"{int(s//1000)}k" for s in steps_list]
+                
+                fig = go.Figure()
+                
+                fig.add_trace(go.Scatter(
+                    x=x_labels,
+                    y=death_rates,
+                    name="Death Rate",
+                    line=dict(color="crimson", width=2),
+                    hovertemplate="Steps: %{x}<br>Death Rate: %{y:.1f}%<extra></extra>",
+                ))
+                
+                fig.add_trace(go.Scatter(
+                    x=x_labels,
+                    y=completion_rates,
+                    name="Completion",
+                    line=dict(color="lime", width=2),
+                    hovertemplate="Steps: %{x}<br>Completion: %{y:.1f}%<extra></extra>",
+                ))
+                
+                fig.update_layout(
+                    title=f"📈 Death & Completion Rate",
+                    height=250,
+                    template="plotly_dark",
+                    paper_bgcolor="rgba(0,0,0,0)",
+                    plot_bgcolor="rgba(0,0,0,0)",
+                    xaxis=dict(title="Steps", gridcolor="#313244"),
+                    yaxis=dict(title="%", gridcolor="#313244", range=[0, max(100, max(death_rates + completion_rates) * 1.1)]),
+                    margin=dict(l=0, r=0, t=30, b=0),
+                    legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+                    showlegend=True,
+                )
+                
+                st.plotly_chart(fig, use_container_width=True, key=f"rates_{level}")
+                
+                # Current rates
+                st.caption(f"💀 Death: {death_rates[-1]:.1f}% | 🏁 Complete: {completion_rates[-1]:.1f}%")
+            else:
+                st.info("⏳ Not enough rate data")
         
         st.divider()
     
