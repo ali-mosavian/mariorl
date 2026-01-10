@@ -919,6 +919,180 @@ class MyLearner(Learner):
 - **Worker x-positions** steadily increase
 - **Episode rewards** improve over time
 
+## 🔬 Research: Preserving Learned Behaviors
+
+### The Problem: "Forgetting Success"
+
+A critical challenge observed during training is that **the agent forgets how to succeed** over time. This manifests as:
+
+1. **Peak-then-decline performance**: Completion rate peaks early (e.g., at ~5M steps) then degrades
+2. **Experience buffer dominated by failures**: 90%+ of experiences are early deaths (x < 1000)
+3. **Q-value collapse**: Network becomes confident about wrong actions (high TD error, low entropy)
+4. **Policy regression**: Agent loses ability to reach previously-achieved positions
+
+**Root Cause**: With Prioritized Experience Replay (PER), rare successful experiences get washed out over time. The agent literally forgets the path to success because it stops practicing that path.
+
+```
+Training Timeline:
+──────────────────────────────────────────────────────────────────────►
+     Early                Peak                    Decline
+  (exploring)        (finds path)          (forgets path)
+       │                  │                      │
+       ▼                  ▼                      ▼
+   Many deaths      Best x = 3154        Best x stagnates
+   Low completion   High completion      Completion drops
+   High entropy     Good Q-values        Q-values collapse
+```
+
+### Proposed Strategies
+
+#### 1. Success Buffer (Elite Experience Replay)
+
+**Concept**: Maintain a separate, protected buffer of the best episodes that never gets overwritten.
+
+**Implementation**:
+- Store top N episodes by max X position, flag captures, or total reward
+- Sample 10-20% of each training batch from this elite buffer
+- Use a ring buffer with quality-based eviction (only replace if new episode is better)
+
+**Trade-offs**:
+- ✅ Simple to implement
+- ✅ Directly preserves successful trajectories
+- ⚠️ Risk of overfitting to a small set of solutions
+- ⚠️ May not generalize if environment is stochastic
+
+#### 2. Asymmetric Replay Priority
+
+**Concept**: Modify PER to heavily boost priority for rare successful outcomes.
+
+**Implementation**:
+- Flag captures: 100x priority multiplier
+- New X position records: 10x priority multiplier  
+- Deaths in explored territory: normal priority
+- Early deaths in already-mastered areas: 0.1x priority (demote)
+
+**Trade-offs**:
+- ✅ Works within existing PER framework
+- ✅ Dynamically adjusts based on agent's current mastery
+- ⚠️ Requires careful tuning of multipliers
+- ⚠️ May slow learning of new areas
+
+#### 3. Checkpoint-Based Curriculum
+
+**Concept**: Bias episode starts toward positions where the agent previously succeeded.
+
+**Implementation**:
+- Track positions where agent has historically survived
+- 30% of episodes: start from random "mastered" checkpoint
+- 70% of episodes: normal start
+- Gradually reduce curriculum as agent improves
+
+**Trade-offs**:
+- ✅ Keeps practicing "late game" skills
+- ✅ Uses existing snapshot infrastructure
+- ⚠️ May not develop robust early-game skills
+- ⚠️ Changes effective episode distribution
+
+#### 4. Population Diversity
+
+**Concept**: Maintain multiple policies with different exploration rates.
+
+**Implementation**:
+- Dedicate some workers as "explorers" (high ε, try new strategies)
+- Dedicate some as "exploiters" (low ε, refine best known policy)
+- Share experience buffers but keep separate networks
+- Periodically clone best performer
+
+**Trade-offs**:
+- ✅ Prevents entire population from collapsing to local optimum
+- ✅ Natural curriculum from diverse behaviors
+- ⚠️ Higher compute cost
+- ⚠️ Complex coordination
+
+#### 5. Behavioral Cloning Bootstrap
+
+**Concept**: Pre-train on human demonstrations before RL fine-tuning.
+
+**Implementation**:
+- Record 10-20 human runs completing level 1-1
+- Pre-train network to imitate demonstrations (supervised learning)
+- Continue with RL from this starting point
+- Optionally mix demo data into replay buffer
+
+**Trade-offs**:
+- ✅ Gives agent a "floor" of competence
+- ✅ Faster initial learning
+- ⚠️ Requires human effort to create demos
+- ⚠️ May limit exploration of novel strategies
+
+#### 6. Hindsight Experience Relabeling (HER)
+
+**Concept**: Relabel failed episodes as successes for intermediate goals.
+
+**Implementation**:
+- When episode fails at x=2000, create additional training signal: "reached x=2000"
+- Train auxiliary value head for "progress" reward
+- Use multi-goal formulation with goal-conditioned policy
+
+**Trade-offs**:
+- ✅ Creates positive signal from failures
+- ✅ Teaches incremental progress
+- ⚠️ Requires architecture changes
+- ⚠️ Complex goal-conditioning
+
+### Strategy Evaluation
+
+| Strategy | Status | Outcome | Notes |
+|----------|--------|---------|-------|
+| Success Buffer | ✅ Completed | — | `EliteBuffer` class, 15% batch sampling ratio |
+| Asymmetric Priority | ✅ Completed | — | 50x priority boost for flag captures |
+| Checkpoint Curriculum | 🔲 Not Started | — | May conflict with current snapshot system |
+| Population Diversity | 🔲 Not Started | — | Higher implementation complexity |
+| Behavioral Cloning | 🔲 Not Started | — | Requires demo collection |
+| Hindsight Relabeling | 🔲 Not Started | — | Requires architecture changes |
+
+**Legend**: 🔲 Not Started | 🔄 In Progress | ✅ Completed | ❌ Failed | ⏸️ Paused
+
+### Recommended Starting Point
+
+Based on analysis, we recommend implementing **Strategy 1 (Success Buffer)** combined with **Strategy 2 (Asymmetric Priority)**:
+
+```python
+# Conceptual implementation
+class EliteReplayBuffer:
+    """Protected buffer for successful experiences."""
+    
+    def __init__(self, capacity: int = 1000):
+        self.buffer = []
+        self.capacity = capacity
+        self.min_quality = float('-inf')
+    
+    def add(self, episode: Episode) -> None:
+        quality = self._compute_quality(episode)
+        if len(self.buffer) < self.capacity:
+            self.buffer.append((quality, episode))
+            self.min_quality = min(q for q, _ in self.buffer)
+        elif quality > self.min_quality:
+            # Replace worst episode
+            self.buffer.sort(key=lambda x: x[0])
+            self.buffer[0] = (quality, episode)
+            self.min_quality = self.buffer[0][0]
+    
+    def _compute_quality(self, ep: Episode) -> float:
+        return ep.max_x + ep.flags * 1000 + ep.total_reward * 0.1
+
+# In training loop:
+batch = []
+batch.extend(main_buffer.sample(int(batch_size * 0.8)))
+batch.extend(elite_buffer.sample(int(batch_size * 0.2)))
+```
+
+This approach:
+1. Is relatively simple to implement
+2. Directly addresses the forgetting problem
+3. Doesn't require major architecture changes
+4. Can be tuned via the elite buffer size and sampling ratio
+
 ## 🤝 Contributing
 
 Contributions welcome! Please:

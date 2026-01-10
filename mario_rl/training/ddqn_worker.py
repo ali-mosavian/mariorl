@@ -39,6 +39,7 @@ from mario_rl.core.config import WorkerConfig
 from mario_rl.core.device import detect_device
 from mario_rl.core.episode import EpisodeState
 from mario_rl.core.config import SnapshotConfig
+from mario_rl.core.elite_buffer import EliteBuffer
 from mario_rl.core.metrics import MetricsTracker
 from mario_rl.core.ui_reporter import UIReporter
 from mario_rl.core.weight_sync import WeightSync
@@ -77,11 +78,12 @@ class DDQNWorker:
     # Gradient tensor - created after model init in __post_init__
     gradient_tensor: SharedGradientTensor = field(init=False, repr=False)
 
-    # Components - initialized in __post_init__ (8)
+    # Components - initialized in __post_init__ (9)
     env: Any = field(init=False, repr=False)
     base_env: Any = field(init=False, repr=False)
     net: DoubleDQN = field(init=False, repr=False)
     buffer: PrioritizedReplayBuffer = field(init=False, repr=False)
+    elite_buffer: EliteBuffer = field(init=False, repr=False)  # Protected buffer for best experiences
     n_step_buffer: NStepBuffer = field(init=False, repr=False)
     snapshots: Optional[SnapshotManager] = field(init=False, repr=False)
     action_dim: int = field(init=False)
@@ -101,6 +103,11 @@ class DDQNWorker:
 
     # Reward normalization
     _reward_normalizer: Optional[RewardNormalizer] = field(init=False, default=None)
+
+    # Episode transition tracking for elite buffer
+    _episode_transitions: list = field(init=False, default_factory=list)
+    _episode_flag_get: bool = field(init=False, default=False)
+    _episode_max_x: int = field(init=False, default=0)
 
     # CSV logging
     _episodes_csv: Path = field(init=False, repr=False)
@@ -152,9 +159,16 @@ class DDQNWorker:
             alpha=buf.alpha,
             beta_start=buf.beta_start,
             beta_end=buf.beta_end,
+            flag_priority_multiplier=buf.flag_priority_multiplier,
         )
+        self.elite_buffer = EliteBuffer(capacity=buf.elite_capacity)
         self.n_step_buffer = NStepBuffer(n_step=buf.n_step, gamma=buf.gamma)
         self.n_step_gamma = buf.gamma**buf.n_step
+
+        # Episode transition tracking
+        self._episode_transitions = []
+        self._episode_flag_get = False
+        self._episode_max_x = 0
 
         # Create snapshot manager
         snap = self.config.snapshot
@@ -210,6 +224,7 @@ class DDQNWorker:
             exploration=self.exploration,
             timing=self.timing,
             buffer=self.buffer,
+            elite_buffer=self.elite_buffer,
             snapshots=self.snapshots,
             get_level=lambda: self.base_env.current_level,
             batch_size=self.config.buffer.batch_size,
@@ -255,6 +270,10 @@ class DDQNWorker:
             "current_level",
             "game_time",
             "flag_get",
+            # Elite buffer stats
+            "elite_size",
+            "elite_min_quality",
+            "elite_max_quality",
         ]
         if not self._episodes_csv.exists():
             with open(self._episodes_csv, "w", newline="") as f:
@@ -286,6 +305,7 @@ class DDQNWorker:
     def _log_episode(self, info: dict) -> None:
         """Log episode metrics to CSV."""
         buffer_fill_pct = len(self.buffer) / self.config.buffer.capacity * 100
+        elite_stats = self.elite_buffer.get_stats()
 
         with open(self._episodes_csv, "a", newline="") as f:
             writer = csv.writer(f)
@@ -315,6 +335,10 @@ class DDQNWorker:
                 self.base_env.current_level,
                 info.get("time", 0),
                 info.get("flag_get", False),
+                # Elite buffer stats
+                elite_stats["size"],
+                elite_stats["min_quality"],
+                elite_stats["max_quality"],
             ])
 
     @torch.no_grad()
@@ -432,6 +456,16 @@ class DDQNWorker:
             state_processed = self._preprocess_state(state)
             next_state_processed = self._preprocess_state(next_state)
 
+            # Get info for transition metadata
+            x_pos = info.get("x_pos", 0)
+            flag_get = info.get("flag_get", False)
+
+            # Update episode tracking for elite buffer
+            if x_pos > self._episode_max_x:
+                self._episode_max_x = x_pos
+            if flag_get:
+                self._episode_flag_get = True
+
             # Add to buffers using normalized reward for training
             transition = Transition(
                 state=state_processed,
@@ -439,18 +473,21 @@ class DDQNWorker:
                 reward=normalized_reward,
                 next_state=next_state_processed,
                 done=done,
+                flag_get=flag_get,
+                max_x=x_pos,
             )
             n_step_transition = self.n_step_buffer.add(transition)
             if n_step_transition is not None:
                 self.buffer.add(n_step_transition)
+                # Track for elite buffer (store the n-step transition)
+                self._episode_transitions.append(n_step_transition)
 
             # Update tracking with RAW reward (for logging/analysis)
-            x_pos = info.get("x_pos", 0)
             self.episode.step(raw_reward, x_pos)
             self.metrics.total_steps += 1
             self.metrics.update_best_x(x_pos)
 
-            if info.get("flag_get", False):
+            if flag_get:
                 self.metrics.flags += 1
 
             # Update PER beta
@@ -489,6 +526,7 @@ class DDQNWorker:
                 # Flush N-step buffer
                 for trans in self.n_step_buffer.flush():
                     self.buffer.add(trans)
+                    self._episode_transitions.append(trans)
 
                 # Track stats
                 self.metrics.episode_count += 1
@@ -503,12 +541,21 @@ class DDQNWorker:
                     self.metrics.add_speed(speed)
 
                 # Track death/timeout/flag
-                if info.get("flag_get", False):
+                if flag_get:
                     self.metrics.add_flag(game_time)
                 elif is_timeout:
                     self.metrics.add_timeout()
                 elif is_dead:
                     self.metrics.add_death(x_pos)
+
+                # Add episode to elite buffer (preserves successful experiences)
+                if self._episode_transitions:
+                    self.elite_buffer.add_episode(
+                        transitions=self._episode_transitions,
+                        max_x=self._episode_max_x,
+                        flag_captured=self._episode_flag_get,
+                        episode_reward=self.episode.reward,
+                    )
 
                 # Log episode to CSV
                 self._log_episode(info)
@@ -521,6 +568,10 @@ class DDQNWorker:
                 if self.snapshots:
                     self.snapshots.reset()
                 self.episode.reset()
+                # Reset episode tracking for elite buffer
+                self._episode_transitions = []
+                self._episode_flag_get = False
+                self._episode_max_x = 0
             else:
                 state = next_state
 
@@ -528,21 +579,44 @@ class DDQNWorker:
         return episodes_completed
 
     def compute_and_send_gradients(self) -> Dict[str, float]:
-        """Sample from PER buffer, compute loss, and send gradients."""
+        """Sample from PER buffer + elite buffer, compute loss, and send gradients."""
         if len(self.buffer) < self.config.buffer.batch_size:
             return {}
 
-        # Sample batch (returns PERBatch dataclass)
-        batch = self.buffer.sample(self.config.buffer.batch_size)
-
-        # Convert to tensors
         device = self.config.device or detect_device()
-        states_t = torch.from_numpy(batch.states).to(device)
-        actions_t = torch.from_numpy(batch.actions).to(device)
-        rewards_t = torch.from_numpy(batch.rewards).to(device)
-        next_states_t = torch.from_numpy(batch.next_states).to(device)
-        dones_t = torch.from_numpy(batch.dones).to(device)
-        weights_t = torch.from_numpy(batch.weights).to(device)
+        total_batch_size = self.config.buffer.batch_size
+
+        # Calculate split between main buffer and elite buffer
+        elite_ratio = self.config.buffer.elite_sample_ratio
+        elite_size = 0
+        main_size = total_batch_size
+
+        if len(self.elite_buffer) >= 10:  # Only sample elite if we have enough
+            elite_size = int(total_batch_size * elite_ratio)
+            main_size = total_batch_size - elite_size
+
+        # Sample from main PER buffer
+        main_batch = self.buffer.sample(main_size)
+
+        # Convert main batch to tensors
+        states_t = torch.from_numpy(main_batch.states).to(device)
+        actions_t = torch.from_numpy(main_batch.actions).to(device)
+        rewards_t = torch.from_numpy(main_batch.rewards).to(device)
+        next_states_t = torch.from_numpy(main_batch.next_states).to(device)
+        dones_t = torch.from_numpy(main_batch.dones).to(device)
+        weights_t = torch.from_numpy(main_batch.weights).to(device)
+        main_indices = main_batch.indices  # Keep for priority updates
+
+        # Sample from elite buffer and concatenate
+        if elite_size > 0:
+            elite_batch = self.elite_buffer.sample(elite_size, device)
+            if elite_batch is not None:
+                states_t = torch.cat([states_t, elite_batch["states"]], dim=0)
+                actions_t = torch.cat([actions_t, elite_batch["actions"]], dim=0)
+                rewards_t = torch.cat([rewards_t, elite_batch["rewards"]], dim=0)
+                next_states_t = torch.cat([next_states_t, elite_batch["next_states"]], dim=0)
+                dones_t = torch.cat([dones_t, elite_batch["dones"]], dim=0)
+                weights_t = torch.cat([weights_t, elite_batch["weights"]], dim=0)
 
         # Compute Double DQN loss
         self.net.train()
@@ -597,8 +671,10 @@ class DDQNWorker:
         loss.backward()
         nn.utils.clip_grad_norm_(self.net.online.parameters(), self.config.max_grad_norm)
 
-        # Update priorities
-        self.buffer.update_priorities(batch.indices, td_errors.abs().cpu().numpy())
+        # Update priorities (only for main buffer samples, not elite)
+        # Elite buffer samples don't have indices in the PER tree
+        main_td_errors = td_errors[:len(main_indices)].abs().cpu().numpy()
+        self.buffer.update_priorities(main_indices, main_td_errors)
 
         # Extract gradients (no serialization - zero-copy via shared memory)
         grads = {

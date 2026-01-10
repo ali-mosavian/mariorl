@@ -994,6 +994,13 @@ class TrainingUI:
                 buf_color = curses.color_pair(3)  # Red
             stdscr.addstr(f"{buffer_fill_pct:4.1f}%", buf_color)
 
+            # Elite buffer indicator
+            elite_size = ws.get("elite_size", 0)
+            elite_capacity = ws.get("elite_capacity", 1000)
+            if elite_size > 0:
+                elite_pct = elite_size / elite_capacity * 100
+                stdscr.addstr(f" E={elite_size}", curses.color_pair(4))  # Cyan
+
             # Training indicator
             if can_train:
                 stdscr.addstr(" ✓", curses.color_pair(1))
@@ -1206,6 +1213,11 @@ class TrainingUI:
                 buf_color = curses.color_pair(3)
             stdscr.addstr(" ")
             stdscr.addstr(f"{buffer_fill_pct:3.0f}%", buf_color)
+
+            # Elite buffer indicator
+            elite_size = ws.get("elite_size", 0)
+            if elite_size > 0:
+                stdscr.addstr(f"E{elite_size}", curses.color_pair(4))
 
             # Training indicator
             train_char = "✓" if can_train else "✗"

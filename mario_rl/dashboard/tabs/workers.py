@@ -55,7 +55,14 @@ def render_workers_tab(workers: dict[int, pd.DataFrame]) -> None:
     with col8:
         _render_beta_or_buffer_chart(workers, colors)
 
-    # Row 5: Action entropy and distribution
+    # Row 5: Elite Buffer stats
+    col_e1, col_e2 = st.columns(2)
+    with col_e1:
+        _render_elite_buffer_chart(workers, colors)
+    with col_e2:
+        _render_elite_quality_chart(workers, colors)
+
+    # Row 6: Action entropy and distribution
     col9, col10 = st.columns(2)
     with col9:
         _render_action_entropy_chart(workers, colors)
@@ -92,6 +99,10 @@ def _render_summary_table(workers: dict[int, pd.DataFrame]) -> None:
         if level == "?" and "world" in latest and "stage" in latest:
             level = f"{int(latest['world'])}-{int(latest['stage'])}"
         
+        # Elite buffer stats
+        elite_size = int(latest.get("elite_size", 0))
+        elite_max_q = latest.get("elite_max_quality", 0)
+        
         rows.append({
             "Status": heartbeat,
             "Worker": f"W{wid}",
@@ -109,6 +120,8 @@ def _render_summary_table(workers: dict[int, pd.DataFrame]) -> None:
             "Deaths": int(latest.get("deaths", 0)),
             "Timeouts": int(latest.get("timeouts", 0)),
             "Flags": int(latest.get("flags", 0)),
+            "Elite": f"{elite_size}" if elite_size > 0 else "-",
+            "Elite Q": f"{elite_max_q:.0f}" if elite_max_q > 0 else "-",
             "Saves": int(latest.get("snapshot_saves", 0)),
             "Restores": int(latest.get("snapshot_restores", 0)),
             "Grads": int(latest.get("grads_sent", 0)),
@@ -242,6 +255,80 @@ def _render_beta_or_buffer_chart(workers: dict[int, pd.DataFrame], colors: list[
             showlegend=False,
         )
         st.plotly_chart(fig, use_container_width=True)
+
+
+def _render_elite_buffer_chart(workers: dict[int, pd.DataFrame], colors: list[str]) -> None:
+    """Render elite buffer size over time."""
+    fig = go.Figure()
+    has_data = False
+    
+    for i, (wid, df) in enumerate(sorted(workers.items())):
+        if len(df) > 0 and "elite_size" in df.columns:
+            has_data = True
+            x_axis = df["steps"] if "steps" in df.columns else df.get("episodes", range(len(df)))
+            fig.add_trace(go.Scatter(
+                x=x_axis, y=df["elite_size"],
+                name=f"W{wid}",
+                line=dict(color=colors[i % len(colors)], width=1.5),
+                opacity=0.8,
+            ))
+    
+    if has_data:
+        fig.update_layout(
+            title="Elite Buffer Size (preserved best experiences)",
+            height=280,
+            margin=dict(l=0, r=0, t=30, b=0),
+            **DARK_LAYOUT,
+            xaxis=dict(title="Steps", **GRID_STYLE),
+            yaxis=dict(title="Elite Transitions", **GRID_STYLE),
+            legend=dict(orientation="h", yanchor="bottom", y=1.02),
+        )
+        st.plotly_chart(fig, use_container_width=True)
+    else:
+        st.info("⏳ Elite buffer tracking not yet available (new feature)...")
+
+
+def _render_elite_quality_chart(workers: dict[int, pd.DataFrame], colors: list[str]) -> None:
+    """Render elite buffer quality range over time."""
+    fig = go.Figure()
+    has_data = False
+    
+    for i, (wid, df) in enumerate(sorted(workers.items())):
+        if len(df) > 0 and "elite_max_quality" in df.columns:
+            has_data = True
+            x_axis = df["steps"] if "steps" in df.columns else df.get("episodes", range(len(df)))
+            
+            # Max quality line
+            fig.add_trace(go.Scatter(
+                x=x_axis, y=df["elite_max_quality"],
+                name=f"W{wid} max",
+                line=dict(color=colors[i % len(colors)], width=1.5),
+                opacity=0.8,
+            ))
+            
+            # Min quality line (lighter)
+            if "elite_min_quality" in df.columns:
+                fig.add_trace(go.Scatter(
+                    x=x_axis, y=df["elite_min_quality"],
+                    name=f"W{wid} min",
+                    line=dict(color=colors[i % len(colors)], width=1, dash="dot"),
+                    opacity=0.5,
+                    showlegend=False,
+                ))
+    
+    if has_data:
+        fig.update_layout(
+            title="Elite Buffer Quality (max_x + 1000×flag + 0.1×reward)",
+            height=280,
+            margin=dict(l=0, r=0, t=30, b=0),
+            **DARK_LAYOUT,
+            xaxis=dict(title="Steps", **GRID_STYLE),
+            yaxis=dict(title="Quality Score", **GRID_STYLE),
+            legend=dict(orientation="h", yanchor="bottom", y=1.02),
+        )
+        st.plotly_chart(fig, use_container_width=True)
+    else:
+        st.info("⏳ Elite quality tracking not yet available (new feature)...")
 
 
 def _render_action_entropy_chart(workers: dict[int, pd.DataFrame], colors: list[str]) -> None:

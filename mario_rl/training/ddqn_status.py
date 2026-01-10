@@ -13,6 +13,7 @@ from dataclasses import dataclass
 from mario_rl.core.timing import TimingStats
 from mario_rl.core.types import WorkerStatus
 from mario_rl.core.episode import EpisodeState
+from mario_rl.core.elite_buffer import EliteBuffer
 from mario_rl.core.metrics import MetricsTracker
 from mario_rl.core.weight_sync import WeightSync
 from mario_rl.core.exploration import EpsilonGreedy
@@ -31,6 +32,7 @@ class DDQNStatusCollector:
     exploration: EpsilonGreedy
     timing: TimingStats
     buffer: PrioritizedReplayBuffer
+    elite_buffer: Optional[EliteBuffer]
     snapshots: Optional[SnapshotManager]
     get_level: Callable[[], str]
     batch_size: int = 64  # Batch size for training (from config)
@@ -41,6 +43,19 @@ class DDQNStatusCollector:
         buffer_capacity = self.buffer.capacity
         buffer_fill_pct = buffer_size / buffer_capacity * 100 if buffer_capacity > 0 else 0.0
         can_train = buffer_size >= self.batch_size
+
+        # Elite buffer stats
+        if self.elite_buffer is not None:
+            elite_stats = self.elite_buffer.get_stats()
+            elite_size = elite_stats["size"]
+            elite_capacity = elite_stats["capacity"]
+            elite_min_quality = elite_stats["min_quality"]
+            elite_max_quality = elite_stats["max_quality"]
+        else:
+            elite_size = 0
+            elite_capacity = 0
+            elite_min_quality = 0.0
+            elite_max_quality = 0.0
 
         return WorkerStatus(
             worker_id=self.worker_id,
@@ -75,4 +90,9 @@ class DDQNStatusCollector:
             buffer_capacity=buffer_capacity,
             buffer_fill_pct=buffer_fill_pct,
             can_train=can_train,
+            # Elite buffer diagnostics
+            elite_size=elite_size,
+            elite_capacity=elite_capacity,
+            elite_min_quality=elite_min_quality,
+            elite_max_quality=elite_max_quality,
         )

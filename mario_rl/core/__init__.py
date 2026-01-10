@@ -25,6 +25,7 @@ from mario_rl.core.ui_reporter import UIReporter
 from mario_rl.core.weight_sync import WeightSync
 from mario_rl.core.config import ExplorationConfig
 from mario_rl.core.exploration import EpsilonGreedy
+from mario_rl.core.elite_buffer import EliteBuffer
 
 __all__ = [
     # Config
@@ -52,4 +53,6 @@ __all__ = [
     "WorkerStatus",
     "GradientPacket",
     "GradientMetrics",
+    # Buffers
+    "EliteBuffer",
 ]

@@ -84,6 +84,11 @@ class UIReporter:
                 "buffer_capacity": status.buffer_capacity,
                 "buffer_fill_pct": status.buffer_fill_pct,
                 "can_train": status.can_train,
+                # Elite buffer diagnostics
+                "elite_size": status.elite_size,
+                "elite_capacity": status.elite_capacity,
+                "elite_min_quality": status.elite_min_quality,
+                "elite_max_quality": status.elite_max_quality,
             }
 
             msg = self._UIMessage(

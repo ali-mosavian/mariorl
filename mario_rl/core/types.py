@@ -15,13 +15,25 @@ import numpy as np
 
 @dataclass(frozen=True, slots=True)
 class Transition:
-    """A single experience transition."""
+    """A single experience transition.
+
+    Attributes:
+        state: Current observation.
+        action: Action taken.
+        reward: Reward received.
+        next_state: Next observation.
+        done: Whether episode terminated.
+        flag_get: Whether flag was captured (for priority boost).
+        max_x: Maximum X position reached (for quality scoring).
+    """
 
     state: np.ndarray
     action: int
     reward: float
     next_state: np.ndarray
     done: bool
+    flag_get: bool = False
+    max_x: int = 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -91,6 +103,11 @@ class WorkerStatus:
     buffer_capacity: int = 0
     buffer_fill_pct: float = 0.0
     can_train: bool = False
+    # Elite buffer diagnostics
+    elite_size: int = 0
+    elite_capacity: int = 0
+    elite_min_quality: float = 0.0
+    elite_max_quality: float = 0.0
 
 
 @dataclass(frozen=True, slots=True)

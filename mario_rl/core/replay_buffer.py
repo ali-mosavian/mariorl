@@ -42,6 +42,7 @@ class ReplayBuffer:
     - Prioritized sampling (alpha > 0) or uniform (alpha = 0)
     - Tensor output for training
     - Device placement support
+    - Flag capture priority boost (asymmetric priority)
     """
 
     capacity: int
@@ -52,6 +53,7 @@ class ReplayBuffer:
     beta_start: float = 0.4
     beta_end: float = 1.0
     epsilon: float = 1e-6
+    flag_priority_multiplier: float = 50.0  # Priority boost for flag captures
 
     # Storage (initialized in __post_init__)
     _states: np.ndarray = field(init=False, repr=False)
@@ -69,6 +71,9 @@ class ReplayBuffer:
     _max_priority: float = field(init=False, default=1.0)
     _current_beta: float = field(init=False, default=0.4)
 
+    # Metadata storage for priority boost
+    _flag_gets: np.ndarray = field(init=False, repr=False)
+
     # N-step buffer
     _nstep_buffer: NStepBuffer = field(init=False, repr=False)
 
@@ -80,6 +85,7 @@ class ReplayBuffer:
         self._rewards = np.zeros(self.capacity, dtype=np.float32)
         self._next_states = np.zeros((self.capacity, *self.obs_shape), dtype=np.float32)
         self._dones = np.zeros(self.capacity, dtype=np.float32)
+        self._flag_gets = np.zeros(self.capacity, dtype=np.bool_)
 
         # Initialize tracking
         self._size = 0
@@ -123,10 +129,16 @@ class ReplayBuffer:
         self._rewards[idx] = transition.reward
         self._next_states[idx] = transition.next_state
         self._dones[idx] = float(transition.done)
+        self._flag_gets[idx] = transition.flag_get
 
-        # Update PER tree with max priority
+        # Update PER tree with max priority (apply flag bonus)
         if self._tree is not None:
-            priority = self._max_priority ** self.alpha
+            base_priority = self._max_priority ** self.alpha
+            # Apply asymmetric priority: flag captures get boosted
+            if transition.flag_get and self.flag_priority_multiplier > 1.0:
+                priority = base_priority * self.flag_priority_multiplier
+            else:
+                priority = base_priority
             self._tree.add(priority)
 
         # Update pointers
@@ -225,7 +237,10 @@ class ReplayBuffer:
         )
 
     def update_priorities(self, indices: np.ndarray | Tensor, td_errors: np.ndarray | Tensor) -> None:
-        """Update priorities based on TD errors."""
+        """Update priorities based on TD errors.
+
+        Maintains asymmetric priority: flag captures keep their boost multiplier.
+        """
         if self._tree is None:
             return  # Uniform sampling, no priorities
 
@@ -234,9 +249,17 @@ class ReplayBuffer:
         if isinstance(td_errors, Tensor):
             td_errors = td_errors.cpu().numpy()
 
-        for idx, td_error in zip(indices, td_errors, strict=False):
-            priority = (abs(td_error) + self.epsilon) ** self.alpha
-            self._tree.update(int(idx), priority)
+        for leaf_idx, td_error in zip(indices, td_errors, strict=False):
+            base_priority = (abs(td_error) + self.epsilon) ** self.alpha
+
+            # Maintain flag priority boost (convert leaf_idx to data_idx)
+            data_idx = int(leaf_idx) - self.capacity + 1
+            if 0 <= data_idx < self.capacity and self._flag_gets[data_idx]:
+                priority = base_priority * self.flag_priority_multiplier
+            else:
+                priority = base_priority
+
+            self._tree.update(int(leaf_idx), priority)
             self._max_priority = max(self._max_priority, abs(td_error) + self.epsilon)
 
     def update_beta(self, progress: float) -> None:
@@ -248,6 +271,7 @@ class ReplayBuffer:
         self._size = 0
         self._ptr = 0
         self._max_priority = 1.0
+        self._flag_gets.fill(False)
         self._nstep_buffer.reset()
 
         if self._tree is not None:

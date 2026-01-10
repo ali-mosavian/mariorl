@@ -31,6 +31,13 @@ class BufferConfig:
     beta_start: float = 0.4  # Initial importance sampling exponent
     beta_end: float = 1.0  # Final importance sampling exponent
 
+    # Asymmetric priority: flag captures get boosted priority
+    flag_priority_multiplier: float = 50.0
+
+    # Elite buffer: preserves best experiences to prevent "forgetting success"
+    elite_capacity: int = 1000  # Number of elite transitions to keep
+    elite_sample_ratio: float = 0.15  # Fraction of batch to sample from elite buffer
+
 
 @dataclass(frozen=True)
 class ExplorationConfig:

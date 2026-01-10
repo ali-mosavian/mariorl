@@ -25,6 +25,9 @@ class PrioritizedReplayBuffer:
 
     Samples experiences proportional to their TD-error priority.
     Uses importance sampling weights to correct for bias.
+
+    Features:
+    - Asymmetric priority: flag captures get boosted priority
     """
 
     capacity: int
@@ -33,6 +36,7 @@ class PrioritizedReplayBuffer:
     beta_start: float = 0.4  # Initial importance sampling exponent
     beta_end: float = 1.0  # Final importance sampling exponent
     epsilon: float = 1e-6  # Small constant to ensure non-zero priorities
+    flag_priority_multiplier: float = 50.0  # Priority boost for flag captures
 
     # Storage arrays (initialized in __post_init__)
     tree: SumTree = field(init=False, repr=False)
@@ -41,6 +45,7 @@ class PrioritizedReplayBuffer:
     rewards: np.ndarray = field(init=False, repr=False)
     next_states: np.ndarray = field(init=False, repr=False)
     dones: np.ndarray = field(init=False, repr=False)
+    flag_gets: np.ndarray = field(init=False, repr=False)
 
     # Tracking
     size: int = field(init=False, default=0)
@@ -55,6 +60,7 @@ class PrioritizedReplayBuffer:
         self.rewards = np.zeros(self.capacity, dtype=np.float32)
         self.next_states = np.zeros((self.capacity, *self.obs_shape), dtype=np.float32)
         self.dones = np.zeros(self.capacity, dtype=np.float32)
+        self.flag_gets = np.zeros(self.capacity, dtype=np.bool_)
         self.size = 0
         self.max_priority = 1.0
         self.current_beta = self.beta_start
@@ -75,9 +81,15 @@ class PrioritizedReplayBuffer:
         self.rewards[data_idx] = transition.reward
         self.next_states[data_idx] = transition.next_state
         self.dones[data_idx] = float(transition.done)
+        self.flag_gets[data_idx] = transition.flag_get
 
         # Add with max priority (ensures new samples are seen at least once)
-        priority = self.max_priority**self.alpha
+        # Apply asymmetric priority: flag captures get boosted
+        base_priority = self.max_priority**self.alpha
+        if transition.flag_get and self.flag_priority_multiplier > 1.0:
+            priority = base_priority * self.flag_priority_multiplier
+        else:
+            priority = base_priority
         self.tree.add(priority)
 
         self.size = min(self.size + 1, self.capacity)
@@ -135,13 +147,23 @@ class PrioritizedReplayBuffer:
         """
         Update priorities based on TD errors.
 
+        Maintains asymmetric priority: flag captures keep their boost multiplier.
+
         Args:
             indices: Leaf indices from sampling
             td_errors: Absolute TD errors for each transition
         """
-        for idx, td_error in zip(indices, td_errors, strict=False):
-            priority = (abs(td_error) + self.epsilon) ** self.alpha
-            self.tree.update(idx, priority)
+        for leaf_idx, td_error in zip(indices, td_errors, strict=False):
+            base_priority = (abs(td_error) + self.epsilon) ** self.alpha
+
+            # Maintain flag priority boost (convert leaf_idx to data_idx)
+            data_idx = int(leaf_idx) - self.capacity + 1
+            if 0 <= data_idx < self.capacity and self.flag_gets[data_idx]:
+                priority = base_priority * self.flag_priority_multiplier
+            else:
+                priority = base_priority
+
+            self.tree.update(leaf_idx, priority)
             self.max_priority = max(self.max_priority, abs(td_error) + self.epsilon)
 
     def update_beta(self, progress: float) -> None:
