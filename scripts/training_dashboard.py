@@ -795,7 +795,7 @@ def render_levels_tab(workers: dict[int, pd.DataFrame], death_hotspots: dict[str
     
         with chart_col2:
             # Reward distribution box plot
-        fig = go.Figure()
+            fig = go.Figure()
             
             for level, stats in levels_with_data:
                 rewards = stats["rewards"]
@@ -807,27 +807,27 @@ def render_levels_tab(workers: dict[int, pd.DataFrame], death_hotspots: dict[str
                     line_color=COLORS["teal"],
                 ))
             
-        fig.update_layout(
+            fig.update_layout(
                 title="Reward Distribution per Level",
                 yaxis_title="Reward",
                 height=350,
-            template="plotly_dark",
-            paper_bgcolor="rgba(0,0,0,0)",
-            plot_bgcolor="rgba(0,0,0,0)",
+                template="plotly_dark",
+                paper_bgcolor="rgba(0,0,0,0)",
+                plot_bgcolor="rgba(0,0,0,0)",
                 xaxis=dict(gridcolor="#313244"),
                 yaxis=dict(gridcolor="#313244"),
                 margin=dict(l=0, r=0, t=50, b=0),
                 showlegend=False,
             )
             
-        st.plotly_chart(fig, use_container_width=True)
+            st.plotly_chart(fig, use_container_width=True)
     
     # Progress chart (best X over time per level)
     col1, col2 = st.columns(2)
     
     with col1:
         if levels_with_data:
-        fig = go.Figure()
+            fig = go.Figure()
             
             for i, (level, stats) in enumerate(levels_with_data):
                 x_positions = stats["x_positions"]
@@ -867,7 +867,7 @@ def render_levels_tab(workers: dict[int, pd.DataFrame], death_hotspots: dict[str
     with col2:
         # Speed distribution per level (box plot)
         if any(len(s["speeds"]) > 0 for _, s in levels_with_data):
-        fig = go.Figure()
+            fig = go.Figure()
             
             for level, stats in levels_with_data:
                 speeds = stats["speeds"]
@@ -880,20 +880,20 @@ def render_levels_tab(workers: dict[int, pd.DataFrame], death_hotspots: dict[str
                         line_color=COLORS["blue"],
                     ))
             
-        fig.update_layout(
+            fig.update_layout(
                 title="Speed Distribution by Level",
                 yaxis_title="Speed (x/time)",
-            height=300,
-            template="plotly_dark",
-            paper_bgcolor="rgba(0,0,0,0)",
-            plot_bgcolor="rgba(0,0,0,0)",
+                height=300,
+                template="plotly_dark",
+                paper_bgcolor="rgba(0,0,0,0)",
+                plot_bgcolor="rgba(0,0,0,0)",
                 xaxis=dict(gridcolor="#313244"),
                 yaxis=dict(gridcolor="#313244"),
                 margin=dict(l=0, r=0, t=50, b=0),
                 showlegend=False,
             )
             
-        st.plotly_chart(fig, use_container_width=True)
+            st.plotly_chart(fig, use_container_width=True)
     
     st.divider()
     
@@ -1219,7 +1219,7 @@ def render_levels_tab(workers: dict[int, pd.DataFrame], death_hotspots: dict[str
         }
         sorted_level_deaths = sorted(level_deaths.items(), key=lambda x: x[0])
         
-                fig = go.Figure()
+        fig = go.Figure()
         fig.add_trace(go.Bar(
             x=[l[0] for l in sorted_level_deaths],
             y=[l[1] for l in sorted_level_deaths],
@@ -1227,17 +1227,17 @@ def render_levels_tab(workers: dict[int, pd.DataFrame], death_hotspots: dict[str
             hovertemplate="Level %{x}<br>Deaths: %{y}<extra></extra>",
         ))
         
-                fig.update_layout(
+        fig.update_layout(
             height=200,
-                    template="plotly_dark",
-                    paper_bgcolor="rgba(0,0,0,0)",
-                    plot_bgcolor="rgba(0,0,0,0)",
+            template="plotly_dark",
+            paper_bgcolor="rgba(0,0,0,0)",
+            plot_bgcolor="rgba(0,0,0,0)",
             xaxis=dict(gridcolor="#313244"),
             yaxis=dict(gridcolor="#313244"),
             margin=dict(l=0, r=0, t=10, b=0),
         )
         
-                st.plotly_chart(fig, use_container_width=True)
+        st.plotly_chart(fig, use_container_width=True)
 
 
 def render_analysis_tab(df: pd.DataFrame, workers: dict[int, pd.DataFrame]) -> None:
