@@ -51,6 +51,7 @@ class DreamerLearner:
         rewards: Tensor,
         next_states: Tensor,
         dones: Tensor,
+        weights: Tensor | None = None,
     ) -> tuple[Tensor, dict[str, Any]]:
         """Compute combined world model and behavior loss.
 
@@ -60,6 +61,7 @@ class DreamerLearner:
             rewards: Rewards received (batch,)
             next_states: Next observations (batch, *obs_shape)
             dones: Episode termination flags (batch,)
+            weights: Importance sampling weights for PER (batch,), None for uniform
 
         Returns:
             loss: Combined loss tensor
@@ -76,6 +78,10 @@ class DreamerLearner:
 
         # Combine losses
         total_loss = wm_loss + behavior_loss
+
+        # Apply importance sampling weights if provided (for PER)
+        if weights is not None:
+            total_loss = (total_loss * weights).mean()
 
         # Merge metrics
         metrics: dict[str, Any] = {
