@@ -139,23 +139,40 @@ class DDQNMetrics(CommonMetrics):
 class DreamerMetrics(CommonMetrics):
     """Dreamer-specific metrics (extends CommonMetrics)."""
     
-    WORLD_LOSS = MetricDef("world_loss", MetricType.ROLLING)
+    # Total loss
+    LOSS = MetricDef("loss", MetricType.ROLLING)
+    GRAD_NORM = MetricDef("grad_norm", MetricType.ROLLING)
+    
+    # World model losses
+    WM_LOSS = MetricDef("wm_loss", MetricType.ROLLING)
+    DYNAMICS_LOSS = MetricDef("dynamics_loss", MetricType.ROLLING)
+    REWARD_LOSS = MetricDef("reward_loss", MetricType.ROLLING)
+    
+    # Behavior/Actor-Critic losses
+    BEHAVIOR_LOSS = MetricDef("behavior_loss", MetricType.ROLLING)
     ACTOR_LOSS = MetricDef("actor_loss", MetricType.ROLLING)
     CRITIC_LOSS = MetricDef("critic_loss", MetricType.ROLLING)
-    KL_DIV = MetricDef("kl_div", MetricType.ROLLING)
-    IMAGINATION_REWARD = MetricDef("imagination_reward", MetricType.ROLLING)
     ENTROPY = MetricDef("entropy", MetricType.ROLLING)
+    
+    # Value estimates
+    VALUE_MEAN = MetricDef("value_mean", MetricType.ROLLING)
+    RETURN_MEAN = MetricDef("return_mean", MetricType.ROLLING)
     
     @classmethod
     def definitions(cls) -> list[MetricDef]:
         """Return list of all Dreamer metric definitions."""
         return super().definitions() + [
-            cls.WORLD_LOSS,
+            cls.LOSS,
+            cls.GRAD_NORM,
+            cls.WM_LOSS,
+            cls.DYNAMICS_LOSS,
+            cls.REWARD_LOSS,
+            cls.BEHAVIOR_LOSS,
             cls.ACTOR_LOSS,
             cls.CRITIC_LOSS,
-            cls.KL_DIV,
-            cls.IMAGINATION_REWARD,
             cls.ENTROPY,
+            cls.VALUE_MEAN,
+            cls.RETURN_MEAN,
         ]
 
 

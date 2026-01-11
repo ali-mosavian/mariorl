@@ -14,55 +14,94 @@ from mario_rl.dashboard.aggregators import sample_data
 ACTION_NAMES = ["NOOP", "→", "→A", "→B", "→AB", "A", "←", "←A", "←B", "←AB", "↓", "↑"]
 
 
+def detect_model_type(workers: dict[int, pd.DataFrame]) -> str:
+    """Detect model type from available columns."""
+    for df in workers.values():
+        if len(df) > 0:
+            cols = set(df.columns)
+            # Dreamer-specific columns
+            if "wm_loss" in cols or "actor_loss" in cols or "world_loss" in cols:
+                return "dreamer"
+            # DDQN-specific columns
+            if "q_mean" in cols or "td_error" in cols:
+                return "ddqn"
+    return "unknown"
+
+
 def render_workers_tab(workers: dict[int, pd.DataFrame]) -> None:
     """Render the workers tab."""
     if not workers:
         st.info("⏳ Waiting for worker data...")
         return
 
+    # Detect model type
+    model_type = detect_model_type(workers)
+
     # Summary table
-    _render_summary_table(workers)
+    _render_summary_table(workers, model_type)
     st.divider()
 
     # Comparison charts
     colors = list(COLORS.values())
     
-    # Row 1: Reward and Speed
+    # Row 1: Reward and Speed (common)
     col1, col2 = st.columns(2)
     with col1:
         _render_worker_chart(workers, "reward", "Rolling Avg Reward by Worker", colors, show_legend=True)
     with col2:
         _render_worker_chart(workers, "speed", "Speed by Worker", colors)
 
-    # Row 2: Best X and Loss
+    # Row 2: Best X and Loss (common)
     col3, col4 = st.columns(2)
     with col3:
         _render_worker_chart(workers, "best_x_ever", "Best X Position by Worker", colors)
     with col4:
-        _render_worker_chart(workers, "loss", "Loss by Worker", colors)
+        _render_worker_chart(workers, "loss", "Total Loss by Worker", colors)
 
-    # Row 3: Q-values and TD error
+    # Row 3: Model-specific metrics
     col5, col6 = st.columns(2)
-    with col5:
-        _render_worker_chart(workers, "q_mean", "Q Mean by Worker", colors)
-    with col6:
-        _render_worker_chart(workers, "td_error", "TD Error by Worker", colors)
+    if model_type == "dreamer":
+        # Dreamer: World model and behavior losses
+        with col5:
+            _render_worker_chart(workers, "wm_loss", "World Model Loss by Worker", colors)
+        with col6:
+            _render_worker_chart(workers, "behavior_loss", "Behavior Loss by Worker", colors)
+    else:
+        # DDQN: Q-values and TD error
+        with col5:
+            _render_worker_chart(workers, "q_mean", "Q Mean by Worker", colors)
+        with col6:
+            _render_worker_chart(workers, "td_error", "TD Error by Worker", colors)
 
-    # Row 4: Epsilon and PER Beta
+    # Row 4: Model-specific metrics (continued)
     col7, col8 = st.columns(2)
-    with col7:
-        _render_epsilon_chart(workers, colors)
-    with col8:
-        _render_beta_or_buffer_chart(workers, colors)
+    if model_type == "dreamer":
+        # Dreamer: Actor and Critic losses
+        with col7:
+            _render_worker_chart(workers, "actor_loss", "Actor Loss by Worker", colors)
+        with col8:
+            _render_worker_chart(workers, "critic_loss", "Critic Loss by Worker", colors)
+    else:
+        # DDQN: Epsilon and PER Beta
+        with col7:
+            _render_epsilon_chart(workers, colors)
+        with col8:
+            _render_beta_or_buffer_chart(workers, colors)
 
-    # Row 5: Elite Buffer stats
+    # Row 5: Entropy (for Dreamer) or Elite Buffer (for DDQN)
     col_e1, col_e2 = st.columns(2)
-    with col_e1:
-        _render_elite_buffer_chart(workers, colors)
-    with col_e2:
-        _render_elite_quality_chart(workers, colors)
+    if model_type == "dreamer":
+        with col_e1:
+            _render_worker_chart(workers, "entropy", "Policy Entropy by Worker", colors)
+        with col_e2:
+            _render_worker_chart(workers, "value_mean", "Value Mean by Worker", colors)
+    else:
+        with col_e1:
+            _render_elite_buffer_chart(workers, colors)
+        with col_e2:
+            _render_elite_quality_chart(workers, colors)
 
-    # Row 6: Action entropy and distribution
+    # Row 6: Action entropy and distribution (common)
     col9, col10 = st.columns(2)
     with col9:
         _render_action_entropy_chart(workers, colors)
@@ -70,7 +109,7 @@ def render_workers_tab(workers: dict[int, pd.DataFrame]) -> None:
         _render_action_distribution_heatmap(workers)
 
 
-def _render_summary_table(workers: dict[int, pd.DataFrame]) -> None:
+def _render_summary_table(workers: dict[int, pd.DataFrame], model_type: str = "ddqn") -> None:
     """Render the worker summary table."""
     rows = []
     current_time = time.time()
@@ -99,11 +138,8 @@ def _render_summary_table(workers: dict[int, pd.DataFrame]) -> None:
         if level == "?" and "world" in latest and "stage" in latest:
             level = f"{int(latest['world'])}-{int(latest['stage'])}"
         
-        # Elite buffer stats
-        elite_size = int(latest.get("elite_size", 0))
-        elite_max_q = latest.get("elite_max_quality", 0)
-        
-        rows.append({
+        # Common columns
+        row = {
             "Status": heartbeat,
             "Worker": f"W{wid}",
             "Level": level,
@@ -111,21 +147,40 @@ def _render_summary_table(workers: dict[int, pd.DataFrame]) -> None:
             "Steps": int(latest.get("steps", 0)),
             "Best X": int(best_x) if pd.notna(best_x) else 0,
             "Reward": f"{latest.get('reward', 0):.1f}",
-            "Ep Reward": f"{latest.get('episode_reward', 0):.1f}",
             "Speed": f"{latest.get('speed', 0):.2f}",
-            "ε": f"{latest.get('epsilon', 1.0):.3f}",
             "Loss": f"{latest.get('loss', 0):.3f}",
-            "Q Mean": f"{latest.get('q_mean', 0):.1f}",
-            "TD Err": f"{latest.get('td_error', 0):.3f}",
+        }
+        
+        # Model-specific columns
+        if model_type == "dreamer":
+            row.update({
+                "WM Loss": f"{latest.get('wm_loss', 0):.3f}",
+                "Actor": f"{latest.get('actor_loss', 0):.3f}",
+                "Critic": f"{latest.get('critic_loss', 0):.3f}",
+                "Entropy": f"{latest.get('entropy', 0):.3f}",
+            })
+        else:
+            row.update({
+                "ε": f"{latest.get('epsilon', 1.0):.3f}",
+                "Q Mean": f"{latest.get('q_mean', 0):.1f}",
+                "TD Err": f"{latest.get('td_error', 0):.3f}",
+            })
+            # Elite buffer stats (DDQN only)
+            elite_size = int(latest.get("elite_size", 0))
+            elite_max_q = latest.get("elite_max_quality", 0)
+            row.update({
+                "Elite": f"{elite_size}" if elite_size > 0 else "-",
+                "Elite Q": f"{elite_max_q:.0f}" if elite_max_q > 0 else "-",
+            })
+        
+        # Common trailing columns
+        row.update({
             "Deaths": int(latest.get("deaths", 0)),
-            "Timeouts": int(latest.get("timeouts", 0)),
             "Flags": int(latest.get("flags", 0)),
-            "Elite": f"{elite_size}" if elite_size > 0 else "-",
-            "Elite Q": f"{elite_max_q:.0f}" if elite_max_q > 0 else "-",
-            "Saves": int(latest.get("snapshot_saves", 0)),
-            "Restores": int(latest.get("snapshot_restores", 0)),
             "Grads": int(latest.get("grads_sent", 0)),
         })
+        
+        rows.append(row)
 
     if rows:
         st.dataframe(

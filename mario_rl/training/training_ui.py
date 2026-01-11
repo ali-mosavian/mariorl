@@ -699,11 +699,19 @@ class TrainingUI:
             if gradients_received > 0:
                 stdscr.addstr(f"  ↓{gradients_received:,} grads")
 
-            # Q-value and gradient stats
-            stdscr.addstr(y + 3, 4, f"Q: μ={q_mean:.2f}")
-            if q_max > 0:
-                stdscr.addstr(f" max={q_max:.1f}")
-            stdscr.addstr(f"  TD={td_error:.4f}")
+            # Model-specific stats
+            model_type = ls.get("model_type", "ddqn")
+            if model_type == "dreamer":
+                wm_loss = ls.get("wm_loss", 0)
+                actor_loss = ls.get("actor_loss", 0)
+                critic_loss = ls.get("critic_loss", 0)
+                entropy = ls.get("entropy", 0)
+                stdscr.addstr(y + 3, 4, f"WM: {wm_loss:.4f}  Actor: {actor_loss:.4f}  Critic: {critic_loss:.4f}  H: {entropy:.3f}")
+            else:
+                stdscr.addstr(y + 3, 4, f"Q: μ={q_mean:.2f}")
+                if q_max > 0:
+                    stdscr.addstr(f" max={q_max:.1f}")
+                stdscr.addstr(f"  TD={td_error:.4f}")
             if grad_norm > 0:
                 stdscr.addstr(f"  ∇={grad_norm:.1f}")
             if reward_mean != 0:
@@ -938,9 +946,19 @@ class TrainingUI:
             else:
                 sync_str = "never"
 
-            # Main stats line with Q-values and weight sync
+            # Main stats line with model-specific metrics and weight sync
             game_time = ws.get("game_time", 0)
-            stats = f"Ep: {episode:4d}  Step: {step:4d}  X: {x_pos:4d}  ⏱ {game_time:3d}  Best: {best_x:4d}  Q: {q_mean:.1f}/{q_max:.1f}  {steps_per_sec:.0f} sps  Wgt: {sync_str}"
+            model_type = ws.get("model_type", "ddqn")
+            
+            # Build model-specific metric string
+            if model_type == "dreamer":
+                wm_loss = ws.get("wm_loss", 0)
+                actor_loss = ws.get("actor_loss", 0)
+                metric_str = f"WM: {wm_loss:.3f}  Act: {actor_loss:.3f}"
+            else:
+                metric_str = f"Q: {q_mean:.1f}/{q_max:.1f}"
+            
+            stats = f"Ep: {episode:4d}  Step: {step:4d}  X: {x_pos:4d}  ⏱ {game_time:3d}  Best: {best_x:4d}  {metric_str}  {steps_per_sec:.0f} sps  Wgt: {sync_str}"
             stdscr.addstr(y + 1, 4, stats)
 
             # Secondary stats
@@ -1334,29 +1352,49 @@ def send_learner_status(
     steps_per_sec: float = 0.0,
     queue_msgs_per_sec: float = 0.0,
     queue_kb_per_sec: float = 0.0,
+    # Dreamer-specific metrics (optional)
+    wm_loss: float | None = None,
+    actor_loss: float | None = None,
+    critic_loss: float | None = None,
+    entropy: float | None = None,
+    model_type: str = "ddqn",
 ):
     """Send learner status update to UI."""
     try:
+        data = {
+            "step": step,
+            "loss": loss,
+            "avg_loss": avg_loss,
+            "buf_size": buf_size,
+            "pulled": pulled,
+            "max_steps": max_steps,
+            "status": status,
+            "q_mean": q_mean,
+            "q_max": q_max,
+            "td_error": td_error,
+            "grad_norm": grad_norm,
+            "reward_mean": reward_mean,
+            "steps_per_sec": steps_per_sec,
+            "queue_msgs_per_sec": queue_msgs_per_sec,
+            "queue_kb_per_sec": queue_kb_per_sec,
+            "model_type": model_type,
+        }
+        
+        # Add Dreamer metrics if provided
+        if wm_loss is not None:
+            data["wm_loss"] = wm_loss
+        if actor_loss is not None:
+            data["actor_loss"] = actor_loss
+        if critic_loss is not None:
+            data["critic_loss"] = critic_loss
+        if entropy is not None:
+            data["entropy"] = entropy
+            
         queue.put_nowait(
             UIMessage(
                 msg_type=MessageType.LEARNER_STATUS,
                 source_id=-1,
-                data={
-                    "step": step,
-                    "loss": loss,
-                    "avg_loss": avg_loss,
-                    "buf_size": buf_size,
-                    "pulled": pulled,
-                    "max_steps": max_steps,
-                    "status": status,
-                    "q_mean": q_mean,
-                    "q_max": q_max,
-                    "td_error": td_error,
-                    "grad_norm": grad_norm,
-                    "reward_mean": reward_mean,
-                    "steps_per_sec": steps_per_sec,
-                    "queue_msgs_per_sec": queue_msgs_per_sec,
-                    "queue_kb_per_sec": queue_kb_per_sec,
+                data=data,
                 },
             )
         )
@@ -1397,37 +1435,57 @@ def send_worker_status(
     rolling_avg_reward: float = 0.0,
     first_flag_time: float = 0.0,
     best_x_ever: int = 0,
+    # Dreamer-specific metrics (optional)
+    wm_loss: float | None = None,
+    actor_loss: float | None = None,
+    critic_loss: float | None = None,
+    entropy: float | None = None,
+    model_type: str = "ddqn",
 ):
     """Send worker status update to UI."""
     try:
+        data = {
+            "episode": episode,
+            "reward": reward,
+            "x_pos": x_pos,
+            "best_x": best_x,
+            "deaths": deaths,
+            "flags": flags,
+            "epsilon": epsilon,
+            "experiences": experiences,
+            "q_mean": q_mean,
+            "q_max": q_max,
+            "steps_per_sec": steps_per_sec,
+            "step": step,
+            "curr_step": curr_step,
+            "last_weight_sync": last_weight_sync,
+            "weight_sync_count": weight_sync_count,
+            "snapshot_restores": snapshot_restores,
+            "current_level": current_level,
+            "game_time": game_time,
+            # Convergence metrics
+            "rolling_avg_reward": rolling_avg_reward,
+            "first_flag_time": first_flag_time,
+            "best_x_ever": best_x_ever,
+            # Model type for UI to know which metrics to show
+            "model_type": model_type,
+        }
+        
+        # Add Dreamer metrics if provided
+        if wm_loss is not None:
+            data["wm_loss"] = wm_loss
+        if actor_loss is not None:
+            data["actor_loss"] = actor_loss
+        if critic_loss is not None:
+            data["critic_loss"] = critic_loss
+        if entropy is not None:
+            data["entropy"] = entropy
+            
         queue.put_nowait(
             UIMessage(
                 msg_type=MessageType.WORKER_STATUS,
                 source_id=worker_id,
-                data={
-                    "episode": episode,
-                    "reward": reward,
-                    "x_pos": x_pos,
-                    "best_x": best_x,
-                    "deaths": deaths,
-                    "flags": flags,
-                    "epsilon": epsilon,
-                    "experiences": experiences,
-                    "q_mean": q_mean,
-                    "q_max": q_max,
-                    "steps_per_sec": steps_per_sec,
-                    "step": step,
-                    "curr_step": curr_step,
-                    "last_weight_sync": last_weight_sync,
-                    "weight_sync_count": weight_sync_count,
-                    "snapshot_restores": snapshot_restores,
-                    "current_level": current_level,
-                    "game_time": game_time,
-                    # Convergence metrics
-                    "rolling_avg_reward": rolling_avg_reward,
-                    "first_flag_time": first_flag_time,
-                    "best_x_ever": best_x_ever,
-                },
+                data=data,
             )
         )
     except Exception:

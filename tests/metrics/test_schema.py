@@ -222,10 +222,22 @@ def test_ddqn_metrics_definitions_includes_ddqn_specific() -> None:
 # =============================================================================
 
 
-def test_dreamer_metrics_has_world_loss() -> None:
-    """DreamerMetrics defines world_loss as rolling average."""
-    assert DreamerMetrics.WORLD_LOSS.name == "world_loss"
-    assert DreamerMetrics.WORLD_LOSS.metric_type == MetricType.ROLLING
+def test_dreamer_metrics_has_wm_loss() -> None:
+    """DreamerMetrics defines wm_loss as rolling average."""
+    assert DreamerMetrics.WM_LOSS.name == "wm_loss"
+    assert DreamerMetrics.WM_LOSS.metric_type == MetricType.ROLLING
+
+
+def test_dreamer_metrics_has_dynamics_loss() -> None:
+    """DreamerMetrics defines dynamics_loss as rolling average."""
+    assert DreamerMetrics.DYNAMICS_LOSS.name == "dynamics_loss"
+    assert DreamerMetrics.DYNAMICS_LOSS.metric_type == MetricType.ROLLING
+
+
+def test_dreamer_metrics_has_behavior_loss() -> None:
+    """DreamerMetrics defines behavior_loss as rolling average."""
+    assert DreamerMetrics.BEHAVIOR_LOSS.name == "behavior_loss"
+    assert DreamerMetrics.BEHAVIOR_LOSS.metric_type == MetricType.ROLLING
 
 
 def test_dreamer_metrics_has_actor_loss() -> None:
@@ -240,16 +252,16 @@ def test_dreamer_metrics_has_critic_loss() -> None:
     assert DreamerMetrics.CRITIC_LOSS.metric_type == MetricType.ROLLING
 
 
-def test_dreamer_metrics_has_kl_div() -> None:
-    """DreamerMetrics defines kl_div as rolling average."""
-    assert DreamerMetrics.KL_DIV.name == "kl_div"
-    assert DreamerMetrics.KL_DIV.metric_type == MetricType.ROLLING
-
-
 def test_dreamer_metrics_has_entropy() -> None:
     """DreamerMetrics defines entropy as rolling average."""
     assert DreamerMetrics.ENTROPY.name == "entropy"
     assert DreamerMetrics.ENTROPY.metric_type == MetricType.ROLLING
+
+
+def test_dreamer_metrics_has_value_mean() -> None:
+    """DreamerMetrics defines value_mean as rolling average."""
+    assert DreamerMetrics.VALUE_MEAN.name == "value_mean"
+    assert DreamerMetrics.VALUE_MEAN.metric_type == MetricType.ROLLING
 
 
 def test_dreamer_metrics_definitions_includes_common() -> None:
@@ -264,9 +276,10 @@ def test_dreamer_metrics_definitions_includes_dreamer_specific() -> None:
     """DreamerMetrics.definitions() includes Dreamer-specific metrics."""
     defs = DreamerMetrics.definitions()
     names = [d.name for d in defs]
-    assert "world_loss" in names
+    assert "wm_loss" in names
     assert "actor_loss" in names
-    assert "kl_div" in names
+    assert "behavior_loss" in names
+    assert "entropy" in names
 
 
 # =============================================================================

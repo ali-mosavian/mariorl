@@ -8,32 +8,55 @@ from plotly.subplots import make_subplots
 from mario_rl.dashboard.chart_helpers import COLORS, DARK_LAYOUT, GRID_STYLE
 
 
+def _detect_model_type(df: pd.DataFrame) -> str:
+    """Detect model type from dataframe columns."""
+    cols = set(df.columns)
+    # Dreamer-specific columns
+    if "wm_loss" in cols or "actor_loss" in cols or "world_loss" in cols:
+        return "dreamer"
+    # DDQN-specific columns
+    if "q_mean" in cols or "td_error" in cols:
+        return "ddqn"
+    return "unknown"
+
+
 def render_analysis_tab(df: pd.DataFrame, workers: dict[int, pd.DataFrame]) -> None:
     """Render analysis/debugging tab."""
     if df is None or len(df) < 2:
         st.info("⏳ Need more data for analysis...")
         return
 
+    # Detect model type from worker data (more metrics available there)
+    model_type = "unknown"
+    for wdf in workers.values():
+        if len(wdf) > 0:
+            model_type = _detect_model_type(wdf)
+            if model_type != "unknown":
+                break
+    
+    # Fall back to coordinator data
+    if model_type == "unknown":
+        model_type = _detect_model_type(df)
+
     st.subheader("Training Health")
-    _render_health_indicators(df)
+    _render_health_indicators(df, model_type)
     
     st.divider()
     st.subheader("Worker Comparison")
-    _render_worker_comparison(workers)
+    _render_worker_comparison(workers, model_type)
     
     st.divider()
     st.subheader("Progress Timeline")
     _render_progress_timeline(df)
 
 
-def _render_health_indicators(df: pd.DataFrame) -> None:
+def _render_health_indicators(df: pd.DataFrame, model_type: str = "ddqn") -> None:
     """Render training health indicator cards."""
     latest = df.iloc[-1]
     recent = df.tail(10)
 
     loss_col = "avg_loss" if "avg_loss" in recent.columns else "loss"
     loss_trend = recent[loss_col].diff().mean() if loss_col in recent.columns else 0
-    q_trend = recent["q_mean"].diff().mean() if "q_mean" in recent.columns else 0
     grad_norm_avg = recent["grad_norm"].mean() if "grad_norm" in recent.columns else 0
 
     col1, col2, col3, col4 = st.columns(4)
@@ -46,14 +69,25 @@ def _render_health_indicators(df: pd.DataFrame) -> None:
     else:
         col1.info(f"➡️ Loss Stable ({loss_trend:+.2f}/update)")
 
-    # Q-value health
-    q_mean = latest.get("q_mean", 0)
-    if abs(q_mean) > 1000:
-        col2.error(f"⚠️ Q-values large ({q_mean:.0f})")
-    elif q_mean < -100:
-        col2.warning(f"📉 Q-values negative ({q_mean:.1f})")
+    # Model-specific health indicator
+    if model_type == "dreamer":
+        # Dreamer: World model loss health
+        wm_loss = latest.get("wm_loss", latest.get("world_loss", 0))
+        if wm_loss > 10:
+            col2.error(f"⚠️ High WM loss ({wm_loss:.2f})")
+        elif wm_loss > 1:
+            col2.warning(f"📊 Elevated WM loss ({wm_loss:.2f})")
+        else:
+            col2.success(f"✓ WM loss OK ({wm_loss:.3f})")
     else:
-        col2.success(f"✓ Q-values OK ({q_mean:.1f})")
+        # DDQN: Q-value health
+        q_mean = latest.get("q_mean", 0)
+        if abs(q_mean) > 1000:
+            col2.error(f"⚠️ Q-values large ({q_mean:.0f})")
+        elif q_mean < -100:
+            col2.warning(f"📉 Q-values negative ({q_mean:.1f})")
+        else:
+            col2.success(f"✓ Q-values OK ({q_mean:.1f})")
 
     # Gradient norm
     if grad_norm_avg > 50:
@@ -71,7 +105,7 @@ def _render_health_indicators(df: pd.DataFrame) -> None:
         col4.success(f"⚡ Good throughput ({throughput:.1f} g/s)")
 
 
-def _render_worker_comparison(workers: dict[int, pd.DataFrame]) -> None:
+def _render_worker_comparison(workers: dict[int, pd.DataFrame], model_type: str = "ddqn") -> None:
     """Render worker comparison table."""
     if not workers:
         st.info("No worker data available")
@@ -81,15 +115,27 @@ def _render_worker_comparison(workers: dict[int, pd.DataFrame]) -> None:
     for wid, wdf in sorted(workers.items()):
         if len(wdf) > 0:
             latest_w = wdf.iloc[-1]
-            worker_stats.append({
+            row = {
                 "Worker": f"W{wid}",
                 "Episodes": int(latest_w.get("episodes", 0)),
                 "Best X": int(latest_w.get("best_x_ever", 0)),
                 "Avg Reward": wdf["reward"].mean() if "reward" in wdf.columns else 0,
                 "Avg Loss": wdf["loss"].mean() if "loss" in wdf.columns else 0,
-                "Avg Q": wdf["q_mean"].mean() if "q_mean" in wdf.columns else 0,
-                "TD Error": wdf["td_error"].mean() if "td_error" in wdf.columns else 0,
-            })
+            }
+            
+            if model_type == "dreamer":
+                row.update({
+                    "WM Loss": wdf["wm_loss"].mean() if "wm_loss" in wdf.columns else 0,
+                    "Actor Loss": wdf["actor_loss"].mean() if "actor_loss" in wdf.columns else 0,
+                    "Critic Loss": wdf["critic_loss"].mean() if "critic_loss" in wdf.columns else 0,
+                })
+            else:
+                row.update({
+                    "Avg Q": wdf["q_mean"].mean() if "q_mean" in wdf.columns else 0,
+                    "TD Error": wdf["td_error"].mean() if "td_error" in wdf.columns else 0,
+                })
+            
+            worker_stats.append(row)
     
     if worker_stats:
         st.dataframe(pd.DataFrame(worker_stats), hide_index=True, use_container_width=True)
