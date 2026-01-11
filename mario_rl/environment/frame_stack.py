@@ -1,15 +1,18 @@
 """Wrapper that stacks frames."""
 
-from typing import Union
 from collections import deque
+from dataclasses import dataclass
+from typing import overload
 
+import lz4.block
 import numpy as np
 import gymnasium as gym
+from numpy.typing import NDArray
 from gymnasium.spaces import Box
-from gymnasium.error import DependencyNotInstalled
 
 
-class LazyFrames:
+@dataclass(frozen=True, slots=True)
+class LazyFrames[T: np.generic]:
     """Ensures common frames are only stored once to optimize memory use.
 
     To further reduce the memory use, it is optionally to turn on lz4 to compress the observations.
@@ -18,78 +21,87 @@ class LazyFrames:
         This object should only be converted to numpy array just before forward pass.
     """
 
-    __slots__ = ("frame_shape", "dtype", "shape", "lz4_compress", "_frames")
+    frames: list[NDArray[T] | bytes]
+    _shape: tuple[int, ...]
+    _dtype: np.dtype[T]
+    _compressed: bool
 
-    def __init__(self, frames: list, lz4_compress: bool = False):
-        """Lazyframe for a set of frames and if to apply lz4.
+    @property
+    def is_compressed(self) -> bool:
+        """Whether frames are LZ4 compressed."""
+        return self._compressed
 
-        Args:
-            frames (list): The frames to convert to lazy frames
-            lz4_compress (bool): Use lz4 to compress the frames internally
+    @property
+    def dtype(self) -> np.dtype[T]:
+        """Data type of frames."""
+        return self._dtype
 
-        Raises:
-            DependencyNotInstalled: lz4 is not installed
-        """
-        self.frame_shape = tuple(frames[0].shape)
-        self.shape = (len(frames),) + self.frame_shape
-        self.dtype = frames[0].dtype
-        if lz4_compress:
-            try:
-                from lz4.block import compress
-            except ImportError:
-                raise DependencyNotInstalled("lz4 is not installed, run `pip install gym[other]`") from None
+    @property
+    def shape(self) -> tuple[int, ...]:
+        """Shape of stacked frames (num_frames, *frame_shape)."""
+        return (len(self.frames), *self._shape)
 
-            frames = [compress(frame) for frame in frames]
-        self._frames = frames
-        self.lz4_compress = lz4_compress
+    def __len__(self) -> int:
+        """Return number of stacked frames."""
+        return len(self.frames)
 
-    def __array__(self, dtype=None):
-        """Gets a numpy array of stacked frames with specific dtype.
+    def __getitem__(self, idx: int | slice) -> NDArray[T]:
+        """Get frame(s) by index or slice."""
+        if isinstance(idx, slice):
+            return np.stack([self._decode(frame) for frame in self.frames[idx]], axis=0)
+        return self._decode(self.frames[idx])
 
-        Args:
-            dtype: The dtype of the stacked frames
+    @overload
+    def __array__(self, dtype: None = None) -> NDArray[T]: ...
 
-        Returns:
-            The array of stacked frames with dtype
-        """
+    @overload
+    def __array__[T2: np.generic](self, dtype: np.dtype[T2]) -> NDArray[T2]: ...
+
+    def __array__(self, dtype: np.dtype | None = None) -> NDArray:
+        """Convert to numpy array, optionally with dtype conversion."""
         arr = self[:]
         if dtype is not None:
             return arr.astype(dtype)
         return arr
 
-    def __len__(self):
-        """Returns the number of frame stacks.
-
-        Returns:
-            The number of frame stacks
-        """
-        return self.shape[0]
-
-    def __getitem__(self, int_or_slice: Union[int, slice]):
-        """Gets the stacked frames for a particular index or slice.
-
-        Args:
-            int_or_slice: Index or slice to get items for
-
-        Returns:
-            np.stacked frames for the int or slice
-
-        """
-        if isinstance(int_or_slice, int):
-            return self._check_decompress(self._frames[int_or_slice])  # single frame
-        return np.stack([self._check_decompress(f) for f in self._frames[int_or_slice]], axis=0)
-
-    def __eq__(self, other):
-        """Checks that the current frames are equal to the other object."""
+    def __eq__(self, other: NDArray[T]) -> NDArray[np.bool_]:
+        """Element-wise equality with another array-like object."""
         return self.__array__() == other
 
-    def _check_decompress(self, frame):
-        if self.lz4_compress:
-            from lz4.block import decompress
-
-            return np.frombuffer(decompress(frame), dtype=self.dtype).reshape(self.frame_shape)
+    def _decode(self, frame: bytes | NDArray[T]) -> NDArray[T]:
+        """Decompress frame if compressed, otherwise return as-is."""
+        if self._compressed:
+            return np.frombuffer(
+                lz4.block.decompress(frame), dtype=self._dtype
+            ).reshape(self._shape)
         return frame
 
+    @classmethod
+    def from_frames(
+        cls,
+        frames: list[NDArray[T]],
+        compressed: bool = False,
+        dtype: np.dtype[T] | None = None,
+    ) -> "LazyFrames[T]":
+        """Create LazyFrames from a list of numpy arrays.
+
+        Args:
+            frames: List of numpy arrays to stack
+            compressed: Whether to LZ4 compress the frames
+            dtype: Override dtype (defaults to first frame's dtype)
+
+        Returns:
+            LazyFrames instance
+        """
+        dtype = dtype if dtype is not None else frames[0].dtype
+        shape = tuple(frames[0].shape)
+        encode = lz4.block.compress if compressed else (lambda x: x)
+        return cls(
+            frames=[encode(frame) for frame in frames],
+            _shape=shape,
+            _dtype=dtype,
+            _compressed=compressed,
+        )        
 
 class FrameStack(gym.ObservationWrapper):
     """Observation wrapper that stacks the observations in a rolling manner.
@@ -149,7 +161,7 @@ class FrameStack(gym.ObservationWrapper):
             :class:`LazyFrames` object for the wrapper's frame buffer,  :attr:`self.frames`
         """
         assert len(self.frames) == self.num_stack, (len(self.frames), self.num_stack)
-        return LazyFrames(list(self.frames), self.lz4_compress)
+        return LazyFrames.from_frames(list(self.frames), compressed=self.lz4_compress, dtype=self.observation_space.dtype)
 
     def step(self, action):
         """Steps through the environment, appending the observation to the frame buffer.
