@@ -1395,7 +1395,6 @@ def send_learner_status(
                 msg_type=MessageType.LEARNER_STATUS,
                 source_id=-1,
                 data=data,
-                },
             )
         )
     except Exception:
