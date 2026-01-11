@@ -105,6 +105,7 @@ def training_coordinator(mock_learner: MockLearner, shm_dir: Path, checkpoint_di
         learning_rate=1e-4,
         target_update_interval=100,
         checkpoint_interval=1000,
+        create_shm=True,  # Create shared memory files for testing
     )
 
 
@@ -183,6 +184,7 @@ def test_poll_gradients_from_pool(mock_learner: MockLearner, shm_dir: Path, chec
         num_workers=2,
         shm_dir=shm_dir,
         checkpoint_dir=checkpoint_dir,
+        create_shm=True,
     )
 
     # Write some gradients to pool
@@ -223,6 +225,7 @@ def test_lr_schedule_cosine_decay(mock_learner: MockLearner, shm_dir: Path, chec
         learning_rate=1e-4,
         lr_min=1e-5,
         lr_decay_steps=1000,
+        create_shm=True,
     )
 
     # At step 0, should be max LR

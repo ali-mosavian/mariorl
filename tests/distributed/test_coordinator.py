@@ -106,7 +106,7 @@ def mock_learner(mock_model: MockModel) -> MockLearner:
 
 
 @pytest.fixture
-def coordinator(mock_learner: MockLearner):
+def coordinator(mock_learner: MockLearner) -> "Coordinator":
     """Create a Coordinator for testing."""
     from mario_rl.distributed.coordinator import Coordinator
 
@@ -136,12 +136,12 @@ def test_coordinator_accepts_any_learner(mock_learner: MockLearner) -> None:
     assert coordinator.learner is mock_learner
 
 
-def test_coordinator_exposes_model(coordinator, mock_model: MockModel) -> None:
+def test_coordinator_exposes_model(coordinator: "Coordinator", mock_model: MockModel) -> None:
     """Coordinator should expose the underlying model."""
     assert coordinator.model is mock_model
 
 
-def test_coordinator_creates_optimizer(coordinator) -> None:
+def test_coordinator_creates_optimizer(coordinator: "Coordinator") -> None:
     """Coordinator should create an optimizer for the model."""
     assert coordinator.optimizer is not None
 
@@ -151,7 +151,7 @@ def test_coordinator_creates_optimizer(coordinator) -> None:
 # =============================================================================
 
 
-def test_aggregate_single_gradient(coordinator, sample_gradients: dict[str, Tensor]) -> None:
+def test_aggregate_single_gradient(coordinator: "Coordinator", sample_gradients: dict[str, Tensor]) -> None:
     """Aggregating a single gradient set should return it unchanged."""
     aggregated = coordinator.aggregate_gradients([sample_gradients])
 
@@ -159,7 +159,7 @@ def test_aggregate_single_gradient(coordinator, sample_gradients: dict[str, Tens
         assert torch.allclose(aggregated[name], sample_gradients[name])
 
 
-def test_aggregate_multiple_gradients(coordinator, mock_model: MockModel) -> None:
+def test_aggregate_multiple_gradients(coordinator: "Coordinator", mock_model: MockModel) -> None:
     """Aggregating multiple gradients should compute mean."""
     # Create 4 different gradient sets
     grad_sets = [
@@ -175,7 +175,7 @@ def test_aggregate_multiple_gradients(coordinator, mock_model: MockModel) -> Non
         assert torch.allclose(aggregated[name], expected)
 
 
-def test_aggregate_empty_list_raises(coordinator) -> None:
+def test_aggregate_empty_list_raises(coordinator: "Coordinator") -> None:
     """Aggregating empty gradient list should raise ValueError."""
     with pytest.raises(ValueError):
         coordinator.aggregate_gradients([])
@@ -186,7 +186,7 @@ def test_aggregate_empty_list_raises(coordinator) -> None:
 # =============================================================================
 
 
-def test_apply_gradients_updates_weights(coordinator, sample_gradients: dict[str, Tensor]) -> None:
+def test_apply_gradients_updates_weights(coordinator: "Coordinator", sample_gradients: dict[str, Tensor]) -> None:
     """apply_gradients should update model weights."""
     original_weights = {
         name: param.clone() for name, param in coordinator.model.named_parameters()
@@ -204,7 +204,7 @@ def test_apply_gradients_updates_weights(coordinator, sample_gradients: dict[str
     assert weights_changed
 
 
-def test_apply_gradients_uses_optimizer(coordinator, sample_gradients: dict[str, Tensor]) -> None:
+def test_apply_gradients_uses_optimizer(coordinator: "Coordinator", sample_gradients: dict[str, Tensor]) -> None:
     """apply_gradients should use the optimizer's step."""
     # Zero gradients first
     coordinator.optimizer.zero_grad()
@@ -221,7 +221,7 @@ def test_apply_gradients_uses_optimizer(coordinator, sample_gradients: dict[str,
 # =============================================================================
 
 
-def test_weights_returns_current_weights(coordinator) -> None:
+def test_weights_returns_current_weights(coordinator: "Coordinator") -> None:
     """weights should return current model weights."""
     weights = coordinator.weights()
 
@@ -229,7 +229,7 @@ def test_weights_returns_current_weights(coordinator) -> None:
         assert torch.equal(weights[name], param.data)
 
 
-def test_weights_are_detached(coordinator) -> None:
+def test_weights_are_detached(coordinator: "Coordinator") -> None:
     """weights should return detached tensors."""
     weights = coordinator.weights()
 
@@ -242,7 +242,7 @@ def test_weights_are_detached(coordinator) -> None:
 # =============================================================================
 
 
-def test_update_targets_delegates_to_learner(coordinator) -> None:
+def test_update_targets_delegates_to_learner(coordinator: "Coordinator") -> None:
     """update_targets should delegate to learner's update_targets."""
     initial_count = coordinator.learner._update_count
 
@@ -251,7 +251,7 @@ def test_update_targets_delegates_to_learner(coordinator) -> None:
     assert coordinator.learner._update_count == initial_count + 1
 
 
-def test_update_targets_with_different_tau(coordinator) -> None:
+def test_update_targets_with_different_tau(coordinator: "Coordinator") -> None:
     """update_targets should pass tau to learner."""
     coordinator.update_targets(tau=1.0)
     coordinator.update_targets(tau=0.001)
@@ -263,7 +263,7 @@ def test_update_targets_with_different_tau(coordinator) -> None:
 # =============================================================================
 
 
-def test_training_step_integrates_all_operations(coordinator, mock_model: MockModel) -> None:
+def test_training_step_integrates_all_operations(coordinator: "Coordinator", mock_model: MockModel) -> None:
     """A full training step should aggregate, apply, and return new weights."""
     # Create gradient sets from multiple workers
     grad_sets = [
@@ -281,7 +281,7 @@ def test_training_step_integrates_all_operations(coordinator, mock_model: MockMo
         assert not torch.equal(new_weights[name], original_weights[name])
 
 
-def test_training_step_returns_weights(coordinator, sample_gradients: dict[str, Tensor]) -> None:
+def test_training_step_returns_weights(coordinator: "Coordinator", sample_gradients: dict[str, Tensor]) -> None:
     """training_step should return updated weights for broadcasting."""
     new_weights = coordinator.training_step([sample_gradients])
 

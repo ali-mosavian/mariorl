@@ -7,9 +7,13 @@ These tests verify the SharedHeartbeat interface:
 """
 
 import time
+
 from pathlib import Path
+from typing import Iterator
 
 import pytest
+
+from mario_rl.distributed.shm_heartbeat import SharedHeartbeat
 
 
 # =============================================================================
@@ -26,10 +30,8 @@ def shm_dir(tmp_path: Path) -> Path:
 
 
 @pytest.fixture
-def heartbeat(shm_dir: Path):
+def heartbeat(shm_dir: Path) -> Iterator[SharedHeartbeat]:
     """Create a SharedHeartbeat for testing."""
-    from mario_rl.distributed.shm_heartbeat import SharedHeartbeat
-
     hb = SharedHeartbeat(num_workers=3, shm_dir=shm_dir)
     yield hb
     hb.close()
@@ -40,12 +42,12 @@ def heartbeat(shm_dir: Path):
 # =============================================================================
 
 
-def test_heartbeat_creates_successfully(heartbeat) -> None:
+def test_heartbeat_creates_successfully(heartbeat: SharedHeartbeat) -> None:
     """Heartbeat should create without error."""
     assert heartbeat is not None
 
 
-def test_heartbeat_creates_shm_file(heartbeat, shm_dir: Path) -> None:
+def test_heartbeat_creates_shm_file(heartbeat: SharedHeartbeat, shm_dir: Path) -> None:
     """Shared memory file should be created."""
     files = list(shm_dir.glob("*.shm"))
     assert len(files) == 1
@@ -56,20 +58,20 @@ def test_heartbeat_creates_shm_file(heartbeat, shm_dir: Path) -> None:
 # =============================================================================
 
 
-def test_update_worker_heartbeat(heartbeat) -> None:
+def test_update_worker_heartbeat(heartbeat: SharedHeartbeat) -> None:
     """Worker can update its heartbeat."""
     # Should not raise
     heartbeat.update(worker_id=0)
 
 
-def test_update_multiple_workers(heartbeat) -> None:
+def test_update_multiple_workers(heartbeat: SharedHeartbeat) -> None:
     """Multiple workers can update heartbeats."""
     heartbeat.update(worker_id=0)
     heartbeat.update(worker_id=1)
     heartbeat.update(worker_id=2)
 
 
-def test_get_heartbeat_time(heartbeat) -> None:
+def test_get_heartbeat_time(heartbeat: SharedHeartbeat) -> None:
     """Should retrieve heartbeat time for worker."""
     before = time.time()
     heartbeat.update(worker_id=0)
@@ -85,14 +87,14 @@ def test_get_heartbeat_time(heartbeat) -> None:
 # =============================================================================
 
 
-def test_is_stale_false_for_recent(heartbeat) -> None:
+def test_is_stale_false_for_recent(heartbeat: SharedHeartbeat) -> None:
     """Recent heartbeat should not be stale."""
     heartbeat.update(worker_id=0)
 
     assert not heartbeat.is_stale(worker_id=0, timeout=5.0)
 
 
-def test_is_stale_true_for_old(heartbeat) -> None:
+def test_is_stale_true_for_old(heartbeat: SharedHeartbeat) -> None:
     """Old heartbeat should be stale."""
     # Manually set old timestamp
     heartbeat._set_time(worker_id=0, timestamp=time.time() - 10.0)
@@ -100,12 +102,12 @@ def test_is_stale_true_for_old(heartbeat) -> None:
     assert heartbeat.is_stale(worker_id=0, timeout=5.0)
 
 
-def test_is_stale_true_for_never_updated(heartbeat) -> None:
+def test_is_stale_true_for_never_updated(heartbeat: SharedHeartbeat) -> None:
     """Worker that never sent heartbeat should be stale."""
     assert heartbeat.is_stale(worker_id=0, timeout=5.0)
 
 
-def test_stale_workers(heartbeat) -> None:
+def test_stale_workers(heartbeat: SharedHeartbeat) -> None:
     """stale_workers should return list of stale workers."""
     # Worker 0: recent
     heartbeat.update(worker_id=0)
@@ -127,7 +129,7 @@ def test_stale_workers(heartbeat) -> None:
 # =============================================================================
 
 
-def test_all_heartbeats(heartbeat) -> None:
+def test_all_heartbeats(heartbeat: SharedHeartbeat) -> None:
     """all_heartbeats should return all heartbeats."""
     heartbeat.update(worker_id=0)
     heartbeat.update(worker_id=1)

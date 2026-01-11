@@ -289,12 +289,12 @@ def aggregate_death_hotspots_from_csv(
     result = duckdb.sql("""
         WITH parsed AS (
             SELECT 
-                split_part(death_positions, ':', 1) AS level,
-                split_part(death_positions, ':', 2) AS positions_str
+                split_part(CAST(death_positions AS VARCHAR), ':', 1) AS level,
+                split_part(CAST(death_positions AS VARCHAR), ':', 2) AS positions_str
             FROM combined
             WHERE death_positions IS NOT NULL 
-              AND death_positions != ''
-              AND death_positions LIKE '%:%'
+              AND CAST(death_positions AS VARCHAR) != ''
+              AND CAST(death_positions AS VARCHAR) LIKE '%:%'
         ),
         exploded AS (
             SELECT 

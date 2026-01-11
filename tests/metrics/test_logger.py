@@ -12,13 +12,13 @@ from mario_rl.metrics.logger import MetricLogger
 
 
 @pytest.fixture
-def tmp_csv(tmp_path) -> Path:
+def tmp_csv(tmp_path: Path) -> Path:
     """Create temporary CSV path."""
     return tmp_path / "metrics.csv"
 
 
 @pytest.fixture
-def logger(tmp_csv) -> MetricLogger:
+def logger(tmp_csv: Path) -> MetricLogger:
     """Create a basic logger with DDQN schema."""
     return MetricLogger(
         source_id="worker.0",
@@ -32,27 +32,27 @@ def logger(tmp_csv) -> MetricLogger:
 # =============================================================================
 
 
-def test_counter_starts_at_zero(logger):
+def test_counter_starts_at_zero(logger: MetricLogger) -> None:
     """Counters start at zero."""
     snap = logger.snapshot()
     assert snap["episodes"] == 0
 
 
-def test_counter_increment_by_one(logger):
+def test_counter_increment_by_one(logger: MetricLogger) -> None:
     """count() increments counter by 1 by default."""
     logger.count("episodes")
     snap = logger.snapshot()
     assert snap["episodes"] == 1
 
 
-def test_counter_increment_by_n(logger):
+def test_counter_increment_by_n(logger: MetricLogger) -> None:
     """count() increments counter by n."""
     logger.count("steps", n=64)
     snap = logger.snapshot()
     assert snap["steps"] == 64
 
 
-def test_counter_accumulates(logger):
+def test_counter_accumulates(logger: MetricLogger) -> None:
     """Multiple count() calls accumulate."""
     logger.count("episodes")
     logger.count("episodes")
@@ -66,20 +66,20 @@ def test_counter_accumulates(logger):
 # =============================================================================
 
 
-def test_gauge_starts_at_zero(logger):
+def test_gauge_starts_at_zero(logger: MetricLogger) -> None:
     """Gauges start at zero."""
     snap = logger.snapshot()
     assert snap["epsilon"] == 0.0
 
 
-def test_gauge_set(logger):
+def test_gauge_set(logger: MetricLogger) -> None:
     """gauge() sets the current value."""
     logger.gauge("epsilon", 0.5)
     snap = logger.snapshot()
     assert snap["epsilon"] == 0.5
 
 
-def test_gauge_overwrites(logger):
+def test_gauge_overwrites(logger: MetricLogger) -> None:
     """gauge() overwrites previous value."""
     logger.gauge("epsilon", 0.5)
     logger.gauge("epsilon", 0.1)
@@ -92,20 +92,20 @@ def test_gauge_overwrites(logger):
 # =============================================================================
 
 
-def test_rolling_starts_at_zero(logger):
+def test_rolling_starts_at_zero(logger: MetricLogger) -> None:
     """Rolling averages start at zero (empty buffer)."""
     snap = logger.snapshot()
     assert snap["reward"] == 0.0
 
 
-def test_rolling_single_value(logger):
+def test_rolling_single_value(logger: MetricLogger) -> None:
     """observe() with single value returns that value."""
     logger.observe("reward", 100.0)
     snap = logger.snapshot()
     assert snap["reward"] == 100.0
 
 
-def test_rolling_average_of_multiple(logger):
+def test_rolling_average_of_multiple(logger: MetricLogger) -> None:
     """observe() computes average of multiple values."""
     logger.observe("reward", 100.0)
     logger.observe("reward", 200.0)
@@ -114,7 +114,7 @@ def test_rolling_average_of_multiple(logger):
     assert snap["reward"] == 200.0  # (100 + 200 + 300) / 3
 
 
-def test_rolling_respects_window_size(tmp_csv):
+def test_rolling_respects_window_size(tmp_csv: Path) -> None:
     """Rolling average respects configured window size."""
     logger = MetricLogger(
         source_id="test",
@@ -141,7 +141,7 @@ def test_rolling_respects_window_size(tmp_csv):
 # =============================================================================
 
 
-def test_snapshot_includes_timestamp(logger):
+def test_snapshot_includes_timestamp(logger: MetricLogger) -> None:
     """Snapshot includes timestamp."""
     before = time.time()
     snap = logger.snapshot()
@@ -149,7 +149,7 @@ def test_snapshot_includes_timestamp(logger):
     assert before <= snap["timestamp"] <= after
 
 
-def test_snapshot_includes_all_schema_metrics(logger):
+def test_snapshot_includes_all_schema_metrics(logger: MetricLogger) -> None:
     """Snapshot includes all metrics from schema."""
     snap = logger.snapshot()
     for defn in DDQNMetrics.definitions():
@@ -161,13 +161,13 @@ def test_snapshot_includes_all_schema_metrics(logger):
 # =============================================================================
 
 
-def test_flush_creates_csv(logger, tmp_csv):
+def test_flush_creates_csv(logger: MetricLogger, tmp_csv: Path) -> None:
     """flush() creates CSV file."""
     logger.flush()
     assert tmp_csv.exists()
 
 
-def test_flush_writes_header(logger, tmp_csv):
+def test_flush_writes_header(logger: MetricLogger, tmp_csv: Path) -> None:
     """flush() writes CSV header on first call."""
     logger.flush()
     with open(tmp_csv) as f:
@@ -178,7 +178,7 @@ def test_flush_writes_header(logger, tmp_csv):
         assert "reward" in header
 
 
-def test_flush_writes_data_row(logger, tmp_csv):
+def test_flush_writes_data_row(logger: MetricLogger, tmp_csv: Path) -> None:
     """flush() writes data row."""
     logger.count("episodes")
     logger.gauge("epsilon", 0.5)
@@ -193,7 +193,7 @@ def test_flush_writes_data_row(logger, tmp_csv):
         assert row["reward"] == "100.0"
 
 
-def test_multiple_flushes_append_rows(logger, tmp_csv):
+def test_multiple_flushes_append_rows(logger: MetricLogger, tmp_csv: Path) -> None:
     """Multiple flush() calls append rows."""
     logger.count("episodes")
     logger.flush()
@@ -214,7 +214,7 @@ def test_multiple_flushes_append_rows(logger, tmp_csv):
 # =============================================================================
 
 
-def test_flush_publishes_when_publisher_provided(tmp_csv):
+def test_flush_publishes_when_publisher_provided(tmp_csv: Path) -> None:
     """flush() publishes snapshot via EventPublisher."""
     mock_pub = Mock()
     logger = MetricLogger(
@@ -234,7 +234,7 @@ def test_flush_publishes_when_publisher_provided(tmp_csv):
     assert call_args[0][1]["source"] == "worker.0"
 
 
-def test_flush_without_publisher_succeeds(logger, tmp_csv):
+def test_flush_without_publisher_succeeds(logger: MetricLogger, tmp_csv: Path) -> None:
     """flush() works without publisher (CSV only)."""
     logger.count("episodes")
     logger.flush()  # Should not raise
@@ -246,7 +246,7 @@ def test_flush_without_publisher_succeeds(logger, tmp_csv):
 # =============================================================================
 
 
-def test_close_flushes_file(logger, tmp_csv):
+def test_close_flushes_file(logger: MetricLogger, tmp_csv: Path) -> None:
     """close() flushes and closes file."""
     logger.count("episodes")
     logger.flush()

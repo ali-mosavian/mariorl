@@ -2,6 +2,8 @@
 
 import logging
 
+from typing import Iterator
+
 import pytest
 
 from mario_rl.distributed.events import (
@@ -15,7 +17,7 @@ from mario_rl.distributed.events import (
 
 
 @pytest.fixture
-def endpoint():
+def endpoint() -> str:
     """Create a unique TCP endpoint for each test."""
     import random
     port = random.randint(30000, 60000)
@@ -23,7 +25,7 @@ def endpoint():
 
 
 @pytest.fixture
-def pub_sub(endpoint):
+def pub_sub(endpoint: str) -> Iterator[tuple[EventPublisher, EventSubscriber]]:
     """Create a publisher/subscriber pair (PUSH/PULL)."""
     sub = EventSubscriber(endpoint)  # PULL binds
     pub = EventPublisher(endpoint, source_id=0)  # PUSH connects
@@ -37,7 +39,7 @@ def pub_sub(endpoint):
 # =============================================================================
 
 
-def test_publisher_sends_and_subscriber_receives(pub_sub):
+def test_publisher_sends_and_subscriber_receives(pub_sub: tuple[EventPublisher, EventSubscriber]) -> None:
     """Publisher sends message, subscriber receives it."""
     pub, sub = pub_sub
     
@@ -53,7 +55,7 @@ def test_publisher_sends_and_subscriber_receives(pub_sub):
     assert events[0]["data"] == {"key": "value"}
 
 
-def test_log_method_sends_worker_log(pub_sub):
+def test_log_method_sends_worker_log(pub_sub: tuple[EventPublisher, EventSubscriber]) -> None:
     """log() sends worker_log when source_id >= 0."""
     pub, sub = pub_sub
     
@@ -68,7 +70,7 @@ def test_log_method_sends_worker_log(pub_sub):
     assert events[0]["data"]["text"] == "Hello world"
 
 
-def test_log_method_sends_learner_log_when_source_id_negative(endpoint):
+def test_log_method_sends_learner_log_when_source_id_negative(endpoint: str) -> None:
     """log() sends learner_log when source_id < 0."""
     import random
     import time
@@ -89,7 +91,7 @@ def test_log_method_sends_learner_log_when_source_id_negative(endpoint):
     sub.close()
 
 
-def test_status_method_sends_worker_status(pub_sub):
+def test_status_method_sends_worker_status(pub_sub: tuple[EventPublisher, EventSubscriber]) -> None:
     """status() sends worker_status with kwargs."""
     pub, sub = pub_sub
     
@@ -140,7 +142,7 @@ def test_format_event_status_returns_none():
 # =============================================================================
 
 
-def test_zmq_log_handler_emits_via_publisher(pub_sub):
+def test_zmq_log_handler_emits_via_publisher(pub_sub: tuple[EventPublisher, EventSubscriber]) -> None:
     """ZMQLogHandler routes log records through EventPublisher."""
     pub, sub = pub_sub
     
@@ -162,7 +164,7 @@ def test_zmq_log_handler_emits_via_publisher(pub_sub):
     assert events[0]["data"]["text"] == "Test message"
 
 
-def test_zmq_log_handler_respects_level(pub_sub):
+def test_zmq_log_handler_respects_level(pub_sub: tuple[EventPublisher, EventSubscriber]) -> None:
     """ZMQLogHandler respects logging level."""
     pub, sub = pub_sub
     
@@ -185,7 +187,7 @@ def test_zmq_log_handler_respects_level(pub_sub):
     assert "Warning message" in events[0]["data"]["text"]
 
 
-def test_zmq_log_handler_formats_message(pub_sub):
+def test_zmq_log_handler_formats_message(pub_sub: tuple[EventPublisher, EventSubscriber]) -> None:
     """ZMQLogHandler uses formatter."""
     pub, sub = pub_sub
     
@@ -213,7 +215,7 @@ def test_zmq_log_handler_formats_message(pub_sub):
 # =============================================================================
 
 
-def test_get_logger_creates_configured_logger(pub_sub):
+def test_get_logger_creates_configured_logger(pub_sub: tuple[EventPublisher, EventSubscriber]) -> None:
     """get_logger returns a logger that publishes via ZMQ."""
     pub, sub = pub_sub
     
@@ -228,7 +230,7 @@ def test_get_logger_creates_configured_logger(pub_sub):
     assert events[0]["data"]["text"] == "Factory test"
 
 
-def test_get_logger_sets_level(pub_sub):
+def test_get_logger_sets_level(pub_sub: tuple[EventPublisher, EventSubscriber]) -> None:
     """get_logger respects level parameter."""
     pub, sub = pub_sub
     
@@ -244,7 +246,7 @@ def test_get_logger_sets_level(pub_sub):
     assert "Should appear" in events[0]["data"]["text"]
 
 
-def test_get_logger_uses_custom_format(pub_sub):
+def test_get_logger_uses_custom_format(pub_sub: tuple[EventPublisher, EventSubscriber]) -> None:
     """get_logger applies custom format string."""
     pub, sub = pub_sub
     
@@ -259,7 +261,7 @@ def test_get_logger_uses_custom_format(pub_sub):
     assert events[0]["data"]["text"] == "[CUSTOM] Hello"
 
 
-def test_get_logger_does_not_propagate(pub_sub):
+def test_get_logger_does_not_propagate(pub_sub: tuple[EventPublisher, EventSubscriber]) -> None:
     """get_logger disables propagation to root logger."""
     pub, _ = pub_sub
     
