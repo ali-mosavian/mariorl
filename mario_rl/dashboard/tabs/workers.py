@@ -101,13 +101,14 @@ def render_workers_tab(workers: dict[int, pd.DataFrame]) -> None:
         with col_e2:
             _render_elite_quality_chart(workers, colors)
 
-    # Row 6: Action entropy and distribution (DDQN only)
-    if model_type != "dreamer":
-        col9, col10 = st.columns(2)
-        with col9:
-            _render_action_entropy_chart(workers, colors)
-        with col10:
-            _render_action_distribution_heatmap(workers)
+    # Row 6: Action entropy and distribution (both models)
+    col9, col10 = st.columns(2)
+    with col9:
+        # Dreamer tracks entropy in behavior loss, DDQN tracks action_entropy
+        entropy_col = "entropy" if model_type == "dreamer" else "action_entropy"
+        _render_worker_chart(workers, entropy_col, "Policy Entropy by Worker", colors)
+    with col10:
+        _render_action_distribution_heatmap(workers)
 
 
 def _render_summary_table(workers: dict[int, pd.DataFrame], model_type: str = "ddqn") -> None:

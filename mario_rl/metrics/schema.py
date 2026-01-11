@@ -158,6 +158,10 @@ class DreamerMetrics(CommonMetrics):
     VALUE_MEAN = MetricDef("value_mean", MetricType.ROLLING)
     RETURN_MEAN = MetricDef("return_mean", MetricType.ROLLING)
     
+    # Action tracking (from data collection, same as DDQN)
+    ACTION_ENTROPY = MetricDef("action_entropy", MetricType.GAUGE)
+    ACTION_DIST = MetricDef("action_dist", MetricType.TEXT)
+    
     @classmethod
     def definitions(cls) -> list[MetricDef]:
         """Return list of all Dreamer metric definitions."""
@@ -173,6 +177,8 @@ class DreamerMetrics(CommonMetrics):
             cls.ENTROPY,
             cls.VALUE_MEAN,
             cls.RETURN_MEAN,
+            cls.ACTION_ENTROPY,
+            cls.ACTION_DIST,
         ]
 
 
