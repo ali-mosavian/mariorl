@@ -305,14 +305,37 @@ class TrainingWorker:
 
         # Track training metrics
         if self.logger is not None:
+            # Common metrics
             if "loss" in metrics:
                 self.logger.observe("loss", float(metrics["loss"]))
+            if "entropy" in metrics:
+                self.logger.observe("entropy", float(metrics["entropy"]))
+            
+            # DDQN-specific metrics
             if "q_mean" in metrics:
                 self.logger.observe("q_mean", float(metrics["q_mean"]))
             if "td_error" in metrics:
                 self.logger.observe("td_error", float(metrics["td_error"]))
-            if "entropy" in metrics:
-                self.logger.observe("entropy", float(metrics["entropy"]))
+            if "q_max" in metrics:
+                self.logger.gauge("q_max", float(metrics["q_max"]))
+            
+            # Dreamer-specific metrics
+            if "wm_loss" in metrics:
+                self.logger.observe("wm_loss", float(metrics["wm_loss"]))
+            if "dynamics_loss" in metrics:
+                self.logger.observe("dynamics_loss", float(metrics["dynamics_loss"]))
+            if "reward_loss" in metrics:
+                self.logger.observe("reward_loss", float(metrics["reward_loss"]))
+            if "behavior_loss" in metrics:
+                self.logger.observe("behavior_loss", float(metrics["behavior_loss"]))
+            if "actor_loss" in metrics:
+                self.logger.observe("actor_loss", float(metrics["actor_loss"]))
+            if "critic_loss" in metrics:
+                self.logger.observe("critic_loss", float(metrics["critic_loss"]))
+            if "value_mean" in metrics:
+                self.logger.observe("value_mean", float(metrics["value_mean"]))
+            if "return_mean" in metrics:
+                self.logger.observe("return_mean", float(metrics["return_mean"]))
 
         return gradients, metrics
 
