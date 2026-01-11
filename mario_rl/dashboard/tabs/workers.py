@@ -88,25 +88,26 @@ def render_workers_tab(workers: dict[int, pd.DataFrame]) -> None:
         with col8:
             _render_beta_or_buffer_chart(workers, colors)
 
-    # Row 5: Entropy (for Dreamer) or Elite Buffer (for DDQN)
+    # Row 5: Model-specific charts
     col_e1, col_e2 = st.columns(2)
     if model_type == "dreamer":
+        # Dreamer: Policy entropy (from actor loss) and Value estimates
         with col_e1:
-            _render_worker_chart(workers, "entropy", "Policy Entropy by Worker", colors)
+            _render_worker_chart(workers, "entropy", "Policy Entropy (Actor)", colors, key="dreamer_entropy")
         with col_e2:
             _render_worker_chart(workers, "value_mean", "Value Mean by Worker", colors)
     else:
+        # DDQN: Elite buffer charts
         with col_e1:
             _render_elite_buffer_chart(workers, colors)
         with col_e2:
             _render_elite_quality_chart(workers, colors)
 
-    # Row 6: Action entropy and distribution (both models)
+    # Row 6: Action distribution (empirical, from actual actions taken)
     col9, col10 = st.columns(2)
     with col9:
-        # Dreamer tracks entropy in behavior loss, DDQN tracks action_entropy
-        entropy_col = "entropy" if model_type == "dreamer" else "action_entropy"
-        _render_worker_chart(workers, entropy_col, "Policy Entropy by Worker", colors)
+        # action_entropy is computed from actual action distribution during rollouts
+        _render_worker_chart(workers, "action_entropy", "Action Entropy (Empirical)", colors, key="action_entropy")
     with col10:
         _render_action_distribution_heatmap(workers)
 
@@ -206,6 +207,7 @@ def _render_worker_chart(
     colors: list[str],
     x_column: str = "episodes",
     show_legend: bool = False,
+    key: str | None = None,
 ) -> None:
     """Render a comparison chart for a single metric across workers."""
     fig = go.Figure()
@@ -233,7 +235,9 @@ def _render_worker_chart(
     if show_legend:
         fig.update_layout(legend=dict(orientation="h", yanchor="bottom", y=1.02))
     
-    st.plotly_chart(fig, use_container_width=True)
+    # Use column name as key if not provided
+    chart_key = key or f"worker_chart_{column}"
+    st.plotly_chart(fig, use_container_width=True, key=chart_key)
 
 
 def _render_epsilon_chart(workers: dict[int, pd.DataFrame], colors: list[str]) -> None:
