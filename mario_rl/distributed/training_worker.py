@@ -301,6 +301,10 @@ class TrainingWorker:
         if not self.mcts_enabled or self._mcts_explorer is None:
             return False
 
+        # If periodic_interval is 1, ALWAYS use MCTS (every episode)
+        if self.mcts_periodic_interval == 1:
+            return True
+
         # Check stuck trigger
         if self._steps_without_x_progress >= self.mcts_stuck_threshold:
             return True
