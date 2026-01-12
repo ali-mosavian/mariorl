@@ -4,12 +4,15 @@ Implements the Learner protocol for Dreamer:
 1. World Model Training: reconstruction, dynamics, reward prediction
 2. Behavior Learning: actor-critic trained on imagined trajectories
 
-Key improvements to prevent decoder collapse:
+Key improvements to prevent encoder/decoder collapse:
 - SSIM as primary reconstruction loss
-- Free bits in KL loss
+- Aggressive free bits (5.0) to guarantee information flow
+- Contrastive diversity loss to push apart different latents
+- Variance regularization to prevent constant outputs
+- Delayed KL warmup (no penalty for first 20k steps)
+- Very gentle KL penalty (max_beta=0.001, was 0.05)
 - KL balancing between encoder/decoder
 - Spatially-weighted MSE for stability
-- Beta warmup schedule for KL weight
 """
 
 from typing import Any
@@ -85,22 +88,95 @@ def compute_spatial_weights(frames: Tensor, percentile: float = 75) -> Tensor:
     return weights
 
 
+def contrastive_latent_loss(z: Tensor, temperature: float = 0.1) -> Tensor:
+    """
+    Contrastive loss to maximize diversity between different inputs.
+    
+    Forces encoder to produce diverse latent codes for different observations.
+    Minimizes cosine similarity between different samples in the batch.
+    
+    Args:
+        z: (batch_size, latent_dim) - encoded latents
+        temperature: Temperature for scaling similarities
+    
+    Returns:
+        Loss encouraging low similarity between different samples
+    """
+    if z.size(0) < 2:
+        return torch.tensor(0.0, device=z.device)
+    
+    # Normalize latents
+    z_norm = F.normalize(z, dim=1)
+    
+    # Cosine similarity matrix (batch_size, batch_size)
+    similarity = torch.matmul(z_norm, z_norm.t()) / temperature
+    
+    # Create mask for off-diagonal elements (different samples)
+    mask = torch.eye(z.size(0), device=z.device).bool()
+    
+    # Off-diagonal similarities (these should be LOW for diversity)
+    off_diag_sim = similarity.masked_select(~mask)
+    
+    # Penalize high off-diagonal similarity
+    diversity_loss = off_diag_sim.pow(2).mean()
+    
+    return diversity_loss
+
+
+def latent_diversity_loss(z: Tensor, target_std: float = 1.0) -> Tensor:
+    """
+    Encourage high variance across batch for each latent dimension.
+    
+    Prevents encoder from collapsing to constant outputs by explicitly
+    maximizing the standard deviation of latents across the batch.
+    
+    Args:
+        z: (batch_size, latent_dim)
+        target_std: Target standard deviation per dimension
+    
+    Returns:
+        Loss penalizing low variance in latents
+    """
+    if z.size(0) < 2:
+        return torch.tensor(0.0, device=z.device)
+    
+    # Compute std per dimension across batch
+    z_std = z.std(dim=0)  # (latent_dim,)
+    
+    # Penalize if std is too low (want high diversity)
+    diversity_loss = F.relu(target_std - z_std).mean()
+    
+    return diversity_loss
+
+
 @dataclass
 class BetaScheduler:
-    """Warmup schedule for KL weight to prevent early collapse."""
+    """Warmup schedule for KL weight to prevent early collapse.
     
-    max_beta: float = 0.05
-    warmup_steps: int = 50000
+    Strategy: Delay KL regularization to let encoder/decoder learn first,
+    then gradually introduce KL penalty over a long warmup period.
+    """
+    
+    max_beta: float = 0.001  # Much lower than before (was 0.05)
+    warmup_steps: int = 200000  # Much longer warmup (was 50000)
     start_beta: float = 0.0
+    delay_steps: int = 20000  # NEW: No KL penalty for first 20k steps
     step_count: int = field(init=False, default=0)
     
     def get_beta(self) -> float:
-        """Get current KL weight."""
-        if self.step_count >= self.warmup_steps:
-            return self.max_beta
+        """Get current KL weight with delayed start."""
+        # Phase 1: No KL penalty during delay period
+        if self.step_count < self.delay_steps:
+            return 0.0
         
-        progress = self.step_count / self.warmup_steps
-        return self.start_beta + (self.max_beta - self.start_beta) * progress
+        # Phase 2: Gradual warmup after delay
+        effective_step = self.step_count - self.delay_steps
+        if effective_step < self.warmup_steps:
+            progress = effective_step / self.warmup_steps
+            return self.start_beta + (self.max_beta - self.start_beta) * progress
+        
+        # Phase 3: Constant at max_beta
+        return self.max_beta
     
     def step(self) -> None:
         """Increment step counter."""
@@ -131,16 +207,22 @@ class DreamerLearner:
     mse_weight: float = 0.1  # Weight for MSE in combined loss (SSIM + mse_weight * MSE)
     
     # KL configuration
-    kl_free_bits: float = 1.0
+    kl_free_bits: float = 5.0  # INCREASED from 1.0 - allow much more info through bottleneck
     kl_balance_alpha: float = 0.8
     use_kl_balancing: bool = True
     kl_imagination_scale: float = 0.1  # Regularize imagined latents
     
-    # Beta warmup
+    # Diversity loss to prevent encoder collapse
+    diversity_scale: float = 0.1  # NEW: Contrastive loss weight
+    variance_scale: float = 0.05  # NEW: Variance regularization weight
+    target_latent_std: float = 1.0  # Target std for latent dimensions
+    
+    # Beta warmup (much more conservative now)
     beta_scheduler: BetaScheduler = field(default_factory=lambda: BetaScheduler(
-        max_beta=0.05,
-        warmup_steps=50000,
-        start_beta=0.0
+        max_beta=0.001,      # DECREASED from 0.05 - much gentler KL penalty
+        warmup_steps=200000, # INCREASED from 50000 - slower ramp
+        start_beta=0.0,
+        delay_steps=20000    # NEW: No KL for first 20k steps
     ))
     
     # Spatial weighting
@@ -220,6 +302,13 @@ class DreamerLearner:
         
         kl_weight = self.beta_scheduler.get_beta()
 
+        # 2b. Diversity losses to prevent encoder collapse
+        # Contrastive loss: push apart latents from different inputs
+        diversity_loss_contrastive = contrastive_latent_loss(z, temperature=0.1)
+        
+        # Variance loss: ensure latents have sufficient spread
+        diversity_loss_variance = latent_diversity_loss(z, target_std=self.target_latent_std)
+
         # 3. Dynamics loss
         z_next_pred, _, z_next_mu = self.model.dynamics(z, actions)
         dynamics_loss = F.mse_loss(z_next_mu, z_next_target)
@@ -232,6 +321,8 @@ class DreamerLearner:
         wm_loss = (
             self.recon_scale * recon_loss
             + kl_weight * kl_loss
+            + self.diversity_scale * diversity_loss_contrastive
+            + self.variance_scale * diversity_loss_variance
             + self.dynamics_scale * dynamics_loss
             + self.reward_scale * reward_loss
         )
@@ -242,6 +333,10 @@ class DreamerLearner:
             "ssim_loss": ssim_loss.item(),
             "mse_loss": mse_loss.item(),
             "kl_loss": kl_loss.item(),
+            "kl_weight": kl_weight,
+            "diversity_contrastive": diversity_loss_contrastive.item(),
+            "diversity_variance": diversity_loss_variance.item(),
+            "latent_std": z.std().item(),  # Monitor actual latent diversity
             "dynamics_loss": dynamics_loss.item(),
             "reward_loss": reward_loss.item(),
             "wm_loss": wm_loss.item(),

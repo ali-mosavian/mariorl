@@ -12,6 +12,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 
 from pathlib import Path
+from pytorch_msssim import ssim
 
 from mario_rl.agent.world_model import MarioWorldModel
 from mario_rl.models.dreamer import DreamerModel
@@ -187,6 +188,11 @@ def visualize_comparison(
         # Normalize real frame to [0, 1] for display
         real_norm = real / 255.0
         
+        # Compute SSIM for this frame
+        real_tensor = torch.from_numpy(real_norm).unsqueeze(0).unsqueeze(0).float()
+        recon_tensor = torch.from_numpy(recon).unsqueeze(0).unsqueeze(0).float()
+        ssim_val = ssim(real_tensor, recon_tensor, data_range=1.0, size_average=True).item()
+        
         # Compute absolute difference
         diff = np.abs(real_norm - recon)
         
@@ -202,7 +208,7 @@ def visualize_comparison(
         
         # Display difference (use hot colormap for better visibility)
         im = axes[2, col].imshow(diff, cmap="hot", vmin=0, vmax=0.5)
-        axes[2, col].set_title(f"Diff\nMSE: {np.mean(diff**2):.4f}", fontsize=8)
+        axes[2, col].set_title(f"Diff\nSSIM: {ssim_val:.4f}", fontsize=8)
         axes[2, col].axis("off")
     
     # Add row labels
@@ -227,19 +233,25 @@ def compute_metrics(
     real_frames: list[np.ndarray],
     recon_frames: list[np.ndarray],
 ) -> dict[str, float]:
-    """Compute reconstruction quality metrics."""
-    mse_list = []
+    """Compute reconstruction quality metrics using SSIM."""
+    ssim_list = []
     
     for real, recon in zip(real_frames, recon_frames):
         real_norm = real / 255.0
-        mse = np.mean((real_norm - recon) ** 2)
-        mse_list.append(mse)
+        
+        # Convert to tensors for SSIM computation
+        real_tensor = torch.from_numpy(real_norm).unsqueeze(0).unsqueeze(0).float()
+        recon_tensor = torch.from_numpy(recon).unsqueeze(0).unsqueeze(0).float()
+        
+        # Compute SSIM
+        ssim_val = ssim(real_tensor, recon_tensor, data_range=1.0, size_average=True).item()
+        ssim_list.append(ssim_val)
     
     return {
-        "mse_mean": float(np.mean(mse_list)),
-        "mse_std": float(np.std(mse_list)),
-        "mse_min": float(np.min(mse_list)),
-        "mse_max": float(np.max(mse_list)),
+        "ssim_mean": float(np.mean(ssim_list)),
+        "ssim_std": float(np.std(ssim_list)),
+        "ssim_min": float(np.min(ssim_list)),
+        "ssim_max": float(np.max(ssim_list)),
     }
 
 
@@ -326,10 +338,10 @@ def main(
     # Compute metrics
     metrics = compute_metrics(real_frames, recon_frames)
     print("\nReconstruction Metrics:")
-    print(f"  MSE Mean: {metrics['mse_mean']:.6f}")
-    print(f"  MSE Std:  {metrics['mse_std']:.6f}")
-    print(f"  MSE Min:  {metrics['mse_min']:.6f}")
-    print(f"  MSE Max:  {metrics['mse_max']:.6f}")
+    print(f"  SSIM Mean: {metrics['ssim_mean']:.6f}")
+    print(f"  SSIM Std:  {metrics['ssim_std']:.6f}")
+    print(f"  SSIM Min:  {metrics['ssim_min']:.6f}")
+    print(f"  SSIM Max:  {metrics['ssim_max']:.6f}")
     
     # Create visualization
     print("\nCreating visualization...")
