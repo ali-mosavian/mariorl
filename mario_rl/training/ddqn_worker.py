@@ -52,6 +52,12 @@ from mario_rl.core.reward_normalizer import RewardNormalizer
 from mario_rl.training.shared_gradient_tensor import SharedGradientTensor
 from mario_rl.training.shared_gradient_tensor import attach_tensor_buffer
 
+# MCTS imports
+from mario_rl.mcts import MCTSExplorer
+from mario_rl.mcts import MCTSConfig as MCTSExplorerConfig
+from mario_rl.mcts import DDQNAdapter
+from mario_rl.mcts import DreamerAdapter
+
 
 @dataclass
 class DDQNWorker:
@@ -103,6 +109,12 @@ class DDQNWorker:
 
     # Reward normalization
     _reward_normalizer: Optional[RewardNormalizer] = field(init=False, default=None)
+
+    # MCTS exploration (optional)
+    mcts_explorer: Optional[MCTSExplorer] = field(init=False, default=None)
+    _steps_without_x_progress: int = field(init=False, default=0)
+    _last_best_x: int = field(init=False, default=0)
+    _mcts_episodes_since_last: int = field(init=False, default=0)
 
     # Episode transition tracking for elite buffer
     _episode_transitions: list = field(init=False, default_factory=list)
@@ -295,6 +307,38 @@ class DDQNWorker:
                                 self.metrics.episode_count = last_episode
                 except Exception:
                     pass  # Keep default episode_count = 0
+
+        # Initialize MCTS explorer if enabled
+        if self.config.mcts.enabled:
+            mcts_cfg = self.config.mcts
+
+            # Create appropriate adapter based on network type
+            mcts_adapter: DDQNAdapter | DreamerAdapter
+            torch_device = torch.device(device)
+            if self.config.use_dreamer:
+                mcts_adapter = DreamerAdapter(net=self.net, device=torch_device)  # type: ignore[arg-type]
+            else:
+                mcts_adapter = DDQNAdapter(net=self.net, device=torch_device)
+
+            # Create MCTS explorer with config
+            self.mcts_explorer = MCTSExplorer(
+                config=MCTSExplorerConfig(
+                    num_simulations=mcts_cfg.num_simulations,
+                    max_rollout_depth=mcts_cfg.max_rollout_depth,
+                    exploration_constant=mcts_cfg.exploration_constant,
+                    discount=mcts_cfg.discount,
+                    rollout_policy=mcts_cfg.rollout_policy,  # type: ignore
+                    policy_mix_ratio=mcts_cfg.policy_mix_ratio,
+                    value_source=mcts_cfg.value_source,  # type: ignore
+                ),
+                policy=mcts_adapter,
+                value_fn=mcts_adapter,
+                num_actions=self.action_dim,
+                world_model=mcts_adapter if self.config.use_dreamer else None,  # type: ignore
+            )
+            self.ui.log(f"MCTS enabled: {mcts_cfg.num_simulations} sims, "
+                       f"stuck_threshold={mcts_cfg.stuck_threshold}, "
+                       f"periodic={mcts_cfg.periodic_interval}")
 
     def _preprocess_state(self, state: np.ndarray) -> np.ndarray:
         """Convert state from (4, 64, 64, 1) to (4, 64, 64)."""
@@ -578,6 +622,152 @@ class DDQNWorker:
         self._current_state = state
         return episodes_completed
 
+    def _get_frame_stack_obs(self, env: Any) -> np.ndarray:
+        """Get current observation from frame stack wrapper."""
+        # Access the frame stack through the wrapper chain
+        obs = np.array(self._fstack.frames)
+        return self._preprocess_state(obs)
+
+    def collect_with_mcts(self) -> int:
+        """
+        Collect experiences using MCTS exploration.
+        
+        MCTS explores multiple branches using emulator save/restore,
+        collecting ALL transitions (good and bad) for training.
+        Then executes the best action in the real environment.
+        
+        Returns:
+            Number of transitions collected
+        """
+        if self.mcts_explorer is None:
+            return 0
+
+        # Ensure we have a current state
+        if self._current_state is None:
+            state, _ = self.env.reset()
+            self._current_state = state
+            if self.snapshots:
+                self.snapshots.reset()
+        
+        # Get processed observation for MCTS
+        obs = self._preprocess_state(self._current_state)
+        
+        # Clear visited states for fresh exploration
+        self.mcts_explorer.clear_visited_states()
+        
+        # Run MCTS exploration - collects all transitions from all branches
+        result = self.mcts_explorer.explore(
+            env=self.env,
+            root_obs=obs,
+            get_obs_fn=self._get_frame_stack_obs,
+        )
+        
+        # Add all transitions to buffers
+        transitions_added = 0
+        for transition in result.transitions:
+            # Process the transition (normalize reward if needed)
+            processed_reward = transition.reward
+            if self.config.reward_norm == "running" and self._reward_normalizer is not None:
+                processed_reward = self._reward_normalizer.normalize(transition.reward)
+            elif self.config.reward_norm == "scale":
+                processed_reward = transition.reward * self.config.reward_scale
+                if self.config.reward_clip > 0:
+                    processed_reward = float(np.clip(processed_reward, -self.config.reward_clip, self.config.reward_clip))
+            
+            # Create processed transition
+            processed_transition = Transition(
+                state=transition.state,
+                action=transition.action,
+                reward=processed_reward,
+                next_state=transition.next_state,
+                done=transition.done,
+                flag_get=transition.flag_get,
+                max_x=transition.max_x,
+            )
+            
+            # Add to buffer (skip n-step for MCTS transitions)
+            self.buffer.add(processed_transition)
+            transitions_added += 1
+        
+        # Now execute the best action in the real environment
+        best_action = result.best_action
+        next_state, reward, terminated, truncated, info = self.env.step(best_action)
+        done = terminated or truncated
+        
+        # Update metrics
+        self.metrics.total_steps += 1
+        x_pos = info.get("x_pos", 0)
+        self.metrics.update_best_x(x_pos)
+        self.episode.step(reward, x_pos)
+        
+        # Track for stuck detection
+        if x_pos > self._last_best_x:
+            self._last_best_x = x_pos
+            self._steps_without_x_progress = 0
+        else:
+            self._steps_without_x_progress += 1
+        
+        # Handle episode end
+        if done:
+            self.metrics.episode_count += 1
+            flag_get = info.get("flag_get", False)
+            is_dead = info.get("is_dead", False) or info.get("is_dying", False)
+            is_timeout = info.get("is_timeout", False)
+            
+            if flag_get:
+                self.metrics.flags += 1
+                self.metrics.add_flag(info.get("time", 0))
+            elif is_timeout:
+                self.metrics.add_timeout()
+            elif is_dead:
+                self.metrics.add_death(x_pos)
+            
+            self.metrics.add_reward(self.episode.reward)
+            self._log_episode(info)
+            self._send_ui_status(info)
+            
+            # Reset for new episode
+            state, _ = self.env.reset()
+            self._current_state = state
+            if self.snapshots:
+                self.snapshots.reset()
+            self.episode.reset()
+            self._mcts_episodes_since_last = 0
+            self._steps_without_x_progress = 0
+            self._last_best_x = 0
+        else:
+            self._current_state = next_state
+        
+        self.ui.log(f"MCTS: collected {transitions_added} transitions, best_action={best_action}")
+        return transitions_added
+
+    def should_use_mcts(self) -> bool:
+        """
+        Determine if we should use MCTS exploration this step.
+        
+        Hybrid mode triggers:
+        1. When stuck (no x progress for N steps)
+        2. Periodically (every M episodes)
+        """
+        if self.mcts_explorer is None or not self.config.mcts.enabled:
+            return False
+        
+        mcts_cfg = self.config.mcts
+        
+        # Check stuck trigger
+        if mcts_cfg.use_when_stuck:
+            if self._steps_without_x_progress >= mcts_cfg.stuck_threshold:
+                self.ui.log(f"MCTS triggered: stuck for {self._steps_without_x_progress} steps")
+                return True
+        
+        # Check periodic trigger
+        if mcts_cfg.use_periodically:
+            if self._mcts_episodes_since_last >= mcts_cfg.periodic_interval:
+                self.ui.log(f"MCTS triggered: periodic (every {mcts_cfg.periodic_interval} episodes)")
+                return True
+        
+        return False
+
     def compute_and_send_gradients(self) -> Dict[str, float]:
         """Sample from PER buffer + elite buffer, compute loss, and send gradients."""
         if len(self.buffer) < self.config.buffer.batch_size:
@@ -796,8 +986,17 @@ class DDQNWorker:
                 self.metrics.weight_sync_count = self.weights.count
                 self.ui.log(f"Synced weights v{self.weights.version}")
 
-            self.collect_steps(self.config.steps_per_collection)
-            self.timing.update_speed(self.config.steps_per_collection)
+            # Collect experiences (hybrid: MCTS or epsilon-greedy)
+            if self.should_use_mcts():
+                # MCTS exploration - collects many transitions per call
+                transitions_collected = self.collect_with_mcts()
+                self._steps_without_x_progress = 0  # Reset stuck counter after MCTS
+                self.timing.update_speed(transitions_collected)
+            else:
+                # Standard epsilon-greedy collection
+                self.collect_steps(self.config.steps_per_collection)
+                self.timing.update_speed(self.config.steps_per_collection)
+                self._mcts_episodes_since_last += 1  # Track episodes for periodic trigger
 
             if len(self.buffer) >= self.config.buffer.batch_size:
                 for _ in range(self.config.train_steps):

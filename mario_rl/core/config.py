@@ -59,6 +59,33 @@ class SnapshotConfig:
 
 
 @dataclass(frozen=True)
+class MCTSConfig:
+    """Configuration for MCTS exploration integration."""
+
+    enabled: bool = False  # Whether to use MCTS at all
+
+    # MCTS parameters
+    num_simulations: int = 50  # MCTS simulations per exploration
+    max_rollout_depth: int = 20  # Max depth of rollouts
+    exploration_constant: float = 1.41  # UCB exploration constant
+    discount: float = 0.99  # Discount factor for rollouts
+
+    # Rollout policy: "random", "policy", "mixed"
+    rollout_policy: str = "mixed"
+    policy_mix_ratio: float = 0.7  # 70% policy, 30% random
+
+    # Value estimation: "rollout", "network", "mixed"
+    value_source: str = "mixed"
+
+    # When to use MCTS (hybrid mode triggers)
+    use_when_stuck: bool = True  # Use MCTS when no x progress
+    stuck_threshold: int = 500  # Steps without x progress to trigger MCTS
+
+    use_periodically: bool = True  # Use MCTS every N episodes
+    periodic_interval: int = 10  # Every N episodes, use MCTS for one episode
+
+
+@dataclass(frozen=True)
 class WorkerConfig:
     """Configuration for a DDQN worker."""
 
@@ -101,6 +128,7 @@ class WorkerConfig:
     buffer: BufferConfig = BufferConfig()
     exploration: ExplorationConfig = ExplorationConfig()
     snapshot: SnapshotConfig = SnapshotConfig()
+    mcts: MCTSConfig = MCTSConfig()  # MCTS exploration (disabled by default)
 
     def with_epsilon(self, epsilon_end: float) -> "WorkerConfig":
         """Create a new config with different epsilon_end (for per-worker exploration)."""
@@ -108,6 +136,8 @@ class WorkerConfig:
             worker_id=self.worker_id,
             level=self.level,
             render_frames=self.render_frames,
+            use_dreamer=self.use_dreamer,
+            latent_dim=self.latent_dim,
             steps_per_collection=self.steps_per_collection,
             train_steps=self.train_steps,
             weight_sync_interval=self.weight_sync_interval,
@@ -127,6 +157,7 @@ class WorkerConfig:
                 decay_steps=self.exploration.decay_steps,
             ),
             snapshot=self.snapshot,
+            mcts=self.mcts,
         )
 
 
@@ -188,6 +219,8 @@ class TrainingConfig:
                 worker_id=i,
                 level=self.level,
                 render_frames=self.worker.render_frames,
+                use_dreamer=self.worker.use_dreamer,
+                latent_dim=self.worker.latent_dim,
                 steps_per_collection=self.worker.steps_per_collection,
                 train_steps=self.worker.train_steps,
                 weight_sync_interval=self.worker.weight_sync_interval,
@@ -207,6 +240,7 @@ class TrainingConfig:
                     decay_steps=self.worker.exploration.decay_steps,
                 ),
                 snapshot=self.worker.snapshot,
+                mcts=self.worker.mcts,
             )
             configs.append(config)
         return configs
