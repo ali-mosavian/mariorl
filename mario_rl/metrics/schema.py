@@ -69,6 +69,13 @@ class CommonMetrics:
     # Death tracking (positions stored as comma-separated string)
     DEATH_POSITIONS = MetricDef("death_positions", MetricType.TEXT)
     
+    # MCTS metrics
+    MCTS_USED = MetricDef("mcts_used", MetricType.GAUGE)
+    MCTS_RUNS = MetricDef("mcts_runs", MetricType.GAUGE)
+    MCTS_AVG_ROLLOUTS = MetricDef("mcts_avg_rollouts", MetricType.GAUGE)
+    MCTS_AVG_TREE_DEPTH = MetricDef("mcts_avg_tree_depth", MetricType.GAUGE)
+    MCTS_AVG_TREE_SIZE = MetricDef("mcts_avg_tree_size", MetricType.GAUGE)
+    
     @classmethod
     def definitions(cls) -> list[MetricDef]:
         """Return list of all common metric definitions."""
@@ -94,6 +101,11 @@ class CommonMetrics:
             cls.SNAPSHOT_SAVES,
             cls.SNAPSHOT_RESTORES,
             cls.DEATH_POSITIONS,
+            cls.MCTS_USED,
+            cls.MCTS_RUNS,
+            cls.MCTS_AVG_ROLLOUTS,
+            cls.MCTS_AVG_TREE_DEPTH,
+            cls.MCTS_AVG_TREE_SIZE,
         ]
 
 
