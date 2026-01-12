@@ -96,7 +96,11 @@ def create_model_and_learner(
     config: Config,
     device: torch.device | None = None,
 ) -> tuple[nn.Module, Any]:
-    """Create model and learner from config."""
+    """Create model and learner from config.
+    
+    If MCTS is enabled, also creates and injects the appropriate adapter
+    into the learner for use by MCTSExplorer.
+    """
     if config.model == "ddqn":
         from mario_rl.models.ddqn import DoubleDQN, DDQNConfig
         from mario_rl.learners.ddqn import DDQNLearner
@@ -112,11 +116,19 @@ def create_model_and_learner(
         )
         if device:
             model = model.to(device)
+
+        # Create MCTS adapter if enabled
+        mcts_adapter = None
+        if config.mcts_enabled and device:
+            from mario_rl.mcts import DDQNAdapter
+            mcts_adapter = DDQNAdapter(net=model, device=device)
+
         learner = DDQNLearner(
             model=model,
             gamma=config.gamma,
             n_step=config.n_step,
             entropy_coef=config.entropy_coef,
+            mcts_adapter=mcts_adapter,
         )
     else:
         from mario_rl.models.dreamer import DreamerModel, DreamerConfig
@@ -135,7 +147,14 @@ def create_model_and_learner(
         )
         if device:
             model = model.to(device)
-        learner = DreamerLearner(model=model, gamma=config.gamma)
+
+        # Create MCTS adapter if enabled (Dreamer adapter includes world model)
+        mcts_adapter = None
+        if config.mcts_enabled and device:
+            from mario_rl.mcts import DreamerAdapter
+            mcts_adapter = DreamerAdapter(net=model, device=device)
+
+        learner = DreamerLearner(model=model, gamma=config.gamma, mcts_adapter=mcts_adapter)
 
     return model, learner
 

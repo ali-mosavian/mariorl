@@ -25,6 +25,7 @@ import torch.nn.functional as F
 
 from mario_rl.models import DreamerModel
 from mario_rl.models.dreamer import ssim
+from mario_rl.mcts.protocols import PolicyAdapter, ValueAdapter, WorldModelAdapter
 
 
 def kl_loss_with_free_bits(mu: Tensor, logvar: Tensor, free_bits: float = 1.0) -> Tensor:
@@ -196,7 +197,11 @@ class DreamerLearner:
     gamma: float = 0.99
     lambda_gae: float = 0.95
     imagination_horizon: int = 15
-    
+
+    # MCTS adapter (injected by factory, optional)
+    # For Dreamer, the adapter also implements WorldModelAdapter for imagined rollouts
+    mcts_adapter: PolicyAdapter | ValueAdapter | WorldModelAdapter | None = None
+
     # Loss weights
     dynamics_scale: float = 1.0
     reward_scale: float = 1.0

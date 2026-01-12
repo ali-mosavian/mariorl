@@ -18,6 +18,7 @@ from torch import Tensor
 import torch.nn.functional as F
 
 from mario_rl.models import DoubleDQN
+from mario_rl.mcts.protocols import PolicyAdapter, ValueAdapter
 
 
 @dataclass
@@ -39,6 +40,9 @@ class DDQNLearner:
     gamma: float = 0.99
     n_step: int = 1
     entropy_coef: float = 0.01
+
+    # MCTS adapter (injected by factory, optional)
+    mcts_adapter: PolicyAdapter | ValueAdapter | None = None
 
     # Pre-computed n-step gamma (computed in __post_init__)
     _n_step_gamma: float = field(init=False, repr=False)
