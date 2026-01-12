@@ -27,7 +27,7 @@ from mario_rl.core.replay_buffer import ReplayBuffer
 from mario_rl.learners.base import Learner
 
 # MCTS imports (optional)
-from mario_rl.mcts import MCTSExplorer, MCTSConfig, DDQNAdapter
+from mario_rl.mcts import MCTSExplorer, MCTSConfig, DDQNAdapter, DreamerAdapter
 
 
 class MetricsLogger(Protocol):
@@ -123,7 +123,17 @@ class TrainingWorker:
 
         # Initialize MCTS if enabled
         if self.mcts_enabled:
-            adapter = DDQNAdapter(net=self.model, device=self.device)
+            # Check model type and create appropriate adapter
+            # Dreamer models have 'encoder' attribute, DDQN models don't
+            is_dreamer = hasattr(self.model, "encoder") and hasattr(self.model, "dynamics")
+            
+            if is_dreamer:
+                adapter = DreamerAdapter(net=self.model, device=self.device)  # type: ignore[arg-type]
+                world_model = adapter  # DreamerAdapter also implements WorldModelAdapter
+            else:
+                adapter = DDQNAdapter(net=self.model, device=self.device)
+                world_model = None  # DDQN doesn't have a world model
+            
             self._mcts_explorer = MCTSExplorer(
                 config=MCTSConfig(
                     num_simulations=self.mcts_num_simulations,
@@ -134,6 +144,7 @@ class TrainingWorker:
                 policy=adapter,
                 value_fn=adapter,
                 num_actions=self.model.num_actions,
+                world_model=world_model,  # Dreamer can use imagined rollouts
             )
 
     @property
