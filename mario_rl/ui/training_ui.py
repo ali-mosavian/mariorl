@@ -4,7 +4,7 @@ Provides real-time monitoring of:
 - Per-worker stats (steps, episodes, epsilon, loss)
 - Learner stats (updates, total steps, LR)
 - Global stats (total episodes, flags, deaths)
-- Keyboard controls (q to quit)
+- Keyboard controls (q to quit, r to clear/redraw)
 """
 
 import time
@@ -79,6 +79,8 @@ class TrainingUI:
                         if self.on_quit:
                             self.on_quit()
                         break
+                    elif key == ord("r") or key == ord("R"):
+                        stdscr.clearok(True)
                 except curses.error:
                     pass
 
@@ -185,7 +187,7 @@ class TrainingUI:
                     row += 1
 
             # Footer
-            footer = "Press 'q' to quit"
+            footer = "Press 'q' to quit | 'r' to clear/redraw"
             if height > 1:
                 stdscr.addstr(height - 1, (width - len(footer)) // 2, footer)
 

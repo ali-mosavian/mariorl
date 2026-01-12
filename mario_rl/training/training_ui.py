@@ -1,6 +1,10 @@
 """
 Curses-based UI for distributed training.
 Separates learner and worker outputs into distinct panels.
+
+Keyboard controls:
+- q/Q: Quit
+- r/R: Force clear and redraw screen
 """
 
 import time
@@ -136,6 +140,8 @@ class TrainingUI:
                         if key == ord("q") or key == ord("Q"):
                             self.running = False
                             break
+                        elif key == ord("r") or key == ord("R"):
+                            stdscr.clearok(True)
                     except curses.error:
                         pass
 
@@ -616,7 +622,7 @@ class TrainingUI:
 
         # Footer
         footer_y = height - 1
-        footer = " Press 'q' to quit "
+        footer = " Press 'q' to quit | 'r' to clear/redraw "
         stdscr.addstr(footer_y, 0, "─" * (width - 1), curses.A_DIM)
         stdscr.addstr(footer_y, (width - len(footer)) // 2, footer, curses.A_DIM)
 
