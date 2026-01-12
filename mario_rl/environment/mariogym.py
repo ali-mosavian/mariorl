@@ -17,6 +17,10 @@ LevelModes = Literal["sequential", "random"] | Tuple[Literal[1, 2, 3, 4, 5, 6, 7
 # Timeout threshold: if game time <= this value when dying, it's a timeout (not skill death)
 TIMEOUT_THRESHOLD = 10
 
+# Progressive milestones: closer together early, spread out later
+# Designed to guide struggling agents while still rewarding late-game progress
+MILESTONES: tuple[int, ...] = (100, 200, 350, 500, 750, 1000, 1500, 2000, 2500, 3000)
+
 
 @dataclass(frozen=True)
 class State:
@@ -28,28 +32,41 @@ class State:
     powerup_state: int = 0
     is_alive: bool = True
     got_flag: bool = False
-
-
-# +
+    milestones_reached: frozenset[int] = frozenset()  # Track which milestones have been reached
 
 
 @dataclass(frozen=True)
 class Reward:
+    """
+    Reward components for Mario RL training.
+    
+    Design principles:
+    - alive_bonus: Small per-step reward for survival
+    - x_reward: Main signal proportional to forward movement
+    - speed_bonus: Rewards running over walking (skill-based)
+    - milestone_bonus: Significant bonuses at progressive X positions
+    - death_penalty: One-time penalty on death transition
+    - finish_reward: Bonus for flag capture
+    - powerup_reward: State change bonus/penalty
+    
+    Removed (to avoid reward farming):
+    - coin_reward, score_reward, time_penalty, exploration_bonus
+    """
+
     x_reward: int = 0
-    time_penalty: int = 0
+    speed_bonus: int = 0
+    alive_bonus: int = 0  # +1 per step alive
+    milestone_bonus: int = 0  # Number of NEW milestones reached this step
     death_penalty: int = 0
-    coin_reward: int = 0
-    score_reward: int = 0
-    powerup_reward: int = 0
     finish_reward: int = 0
-    exploration_bonus: int = 0  # Bonus for reaching new max X
-    speed_bonus: int = 0  # Bonus for high forward velocity
+    powerup_reward: int = 0
 
     @staticmethod
     def calc(c: State, last: State) -> "Reward":
+        """Calculate reward from state transition."""
         # Detect death transition (was alive, now dead)
         just_died = last.is_alive and not c.is_alive
-        
+
         # When dying or dead, ignore x_delta to avoid spurious negative rewards
         # from position resetting during death animation
         if just_died or not c.is_alive:
@@ -58,14 +75,7 @@ class Reward:
             # Use position DELTA (current - previous), not (current - max)
             # This avoids huge negative rewards after death when x resets
             x_delta = c.x_pos - last.x_pos
-        
-        # Exploration bonus: reward for reaching new territory
-        # Triggers when current position exceeds previous max
-        exploration = 0
-        if c.x_pos > last.x_pos_max and c.is_alive:
-            # Bonus proportional to how far past the previous max
-            exploration = min(50, c.x_pos - last.x_pos_max)
-        
+
         # Speed bonus: reward for high forward velocity
         # Only applies when moving forward (x_delta > 0)
         speed = 0
@@ -73,67 +83,75 @@ class Reward:
             # Bonus scales with speed, capped to prevent exploitation
             # Normal walking ~1-2 pixels/frame, running ~3-4 pixels/frame
             speed = min(10, x_delta)  # Cap at 10 for very fast movement
-        
+
+        # Alive bonus: small constant reward for survival
+        alive = 1 if c.is_alive and not just_died else 0
+
+        # Milestone bonus: count NEW milestones reached this step
+        new_milestones = 0
+        for m in MILESTONES:
+            if c.x_pos >= m and m not in last.milestones_reached:
+                new_milestones += 1
+
         return Reward(
             x_reward=min(100, max(-15, x_delta)),
-            time_penalty=min(0, c.time - last.time),
-            death_penalty=int(just_died) * -1000,  # Only penalize on death transition
-            coin_reward=min(3, max(0, c.coins - last.coins)),
-            score_reward=min(3, max(0, c.score - last.score)),
-            powerup_reward=(c.powerup_state - last.powerup_state) * 100,
-            finish_reward=c.got_flag * 1000,
-            exploration_bonus=exploration,
             speed_bonus=speed,
+            alive_bonus=alive,
+            milestone_bonus=new_milestones,
+            death_penalty=int(just_died) * -1000,  # Only penalize on death transition
+            finish_reward=int(c.got_flag) * 1000,
+            powerup_reward=(c.powerup_state - last.powerup_state) * 100,
         )
 
     def total_reward(self) -> float:
         """
         Compute normalized reward for stable RL training.
-        
-        Design principles:
-        - Forward progress is the PRIMARY signal (+0.1 to +1 per frame)
-        - Exploration bonus rewards reaching new territory (+0.5 max)
-        - Speed bonus rewards fast forward movement (+0.1 max)
-        - Flag completion is a SIGNIFICANT bonus (+15) to incentivize finishing
-        - Death is a moderate penalty (-2) - enough to discourage but not overwhelming
-        - Per-frame range: ~-0.15 to ~+1.6 (with bonuses)
-        - Terminal events: death=-2, flag=+15
-        
-        With restarts/resume, the agent needs to relearn early, so keeping
-        death penalty low allows more exploration without crushing Q-values.
+
+        Components:
+        - alive: +0.01 per step (survival incentive)
+        - progress: -0.15 to +1.0 (main signal from x movement)
+        - speed: 0 to +0.1 (rewards running over walking)
+        - milestone: +2.0 each (at X=100,200,350,500,750,1000,1500,2000,2500,3000)
+        - death: -1.0 (one-time on death transition)
+        - flag: +5.0 (level completion)
+        - powerup: -0.5 to +1.0 (state changes)
+
+        Per-step range: ~-0.15 to ~3.1 (if hitting milestone while running)
+        Terminal range: -1.0 to +5.0
+        Episode range: ~-1 to ~110 (full level with flag)
         """
+        # Survival incentive: +0.01 per step alive
+        alive = self.alive_bonus * 0.01
+
         # Forward progress: main learning signal
         # x_reward ranges -15 to +100, scale to -0.15 to +1.0
         progress = self.x_reward / 100.0
-        
-        # Exploration bonus: reaching new territory
-        # exploration_bonus ranges 0 to 50, scale to 0 to +0.5
-        exploration = self.exploration_bonus / 100.0
-        
-        # Speed bonus: moving fast forward
+
+        # Speed bonus: rewards running over walking
         # speed_bonus ranges 0 to 10, scale to 0 to +0.1
         speed = self.speed_bonus / 100.0
-        
-        # Death penalty: moderate, not overwhelming
-        # -2 is meaningful but allows recovery during exploration
-        # Only applied ONCE on death transition, not every frame while dead
-        death = self.death_penalty / 500.0  # -2 when transitioning to dead
-        
-        # Flag bonus: significant reward to incentivize level completion  
-        # +15 makes completing the level worth finishing
-        flag = self.finish_reward / 66.67  # +15 when flag
-        
-        # Powerup: small bonus/penalty
-        powerup = self.powerup_reward / 200.0  # -0.5 to +1
-        
-        return progress + exploration + speed + death + flag + powerup
 
+        # Milestone bonuses: significant guide posts
+        # +2.0 per milestone reached (can hit multiple in one step if teleporting)
+        milestone = self.milestone_bonus * 2.0
 
-# -
+        # Death penalty: moderate, allows exploration
+        # -1.0 (reduced from -2.0) when transitioning to dead
+        death = self.death_penalty / 1000.0
+
+        # Flag bonus: reduced from +15 to +5 (milestones provide intermediate goals)
+        flag = self.finish_reward / 200.0
+
+        # Powerup: small bonus/penalty for state changes
+        powerup = self.powerup_reward / 200.0  # -0.5 to +1.0
+
+        return alive + progress + speed + milestone + death + flag + powerup
 
 
 class MarioBrosLevel(SuperMarioBrosEnv):
-    reward_range = (-2.5, 16)  # Normal: -0.15 to +1.0, Terminal: death=-2, flag=+15
+    # Reward range updated for new system:
+    # Per-step: -0.15 to +3.1, Terminal: death=-1, flag=+5
+    reward_range = (-1.5, 120)
     _last_state: Optional[State] = None
 
     def __init__(
@@ -147,17 +165,23 @@ class MarioBrosLevel(SuperMarioBrosEnv):
 
     @property
     def state(self) -> State:
+        # Track which milestones have been reached based on current and previous max X
+        x_pos = self._x_position
+        x_pos_max = max(x_pos, self._last_state.x_pos_max) if self._last_state is not None else x_pos
+
+        # Compute milestones reached (all milestones <= x_pos_max)
+        milestones_reached = frozenset(m for m in MILESTONES if x_pos_max >= m)
+
         return State(
             time=self._time,
             score=self._score,
-            x_pos=self._x_position,
-            x_pos_max=(
-                max(self._x_position, self._last_state.x_pos_max) if self._last_state is not None else self._x_position
-            ),
+            x_pos=x_pos,
+            x_pos_max=x_pos_max,
             coins=self._coins,
             powerup_state=self._powerup_state,
             got_flag=self._flag_get,
             is_alive=not (self._is_dying or self._is_dead),
+            milestones_reached=milestones_reached,
         )
 
     @property

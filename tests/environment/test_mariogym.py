@@ -2,8 +2,8 @@
 
 These tests verify:
 - is_timeout flag and TIMEOUT_THRESHOLD constant
-- Exploration bonus for reaching new X positions
 - Speed bonus for fast forward movement
+- Milestone system (replaces exploration bonus)
 """
 
 from __future__ import annotations
@@ -14,7 +14,10 @@ from unittest.mock import patch
 import pytest
 
 from mario_rl.environment import TIMEOUT_THRESHOLD
-from mario_rl.environment.mariogym import MarioBrosLevel, Reward, State
+from mario_rl.environment.mariogym import MILESTONES
+from mario_rl.environment.mariogym import MarioBrosLevel
+from mario_rl.environment.mariogym import Reward
+from mario_rl.environment.mariogym import State
 
 
 class TestTimeoutThreshold:
@@ -222,72 +225,6 @@ class TestIsTimeoutLogic:
 
 
 # =============================================================================
-# Exploration Bonus Tests
-# =============================================================================
-
-
-class TestExplorationBonus:
-    """Tests for exploration bonus reward.
-    
-    The exploration bonus rewards reaching new territory (new max X position).
-    This incentivizes the agent to explore further into the level.
-    """
-
-    def test_exploration_bonus_when_exceeding_max(self) -> None:
-        """Exploration bonus should trigger when x_pos > x_pos_max."""
-        last = State(x_pos=100, x_pos_max=100, is_alive=True)
-        current = State(x_pos=110, x_pos_max=110, is_alive=True)
-        
-        reward = Reward.calc(current, last)
-        
-        assert reward.exploration_bonus == 10  # 110 - 100 = 10
-
-    def test_no_exploration_bonus_when_backtracking(self) -> None:
-        """No exploration bonus when moving backward."""
-        last = State(x_pos=100, x_pos_max=100, is_alive=True)
-        current = State(x_pos=90, x_pos_max=100, is_alive=True)
-        
-        reward = Reward.calc(current, last)
-        
-        assert reward.exploration_bonus == 0
-
-    def test_no_exploration_bonus_at_same_position(self) -> None:
-        """No exploration bonus when standing still."""
-        last = State(x_pos=100, x_pos_max=100, is_alive=True)
-        current = State(x_pos=100, x_pos_max=100, is_alive=True)
-        
-        reward = Reward.calc(current, last)
-        
-        assert reward.exploration_bonus == 0
-
-    def test_exploration_bonus_capped(self) -> None:
-        """Exploration bonus should be capped at 50."""
-        last = State(x_pos=100, x_pos_max=100, is_alive=True)
-        current = State(x_pos=200, x_pos_max=200, is_alive=True)  # 100 pixel jump
-        
-        reward = Reward.calc(current, last)
-        
-        assert reward.exploration_bonus == 50  # Capped at 50
-
-    def test_no_exploration_bonus_when_dead(self) -> None:
-        """No exploration bonus when Mario is dead."""
-        last = State(x_pos=100, x_pos_max=100, is_alive=True)
-        current = State(x_pos=110, x_pos_max=110, is_alive=False)
-        
-        reward = Reward.calc(current, last)
-        
-        assert reward.exploration_bonus == 0
-
-    def test_exploration_bonus_normalized_in_total(self) -> None:
-        """Exploration bonus should be normalized in total_reward()."""
-        # Create reward with max exploration bonus (50)
-        reward = Reward(exploration_bonus=50)
-        
-        # Should contribute +0.5 to total (50 / 100)
-        assert abs(reward.total_reward() - 0.5) < 0.01
-
-
-# =============================================================================
 # Speed Bonus Tests
 # =============================================================================
 
@@ -296,13 +233,13 @@ class TestSpeedBonus:
     """Tests for speed bonus reward.
     
     The speed bonus rewards fast forward movement, encouraging
-    efficient level completion.
+    efficient level completion (running vs walking).
     """
 
     def test_speed_bonus_when_moving_forward(self) -> None:
         """Speed bonus should trigger when moving forward."""
-        last = State(x_pos=100, x_pos_max=100, is_alive=True)
-        current = State(x_pos=105, x_pos_max=105, is_alive=True)
+        last = State(x_pos=100, x_pos_max=100, is_alive=True, milestones_reached=frozenset())
+        current = State(x_pos=105, x_pos_max=105, is_alive=True, milestones_reached=frozenset())
         
         reward = Reward.calc(current, last)
         
@@ -310,8 +247,8 @@ class TestSpeedBonus:
 
     def test_no_speed_bonus_when_standing_still(self) -> None:
         """No speed bonus when not moving."""
-        last = State(x_pos=100, x_pos_max=100, is_alive=True)
-        current = State(x_pos=100, x_pos_max=100, is_alive=True)
+        last = State(x_pos=100, x_pos_max=100, is_alive=True, milestones_reached=frozenset())
+        current = State(x_pos=100, x_pos_max=100, is_alive=True, milestones_reached=frozenset())
         
         reward = Reward.calc(current, last)
         
@@ -319,8 +256,8 @@ class TestSpeedBonus:
 
     def test_no_speed_bonus_when_moving_backward(self) -> None:
         """No speed bonus when moving backward."""
-        last = State(x_pos=100, x_pos_max=100, is_alive=True)
-        current = State(x_pos=95, x_pos_max=100, is_alive=True)
+        last = State(x_pos=100, x_pos_max=100, is_alive=True, milestones_reached=frozenset())
+        current = State(x_pos=95, x_pos_max=100, is_alive=True, milestones_reached=frozenset())
         
         reward = Reward.calc(current, last)
         
@@ -328,8 +265,8 @@ class TestSpeedBonus:
 
     def test_speed_bonus_capped(self) -> None:
         """Speed bonus should be capped at 10."""
-        last = State(x_pos=100, x_pos_max=100, is_alive=True)
-        current = State(x_pos=150, x_pos_max=150, is_alive=True)  # 50 pixel jump
+        last = State(x_pos=100, x_pos_max=100, is_alive=True, milestones_reached=frozenset())
+        current = State(x_pos=150, x_pos_max=150, is_alive=True, milestones_reached=frozenset())
         
         reward = Reward.calc(current, last)
         
@@ -337,8 +274,8 @@ class TestSpeedBonus:
 
     def test_no_speed_bonus_when_dead(self) -> None:
         """No speed bonus when Mario is dead (x_delta is zeroed)."""
-        last = State(x_pos=100, x_pos_max=100, is_alive=True)
-        current = State(x_pos=105, x_pos_max=105, is_alive=False)
+        last = State(x_pos=100, x_pos_max=100, is_alive=True, milestones_reached=frozenset())
+        current = State(x_pos=105, x_pos_max=105, is_alive=False, milestones_reached=frozenset())
         
         reward = Reward.calc(current, last)
         
@@ -353,49 +290,101 @@ class TestSpeedBonus:
         assert abs(reward.total_reward() - 0.1) < 0.01
 
 
-class TestRewardBonusesCombined:
-    """Tests for exploration and speed bonuses working together."""
+# =============================================================================
+# Milestone Tests (replaces exploration bonus)
+# =============================================================================
 
-    def test_both_bonuses_at_new_max(self) -> None:
-        """Both bonuses should trigger when reaching new max at speed."""
-        last = State(x_pos=100, x_pos_max=100, is_alive=True)
-        current = State(x_pos=108, x_pos_max=108, is_alive=True)
+
+class TestMilestones:
+    """Tests for milestone reward system.
+    
+    Milestones provide significant bonuses at progressive X positions
+    to guide the agent through the level.
+    """
+
+    def test_milestone_bonus_at_first_milestone(self) -> None:
+        """Milestone bonus should trigger at first milestone (X=100)."""
+        last = State(x_pos=95, x_pos_max=95, is_alive=True, milestones_reached=frozenset())
+        current = State(x_pos=105, x_pos_max=105, is_alive=True, milestones_reached=frozenset({100}))
         
         reward = Reward.calc(current, last)
         
-        assert reward.exploration_bonus == 8  # New territory
-        assert reward.speed_bonus == 8  # Forward movement
+        assert reward.milestone_bonus == 1
 
-    def test_speed_only_when_not_exceeding_max(self) -> None:
-        """Speed bonus without exploration when below previous max."""
-        last = State(x_pos=100, x_pos_max=150, is_alive=True)  # Previous max was 150
-        current = State(x_pos=105, x_pos_max=150, is_alive=True)  # Still below max
+    def test_no_milestone_bonus_below_first_milestone(self) -> None:
+        """No milestone bonus when below first milestone."""
+        last = State(x_pos=80, x_pos_max=80, is_alive=True, milestones_reached=frozenset())
+        current = State(x_pos=90, x_pos_max=90, is_alive=True, milestones_reached=frozenset())
         
         reward = Reward.calc(current, last)
         
-        assert reward.exploration_bonus == 0  # Not new territory
-        assert reward.speed_bonus == 5  # But still moving forward
+        assert reward.milestone_bonus == 0
 
-    def test_total_reward_includes_both_bonuses(self) -> None:
-        """total_reward() should include both exploration and speed bonuses."""
-        # Max bonuses: exploration=50 (+0.5), speed=10 (+0.1)
-        reward = Reward(exploration_bonus=50, speed_bonus=10)
+    def test_milestone_bonus_not_repeated(self) -> None:
+        """Already reached milestones should not give bonus again."""
+        last = State(x_pos=100, x_pos_max=100, is_alive=True, milestones_reached=frozenset({100}))
+        current = State(x_pos=150, x_pos_max=150, is_alive=True, milestones_reached=frozenset({100}))
         
-        # Total should be 0.5 + 0.1 = 0.6
-        assert abs(reward.total_reward() - 0.6) < 0.01
+        reward = Reward.calc(current, last)
+        
+        assert reward.milestone_bonus == 0  # Already had 100
+
+    def test_milestone_normalized_in_total(self) -> None:
+        """Each milestone should give +2.0 in total_reward()."""
+        reward = Reward(milestone_bonus=1)
+        assert abs(reward.total_reward() - 2.0) < 0.01
+        
+        reward = Reward(milestone_bonus=3)
+        assert abs(reward.total_reward() - 6.0) < 0.01
+
+
+class TestRewardCombined:
+    """Tests for combined reward components."""
+
+    def test_speed_and_milestone_at_new_max(self) -> None:
+        """Both speed and milestone bonus can trigger together."""
+        last = State(x_pos=95, x_pos_max=95, is_alive=True, milestones_reached=frozenset())
+        current = State(x_pos=105, x_pos_max=105, is_alive=True, milestones_reached=frozenset({100}))
+        
+        reward = Reward.calc(current, last)
+        
+        assert reward.milestone_bonus == 1  # Hit milestone at 100
+        assert reward.speed_bonus == 10  # Fast forward movement
+
+    def test_speed_only_when_not_hitting_milestone(self) -> None:
+        """Speed bonus without milestone when between milestones."""
+        last = State(x_pos=110, x_pos_max=110, is_alive=True, milestones_reached=frozenset({100}))
+        current = State(x_pos=115, x_pos_max=115, is_alive=True, milestones_reached=frozenset({100}))
+        
+        reward = Reward.calc(current, last)
+        
+        assert reward.milestone_bonus == 0  # Between milestones
+        assert reward.speed_bonus == 5  # Still moving forward
 
     def test_reward_components_in_realistic_scenario(self) -> None:
         """Test all reward components in a realistic forward movement scenario."""
-        last = State(x_pos=500, x_pos_max=500, time=300, is_alive=True)
-        current = State(x_pos=504, x_pos_max=504, time=299, is_alive=True)
+        last = State(
+            x_pos=500,
+            x_pos_max=500,
+            time=300,
+            is_alive=True,
+            milestones_reached=frozenset({100, 200, 350, 500}),
+        )
+        current = State(
+            x_pos=504,
+            x_pos_max=504,
+            time=299,
+            is_alive=True,
+            milestones_reached=frozenset({100, 200, 350, 500}),
+        )
         
         reward = Reward.calc(current, last)
         
         # Check all components
         assert reward.x_reward == 4  # Forward movement
-        assert reward.exploration_bonus == 4  # New territory
         assert reward.speed_bonus == 4  # Speed bonus
-        assert reward.time_penalty == -1  # Time elapsed
+        assert reward.alive_bonus == 1  # Alive
+        assert reward.milestone_bonus == 0  # No new milestones
         assert reward.death_penalty == 0  # Not dead
         assert reward.finish_reward == 0  # Didn't finish
         
