@@ -1277,6 +1277,13 @@ class TrainingUI:
             # Sync indicator
             stdscr.addstr(f" ↓{sync_str}")
 
+            # MCTS indicator (compact)
+            mcts_used = ws.get("mcts_used", 0)
+            if mcts_used:
+                mcts_runs = int(ws.get("mcts_runs", 0))
+                mcts_depth = int(ws.get("mcts_avg_tree_depth", 0))
+                stdscr.addstr(f" 🌲{mcts_runs}d{mcts_depth}", curses.color_pair(4))
+
         except curses.error:
             pass  # Ignore if we can't fit
 
