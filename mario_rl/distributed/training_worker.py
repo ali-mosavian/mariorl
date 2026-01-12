@@ -329,6 +329,7 @@ class TrainingWorker:
         Returns:
             Collection info dict
         """
+        print(f"[MCTS DEBUG] collect_with_mcts called num_steps={num_steps}", flush=True)
         if self._mcts_explorer is None:
             return self.collect(num_steps)
 

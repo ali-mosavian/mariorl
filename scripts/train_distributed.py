@@ -415,9 +415,11 @@ def run_worker(
                 last_snapshot_restores = current_restores
 
             # Log MCTS metrics if MCTS was used this cycle
-            if info.get("mcts_used", False):
+            mcts_used = info.get("mcts_used", False)
+            mcts_runs = info.get("mcts_runs", 0)
+            if mcts_used:
                 logger.gauge("mcts_used", 1)
-                logger.gauge("mcts_runs", info.get("mcts_runs", 0))
+                logger.gauge("mcts_runs", mcts_runs)
                 logger.gauge("mcts_avg_rollouts", info.get("mcts_avg_rollouts", 0))
                 logger.gauge("mcts_avg_tree_depth", info.get("mcts_avg_tree_depth", 0))
                 logger.gauge("mcts_avg_tree_size", info.get("mcts_avg_tree_size", 0))
