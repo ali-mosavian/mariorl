@@ -115,6 +115,10 @@ class MCTSExplorer:
         best_sequence: list[int] = []
         best_sequence_reward: float = float("-inf")
 
+        # Clear visited states from previous MCTS call
+        # Each MCTS search is independent - old states are irrelevant
+        self._visited_states.clear()
+
         # Save root state
         root_snapshot = env.unwrapped.dump_state()
 
@@ -130,6 +134,10 @@ class MCTSExplorer:
             self.policy.get_action_probs(root_obs)
             root.prior = 1.0  # Root has uniform prior
 
+        # Track metrics for this search
+        rollouts_done = 0
+        expansions_done = 0
+
         for _ in range(self.config.num_simulations):
             # Restore to root state
             env.unwrapped.load_state(root_snapshot)
@@ -143,6 +151,7 @@ class MCTSExplorer:
                 child, expand_transition = self._expand(node, env, get_obs_fn)
                 if expand_transition:
                     all_transitions.append(expand_transition)
+                    expansions_done += 1
 
                 if child and not child.terminal:
                     # Rollout: simulate to terminal or max depth
@@ -150,6 +159,7 @@ class MCTSExplorer:
                         child, env, get_obs_fn
                     )
                     all_transitions.extend(rollout_transitions)
+                    rollouts_done += 1
                     
                     # Track best sequence (like old MCTS)
                     # Include the expand action + rollout actions
@@ -187,6 +197,14 @@ class MCTSExplorer:
         self._total_transitions += len(all_transitions)
         self._total_explorations += 1
 
+        # Compute visit distribution at root
+        visit_counts = {child.action: child.visits for child in root.children}
+        best_action_visits = visit_counts.get(best_action, 0)
+        total_child_visits = sum(visit_counts.values())
+        
+        # Root value estimate
+        root_value = root.value if root.visits > 0 else 0.0
+
         return ExplorationResult(
             transitions=all_transitions,
             best_action=best_action,
@@ -200,6 +218,14 @@ class MCTSExplorer:
                 "tree_size": self._count_nodes(root),
                 "best_sequence_length": len(best_sequence),
                 "best_sequence_reward": best_sequence_reward,
+                # New metrics
+                "rollouts_done": rollouts_done,
+                "expansions": expansions_done,
+                "unique_states": len(self._visited_states),
+                "best_action_visits": best_action_visits,
+                "total_child_visits": total_child_visits,
+                "root_value": root_value,
+                "visit_distribution": visit_counts,
             },
         )
 
