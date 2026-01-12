@@ -37,12 +37,16 @@ class ExplorationResult:
     Attributes:
         transitions: All transitions collected from all branches
         best_action: Best action from root based on visit counts
+        best_sequence: Best action sequence found during rollouts (like old MCTS)
+        best_sequence_reward: Total reward of best sequence
         root: Root node of the search tree (for analysis)
         stats: Exploration statistics
     """
 
     transitions: list[Transition]
     best_action: int
+    best_sequence: list[int]  # Action sequence from best rollout
+    best_sequence_reward: float  # Reward of best sequence
     root: MCTSNode
     stats: dict[str, Any]
 
@@ -106,6 +110,10 @@ class MCTSExplorer:
             ExplorationResult containing all transitions and best action
         """
         all_transitions: list[Transition] = []
+        
+        # Track best rollout sequence (like old MCTS)
+        best_sequence: list[int] = []
+        best_sequence_reward: float = float("-inf")
 
         # Save root state
         root_snapshot = env.unwrapped.dump_state()
@@ -138,8 +146,20 @@ class MCTSExplorer:
 
                 if child and not child.terminal:
                     # Rollout: simulate to terminal or max depth
-                    rollout_value, rollout_transitions = self._rollout(child, env, get_obs_fn)
+                    rollout_value, rollout_transitions, rollout_actions = self._rollout(
+                        child, env, get_obs_fn
+                    )
                     all_transitions.extend(rollout_transitions)
+                    
+                    # Track best sequence (like old MCTS)
+                    # Include the expand action + rollout actions
+                    if rollout_value > best_sequence_reward:
+                        best_sequence_reward = rollout_value
+                        # Build full sequence: path to child + rollout
+                        if expand_transition:
+                            best_sequence = [expand_transition.action] + rollout_actions
+                        else:
+                            best_sequence = rollout_actions
 
                     # Backpropagation
                     self._backpropagate(child, rollout_value)
@@ -155,6 +175,14 @@ class MCTSExplorer:
 
         # Get best action from visit counts
         best_action = self._get_best_action(root)
+        
+        # Truncate sequence to configured length
+        sequence_len = self.config.sequence_length
+        if sequence_len > 1 and best_sequence:
+            best_sequence = best_sequence[:sequence_len]
+        elif not best_sequence:
+            # Fallback: use best action as single-item sequence
+            best_sequence = [best_action]
 
         self._total_transitions += len(all_transitions)
         self._total_explorations += 1
@@ -162,12 +190,16 @@ class MCTSExplorer:
         return ExplorationResult(
             transitions=all_transitions,
             best_action=best_action,
+            best_sequence=best_sequence,
+            best_sequence_reward=best_sequence_reward,
             root=root,
             stats={
                 "simulations": self.config.num_simulations,
                 "transitions_collected": len(all_transitions),
                 "tree_depth": self._get_tree_depth(root),
                 "tree_size": self._count_nodes(root),
+                "best_sequence_length": len(best_sequence),
+                "best_sequence_reward": best_sequence_reward,
             },
         )
 
@@ -391,13 +423,17 @@ class MCTSExplorer:
         node: MCTSNode,
         env: Any,
         get_obs_fn: Optional[Callable[[Any], np.ndarray]],
-    ) -> tuple[float, list[Transition]]:
+    ) -> tuple[float, list[Transition], list[int]]:
         """
         Rollout from node to estimate value and collect transitions.
 
         Uses policy/random mix for action selection based on config.
+        
+        Returns:
+            tuple: (total_reward, transitions, action_sequence)
         """
         transitions: list[Transition] = []
+        actions: list[int] = []  # Track action sequence (like old MCTS)
         total_reward = 0.0
         discount = 1.0
 
@@ -410,6 +446,7 @@ class MCTSExplorer:
         for _ in range(self.config.max_rollout_depth):
             # Select action
             action = self._select_rollout_action(current_obs)
+            actions.append(action)  # Track the action
 
             # Step environment
             next_obs, reward, done, truncated, info = env.step(action)
@@ -442,7 +479,7 @@ class MCTSExplorer:
                 bootstrap_value = self.value_fn.get_value(current_obs)
                 total_reward += discount * bootstrap_value
 
-        return total_reward, transitions
+        return total_reward, transitions, actions
 
     def _select_rollout_action(self, obs: np.ndarray) -> int:
         """Select action during rollout based on config."""

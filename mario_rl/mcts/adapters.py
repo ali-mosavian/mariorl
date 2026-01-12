@@ -303,3 +303,59 @@ class RandomAdapter:
     def get_value(self, state: np.ndarray) -> float:
         """Return zero value (use rollout returns instead)."""
         return 0.0
+
+
+@dataclass 
+class MarioRolloutAdapter:
+    """
+    Mario-specific adapter for MCTS rollouts.
+
+    Uses domain knowledge that Mario should mostly go RIGHT.
+    This makes rollouts meaningful - RIGHT actions will accumulate
+    more reward than LEFT/NOOP, allowing MCTS to distinguish them.
+
+    Action distribution during rollouts:
+    - 70% RIGHT variants (RIGHT, R+A, R+B, R+A+B)
+    - 20% JUMP (A) for obstacles
+    - 10% other actions
+
+    Attributes:
+        num_actions: Number of available actions (12 for Mario)
+    """
+
+    num_actions: int = 12
+
+    # Mario action indices
+    RIGHT_ACTIONS: tuple = (1, 2, 3, 4)  # RIGHT, R+A, R+B, R+A+B
+    JUMP_ACTION: int = 5  # A (jump)
+
+    def get_action(self, state: np.ndarray) -> int:
+        """Get RIGHT-biased action for Mario rollouts."""
+        r = np.random.random()
+        if r < 0.70:
+            # 70% RIGHT variants
+            return np.random.choice(self.RIGHT_ACTIONS)
+        elif r < 0.90:
+            # 20% jump
+            return self.JUMP_ACTION
+        else:
+            # 10% random (exploration)
+            return np.random.randint(self.num_actions)
+
+    def get_action_probs(self, state: np.ndarray) -> np.ndarray:
+        """Get RIGHT-biased action probabilities."""
+        probs = np.ones(self.num_actions) * 0.01  # Small base probability
+        
+        # 70% for RIGHT variants
+        for action in self.RIGHT_ACTIONS:
+            probs[action] = 0.70 / len(self.RIGHT_ACTIONS)
+        
+        # 20% for jump
+        probs[self.JUMP_ACTION] = 0.20
+        
+        # Normalize
+        return probs / probs.sum()
+
+    def get_value(self, state: np.ndarray) -> float:
+        """Return zero value (use rollout returns)."""
+        return 0.0

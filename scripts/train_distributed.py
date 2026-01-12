@@ -85,6 +85,7 @@ class Config:
     mcts_max_depth: int = 20
     mcts_stuck_threshold: int = 500
     mcts_periodic_interval: int = 10
+    mcts_sequence_length: int = 15  # Execute this many actions per MCTS call
 
 
 # =============================================================================
@@ -269,6 +270,7 @@ def run_worker(
             mcts_max_depth=config.mcts_max_depth,
             mcts_stuck_threshold=config.mcts_stuck_threshold,
             mcts_periodic_interval=config.mcts_periodic_interval,
+            mcts_sequence_length=config.mcts_sequence_length,
         )
 
         gradient_buffer = attach_tensor_buffer(
@@ -649,6 +651,7 @@ def start_monitor_thread(
 @click.option("--mcts-depth", default=20, help="MCTS max rollout depth")
 @click.option("--mcts-stuck", default=500, help="Steps without progress to trigger MCTS")
 @click.option("--mcts-periodic", default=10, help="Use MCTS every N episodes")
+@click.option("--mcts-seq-len", default=15, help="Actions to execute per MCTS call (like old MCTS)")
 # Other
 @click.option("--total-steps", default=2_000_000, help="Total training steps (for LR schedule)")
 @click.option("--no-ui", is_flag=True, help="Disable ncurses UI")
@@ -678,6 +681,7 @@ def main(
     mcts_depth: int,
     mcts_stuck: int,
     mcts_periodic: int,
+    mcts_seq_len: int,
     total_steps: int,
     no_ui: bool,
 ) -> None:
@@ -695,7 +699,7 @@ def main(
     print(f"  Epsilon: {eps_base}^(1+i/N), decay: {eps_decay_steps:,}")
     print(f"  Q-scale: {q_scale}, Max grad norm: {max_grad_norm}")
     if mcts:
-        print(f"  MCTS: {mcts_sims} sims, depth={mcts_depth}, stuck={mcts_stuck}, periodic={mcts_periodic}")
+        print(f"  MCTS: {mcts_sims} sims, depth={mcts_depth}, seq_len={mcts_seq_len}, stuck={mcts_stuck}, periodic={mcts_periodic}")
     
     # Print GPU distribution
     from mario_rl.core.device import get_device_assignment_summary, assign_device
@@ -728,6 +732,7 @@ def main(
         mcts_max_depth=mcts_depth,
         mcts_stuck_threshold=mcts_stuck,
         mcts_periodic_interval=mcts_periodic,
+        mcts_sequence_length=mcts_seq_len,
     )
 
     # Setup directories

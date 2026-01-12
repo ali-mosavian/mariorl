@@ -83,6 +83,7 @@ class TrainingWorker:
     mcts_max_depth: int = 20
     mcts_stuck_threshold: int = 500  # Steps without x progress to trigger MCTS
     mcts_periodic_interval: int = 10  # Use MCTS every N episodes
+    mcts_sequence_length: int = 15  # Execute this many actions from best MCTS rollout
 
     # Internal state
     _buffer: ReplayBuffer = field(init=False, repr=False)
@@ -129,19 +130,22 @@ class TrainingWorker:
             # Check if adapter supports world model (Dreamer)
             world_model = adapter if isinstance(adapter, WorldModelAdapter) else None
 
-            # Use pure random search - no policy network during MCTS
-            from mario_rl.mcts.adapters import RandomAdapter
-            random_adapter = RandomAdapter(num_actions=self.model.num_actions)
+            # Use Mario-specific rollout policy for MCTS
+            # This biases rollouts toward RIGHT (70%) to make them meaningful
+            # Without this, random rollouts can't distinguish good vs bad actions
+            from mario_rl.mcts.adapters import MarioRolloutAdapter
+            rollout_adapter = MarioRolloutAdapter(num_actions=self.model.num_actions)
 
             self._mcts_explorer = MCTSExplorer(
                 config=MCTSConfig(
                     num_simulations=self.mcts_num_simulations,
                     max_rollout_depth=self.mcts_max_depth,
-                    rollout_policy="random",  # Pure random rollouts
-                    value_source="rollout",   # Use actual rollout returns, not network
+                    rollout_policy="policy",  # Use rollout adapter
+                    value_source="rollout",   # Use actual rollout returns
+                    sequence_length=self.mcts_sequence_length,  # Return action sequences
                 ),
-                policy=random_adapter,  # Random action selection
-                value_fn=random_adapter,  # Zero value (use rollout)
+                policy=rollout_adapter,  # RIGHT-biased rollouts
+                value_fn=rollout_adapter,  # Zero value (use rollout)
                 num_actions=self.model.num_actions,
                 world_model=world_model,  # Dreamer can use imagined rollouts
             )
@@ -311,8 +315,9 @@ class TrainingWorker:
         """Collect experience using MCTS exploration for entire episode.
 
         Uses pure MCTS tree search (no policy network) to explore and
-        find optimal actions. Runs MCTS for EVERY action decision until
-        episode ends or num_steps collected.
+        find optimal action SEQUENCES. Like the old MCTS implementation,
+        this runs MCTS to find a good sequence, executes the entire sequence,
+        then runs MCTS again when the sequence is exhausted.
 
         Args:
             num_steps: Target number of steps to collect
@@ -329,39 +334,55 @@ class TrainingWorker:
         step_infos: list[dict] = []
         episode_end_infos: list[dict] = []
         mcts_runs = 0
+        actions_from_mcts = 0  # Track how many actions came from MCTS sequences
 
         # Get current observation
         obs = self._get_frame_stack_obs()
         done = False
+        
+        # Action sequence from MCTS (like old implementation)
+        action_sequence: list[int] = []
 
-        # Run MCTS for entire episode (or until num_steps)
+        # Run until episode ends or num_steps collected
         while not done and transitions_collected < num_steps:
-            # Clear visited states for fresh MCTS from current position
-            self._mcts_explorer.clear_visited_states()
+            # If no actions in sequence, run MCTS to get new sequence
+            if len(action_sequence) == 0:
+                # Clear visited states for fresh MCTS from current position
+                self._mcts_explorer.clear_visited_states()
 
-            # Run MCTS to find best action (pure tree search)
-            result = self._mcts_explorer.explore(
-                env=self.env,
-                root_obs=obs,
-                get_obs_fn=lambda env: self._get_frame_stack_obs(),
-            )
-            mcts_runs += 1
+                # Run MCTS to find best action SEQUENCE (like old MCTS)
+                result = self._mcts_explorer.explore(
+                    env=self.env,
+                    root_obs=obs,
+                    get_obs_fn=None,
+                )
+                mcts_runs += 1
 
-            # Add MCTS exploration transitions to buffer
-            for t in result.transitions:
-                self._buffer.add(t)
-            transitions_collected += len(result.transitions)
+                # Add MCTS exploration transitions to buffer
+                for t in result.transitions:
+                    self._buffer.add(t)
+                transitions_collected += len(result.transitions)
 
-            # Execute best action in real environment
-            best_action = result.best_action
-            next_obs, reward, terminated, truncated, info = self.env.step(best_action)
+                # Get the best action sequence from MCTS
+                action_sequence = list(result.best_sequence)
+                
+                # Fallback: if no sequence, use best_action
+                if not action_sequence:
+                    action_sequence = [result.best_action]
+
+            # Pop and execute next action from sequence
+            action = action_sequence.pop(0)
+            actions_from_mcts += 1
+
+            # Execute action in real environment
+            next_obs, reward, terminated, truncated, info = self.env.step(action)
             done = terminated or truncated
 
-            # Also add the real transition we just took
+            # Add the real transition to buffer
             from mario_rl.core.types import Transition
             real_transition = Transition(
                 state=obs,
-                action=best_action,
+                action=action,
                 reward=reward,
                 next_state=next_obs if not done else obs,
                 done=done,
@@ -369,7 +390,7 @@ class TrainingWorker:
             self._buffer.add(real_transition)
             transitions_collected += 1
 
-            # Update observation for next MCTS
+            # Update observation for next iteration
             obs = next_obs
             step_infos.append(info)
 
@@ -380,6 +401,10 @@ class TrainingWorker:
                 self._steps_without_x_progress = 0
             else:
                 self._steps_without_x_progress += 1
+
+            # If we die, clear the action sequence (old sequence is now invalid)
+            if done:
+                action_sequence = []
 
         # Episode ended
         if done:
@@ -407,6 +432,7 @@ class TrainingWorker:
             self.logger.count("mcts_explorations", n=mcts_runs)
             self.logger.gauge("mcts_transitions", transitions_collected)
             self.logger.gauge("mcts_runs_per_episode", mcts_runs)
+            self.logger.gauge("mcts_actions_executed", actions_from_mcts)
             self.logger.gauge("epsilon", self.epsilon_at(self.total_steps))
             self.logger.gauge("buffer_size", len(self._buffer))
             self.logger.gauge("steps_per_sec", steps_per_sec)
@@ -421,6 +447,8 @@ class TrainingWorker:
             "step_infos": step_infos,
             "episode_end_infos": episode_end_infos,
             "mcts_used": True,
+            "mcts_runs": mcts_runs,
+            "mcts_actions_executed": actions_from_mcts,
             "mcts_runs": mcts_runs,
         }
 

@@ -35,6 +35,9 @@ class MCTSConfig:
             True enables PUCT (Predictor + UCB) like AlphaZero.
         prior_weight: Weight of prior in PUCT formula.
             Only used when use_prior=True.
+        sequence_length: Number of actions to return in best_sequence.
+            1 = return single best action (default behavior)
+            >1 = return best action sequence from rollouts (like old MCTS)
     """
 
     num_simulations: int = 50
@@ -54,6 +57,11 @@ class MCTSConfig:
     use_prior: bool = False
     prior_weight: float = 1.0
 
+    # Action sequence settings (like old MCTS)
+    # When > 1, MCTS returns the best action sequence found during rollouts
+    # and the caller should execute the entire sequence before calling MCTS again
+    sequence_length: int = 1  # 1 = single action (default), >1 = return sequence
+
     def __post_init__(self) -> None:
         """Validate configuration."""
         if self.num_simulations < 1:
@@ -64,3 +72,5 @@ class MCTSConfig:
             raise ValueError("policy_mix_ratio must be in [0, 1]")
         if not 0 <= self.discount <= 1:
             raise ValueError("discount must be in [0, 1]")
+        if self.sequence_length < 1:
+            raise ValueError("sequence_length must be >= 1")
