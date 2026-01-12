@@ -920,32 +920,33 @@ class TrainingUI:
 
         if ws:
             # Support both old and new field names
-            episode = ws.get("episode", ws.get("episodes", 0))
+            # Convert to int for fields formatted with :d specifier
+            episode = int(ws.get("episode", ws.get("episodes", 0)))
             # episode_reward = last episode's reward (GAUGE)
             # reward = rolling average (ROLLING)
             episode_reward = ws.get("episode_reward", ws.get("reward", 0))
             rolling_avg_reward = ws.get("reward", 0)  # Rolling average from schema
-            x_pos = ws.get("x_pos", 0)
-            best_x = ws.get("best_x", 0)
-            deaths = ws.get("deaths", 0)
-            flags = ws.get("flags", 0)
+            x_pos = int(ws.get("x_pos", 0))
+            best_x = int(ws.get("best_x", 0))
+            deaths = int(ws.get("deaths", 0))
+            flags = int(ws.get("flags", 0))
             epsilon = ws.get("epsilon", 1.0)
-            exp = ws.get("experiences", ws.get("buffer_size", 0))
+            exp = int(ws.get("experiences", ws.get("buffer_size", 0)))
             q_mean = ws.get("q_mean", 0)
             q_max = ws.get("q_max", 0)
             steps_per_sec = ws.get("steps_per_sec", 0)
-            step = ws.get("step", ws.get("steps", 0))
+            step = int(ws.get("step", ws.get("steps", 0)))
             ws.get("curr_step", 0)
             last_weight_sync = ws.get("last_weight_sync", 0)
-            weight_sync_count = ws.get("weight_sync_count", 0)
-            snapshot_saves = ws.get("snapshot_saves", 0)
-            snapshot_restores = ws.get("snapshot_restores", 0)
-            restores_without_progress = ws.get("restores_without_progress", 0)
-            max_restores = ws.get("max_restores", 3)
+            weight_sync_count = int(ws.get("weight_sync_count", 0))
+            snapshot_saves = int(ws.get("snapshot_saves", 0))
+            snapshot_restores = int(ws.get("snapshot_restores", 0))
+            restores_without_progress = int(ws.get("restores_without_progress", 0))
+            max_restores = int(ws.get("max_restores", 3))
             # Also support old rolling_avg_reward field
             rolling_avg_reward = ws.get("rolling_avg_reward", rolling_avg_reward)
             ws.get("first_flag_time", 0)
-            best_x_ever = ws.get("best_x_ever", 0)
+            best_x_ever = int(ws.get("best_x_ever", 0))
 
             # Calculate time since last weight sync
             if last_weight_sync > 0:
@@ -960,7 +961,7 @@ class TrainingUI:
                 sync_str = "never"
 
             # Main stats line with model-specific metrics and weight sync
-            game_time = ws.get("game_time", 0)
+            game_time = int(ws.get("game_time", 0))
             model_type = ws.get("model_type", "ddqn")
             
             # Build model-specific metric string
@@ -1184,30 +1185,31 @@ class TrainingUI:
             return
 
         # Extract all metrics (support both old and new field names)
-        episode = ws.get("episode", ws.get("episodes", 0))
-        step = ws.get("step", ws.get("steps", 0))
-        x_pos = ws.get("x_pos", 0)
-        game_time = ws.get("game_time", 0)
-        best_x_ever = ws.get("best_x_ever", 0)
+        # Convert to int for fields formatted with :d specifier
+        episode = int(ws.get("episode", ws.get("episodes", 0)))
+        step = int(ws.get("step", ws.get("steps", 0)))
+        x_pos = int(ws.get("x_pos", 0))
+        game_time = int(ws.get("game_time", 0))
+        best_x_ever = int(ws.get("best_x_ever", 0))
         epsilon = ws.get("epsilon", 1.0)
         steps_per_sec = ws.get("steps_per_sec", 0)
         # episode_reward = last episode's reward (GAUGE), reward = rolling average
         episode_reward = ws.get("episode_reward", ws.get("reward", 0))
         rolling_avg_reward = ws.get("reward", 0)
         rolling_avg_reward = ws.get("rolling_avg_reward", rolling_avg_reward)  # Support old field
-        deaths = ws.get("deaths", 0)
-        flags = ws.get("flags", 0)
+        deaths = int(ws.get("deaths", 0))
+        flags = int(ws.get("flags", 0))
         buffer_fill_pct = ws.get("buffer_fill_pct", 0)
-        buffer_size = ws.get("buffer_size", 0)
+        buffer_size = int(ws.get("buffer_size", 0))
         # Compute buffer fill % from buffer_size if available
         if buffer_fill_pct == 0 and buffer_size > 0:
             buffer_fill_pct = min(100.0, buffer_size / 100.0)  # Rough estimate
         can_train = ws.get("can_train", buffer_size >= 32)
         # Support both old (avg_speed) and new (speed) field names
         avg_speed = ws.get("avg_speed", ws.get("speed", 0))
-        total_deaths = ws.get("total_deaths", ws.get("deaths", 0))
-        snapshot_saves = ws.get("snapshot_saves", 0)
-        snapshot_restores = ws.get("snapshot_restores", 0)
+        total_deaths = int(ws.get("total_deaths", ws.get("deaths", 0)))
+        snapshot_saves = int(ws.get("snapshot_saves", 0))
+        snapshot_restores = int(ws.get("snapshot_restores", 0))
         last_weight_sync = ws.get("last_weight_sync", 0)
 
         # Calculate sync time string

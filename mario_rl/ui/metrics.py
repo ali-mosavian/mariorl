@@ -98,16 +98,19 @@ class MetricsAggregator:
 
         wm = self.worker_metrics[worker_id]
 
+        # Convert to int for fields used with :d format specifiers
         if episodes is not None:
+            episodes = int(episodes)
             self.total_episodes += episodes - wm.episodes
             wm.episodes = episodes
         if steps is not None:
-            wm.steps = steps
+            wm.steps = int(steps)
         if reward is not None:
             wm.reward = reward
         if x_pos is not None:
-            wm.x_pos = x_pos
+            wm.x_pos = int(x_pos)
         if best_x is not None:
+            best_x = int(best_x)
             wm.best_x = best_x
             self.best_x_ever = max(self.best_x_ever, best_x)
         if epsilon is not None:
@@ -115,9 +118,11 @@ class MetricsAggregator:
         if loss is not None:
             wm.loss = loss
         if deaths is not None:
+            deaths = int(deaths)
             self.total_deaths += deaths - wm.deaths
             wm.deaths = deaths
         if flags is not None:
+            flags = int(flags)
             self.total_flags += flags - wm.flags
             wm.flags = flags
         if last_heartbeat is not None:
@@ -138,11 +143,12 @@ class MetricsAggregator:
         """
         lm = self.learner_metrics
 
+        # Convert to int for fields used with :d format specifiers
         if update_count is not None:
-            lm.update_count = update_count
+            lm.update_count = int(update_count)
         if total_steps is not None:
-            lm.total_steps = total_steps
-            self.steps_history.append(total_steps)
+            lm.total_steps = int(total_steps)
+            self.steps_history.append(lm.total_steps)
         if learning_rate is not None:
             lm.learning_rate = learning_rate
         if loss is not None:
