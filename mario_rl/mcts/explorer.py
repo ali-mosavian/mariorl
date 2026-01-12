@@ -7,6 +7,7 @@ for complete value landscape learning.
 
 from __future__ import annotations
 
+import hashlib
 from typing import Any
 from typing import Callable
 from typing import Optional
@@ -21,6 +22,11 @@ from mario_rl.mcts.config import MCTSConfig
 from mario_rl.mcts.protocols import ValueAdapter
 from mario_rl.mcts.protocols import PolicyAdapter
 from mario_rl.mcts.protocols import WorldModelAdapter
+
+
+def _hash_obs(obs: np.ndarray) -> str:
+    """Hash observation for state deduplication."""
+    return hashlib.md5(obs.tobytes()).hexdigest()
 
 
 @dataclass
@@ -68,6 +74,10 @@ class MCTSExplorer:
     num_actions: int
     world_model: Optional[WorldModelAdapter] = None
 
+    # State deduplication (like original MCTS)
+    # Prevents expanding to already-visited states (avoids cycles)
+    _visited_states: set[str] = field(init=False, default_factory=set)
+
     # Statistics (mutable)
     _total_simulations: int = field(init=False, default=0)
     _total_transitions: int = field(init=False, default=0)
@@ -100,11 +110,12 @@ class MCTSExplorer:
         # Save root state
         root_snapshot = env.unwrapped.dump_state()
 
-        # Create root node
+        # Create root node and mark as visited
         root = MCTSNode(
             state_snapshot=root_snapshot,
             obs=root_obs.copy(),
         )
+        self._visited_states.add(_hash_obs(root_obs))
 
         # Set prior probabilities if using PUCT
         if self.config.use_prior:
@@ -294,6 +305,9 @@ class MCTSExplorer:
     ) -> tuple[Optional[MCTSNode], Optional[Transition]]:
         """
         Expand node by adding one new child for an untried action.
+
+        Uses state deduplication to avoid expanding to already-visited states
+        (like original MCTS), but still collects the transition for training.
         """
         if node.terminal:
             return None, None
@@ -313,10 +327,30 @@ class MCTSExplorer:
         if get_obs_fn:
             next_obs = get_obs_fn(env)
 
+        # Always create the transition (for training data)
+        transition = Transition(
+            state=node.obs,
+            action=action,
+            reward=float(reward),
+            next_state=next_obs,
+            done=done or truncated,
+        )
+
+        # Check if state already visited (deduplication like original MCTS)
+        obs_for_hash = next_obs.copy() if isinstance(next_obs, np.ndarray) else next_obs
+        state_hash = _hash_obs(obs_for_hash)
+        if state_hash in self._visited_states:
+            # State already visited - return transition but no new node
+            # This avoids cycles in the tree while still collecting training data
+            return None, transition
+
+        # Mark state as visited
+        self._visited_states.add(state_hash)
+
         # Create child node
         child = MCTSNode(
             state_snapshot=env.unwrapped.dump_state(),
-            obs=next_obs.copy() if isinstance(next_obs, np.ndarray) else next_obs,
+            obs=obs_for_hash,
             parent=node,
             action=action,
             terminal=done or truncated,
@@ -328,14 +362,6 @@ class MCTSExplorer:
             child.prior = probs[action]
 
         node.children.append(child)
-
-        transition = Transition(
-            state=node.obs,
-            action=action,
-            reward=float(reward),
-            next_state=next_obs,
-            done=done or truncated,
-        )
 
         return child, transition
 
@@ -432,12 +458,17 @@ class MCTSExplorer:
         return int(np.random.randint(self.num_actions))
 
     def _backpropagate(self, node: MCTSNode, value: float) -> None:
-        """Backpropagate value through tree to root."""
+        """
+        Backpropagate value through tree to root.
+
+        Note: We do NOT discount during backprop (same as standard MCTS).
+        The value already includes discounting from the rollout phase.
+        All nodes in the path get equal credit for the outcome.
+        """
         current: Optional[MCTSNode] = node
         while current is not None:
             current.visits += 1
             current.total_value += value
-            value *= self.config.discount  # Discount as we go up
             current = current.parent
 
     def _get_terminal_value(self, node: MCTSNode) -> float:
@@ -482,3 +513,12 @@ class MCTSExplorer:
         self._total_simulations = 0
         self._total_transitions = 0
         self._total_explorations = 0
+
+    def clear_visited_states(self) -> None:
+        """Clear visited states cache (for starting fresh exploration)."""
+        self._visited_states.clear()
+
+    def reset(self) -> None:
+        """Full reset: clear stats and visited states."""
+        self.reset_stats()
+        self.clear_visited_states()
