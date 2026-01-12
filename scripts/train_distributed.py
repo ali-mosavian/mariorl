@@ -423,6 +423,8 @@ def run_worker(
                 logger.gauge("mcts_avg_rollouts", info.get("mcts_avg_rollouts", 0))
                 logger.gauge("mcts_avg_tree_depth", info.get("mcts_avg_tree_depth", 0))
                 logger.gauge("mcts_avg_tree_size", info.get("mcts_avg_tree_size", 0))
+                # Flush immediately when using MCTS to update UI
+                logger.flush()
             else:
                 logger.gauge("mcts_used", 0)
 
