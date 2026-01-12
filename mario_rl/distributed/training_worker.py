@@ -8,6 +8,7 @@ Combines:
 - Weight synchronization from file
 - Optional: MetricLogger for CSV/ZMQ metrics
 - Optional: LevelTracker for per-level stats
+- Optional: MCTS exploration for enhanced learning
 """
 
 import time
@@ -24,6 +25,9 @@ from mario_rl.core.types import Transition
 from mario_rl.core.env_runner import EnvRunner
 from mario_rl.core.replay_buffer import ReplayBuffer
 from mario_rl.learners.base import Learner
+
+# MCTS imports (optional)
+from mario_rl.mcts import MCTSExplorer, MCTSConfig, DDQNAdapter
 
 
 class MetricsLogger(Protocol):
@@ -72,6 +76,13 @@ class TrainingWorker:
     logger: MetricsLogger | None = None
     flush_every: int = 100  # Flush metrics every N steps
 
+    # MCTS exploration (optional)
+    mcts_enabled: bool = False
+    mcts_num_simulations: int = 50
+    mcts_max_depth: int = 20
+    mcts_stuck_threshold: int = 500  # Steps without x progress to trigger MCTS
+    mcts_periodic_interval: int = 10  # Use MCTS every N episodes
+
     # Internal state
     _buffer: ReplayBuffer = field(init=False, repr=False)
     _env_runner: EnvRunner = field(init=False, repr=False)
@@ -79,6 +90,12 @@ class TrainingWorker:
     _steps_since_flush: int = field(init=False, default=0)
     _action_window: list = field(init=False, repr=False, default_factory=list)  # Rolling window of recent actions
     _action_window_size: int = 10000  # Track last 10k actions for recent distribution
+
+    # MCTS state
+    _mcts_explorer: MCTSExplorer | None = field(init=False, default=None)
+    _steps_without_x_progress: int = field(init=False, default=0)
+    _last_best_x: int = field(init=False, default=0)
+    _mcts_episodes_since_last: int = field(init=False, default=0)
 
     def __post_init__(self) -> None:
         """Initialize buffer and env runner."""
@@ -103,6 +120,21 @@ class TrainingWorker:
         )
 
         # Action window is initialized by default_factory in field definition
+
+        # Initialize MCTS if enabled
+        if self.mcts_enabled:
+            adapter = DDQNAdapter(net=self.model, device=self.device)
+            self._mcts_explorer = MCTSExplorer(
+                config=MCTSConfig(
+                    num_simulations=self.mcts_num_simulations,
+                    max_rollout_depth=self.mcts_max_depth,
+                    rollout_policy="mixed",
+                    value_source="mixed",
+                ),
+                policy=adapter,
+                value_fn=adapter,
+                num_actions=self.model.num_actions,
+            )
 
     @property
     def model(self):
@@ -240,6 +272,117 @@ class TrainingWorker:
                 self._steps_since_flush = 0
 
         return info
+
+    def _get_frame_stack_obs(self) -> np.ndarray:
+        """Get current observation from env (preprocessed)."""
+        # Access current observation through env runner
+        if hasattr(self._env_runner, "_current_obs") and self._env_runner._current_obs is not None:
+            return self._preprocess_state(self._env_runner._current_obs)
+        # Fallback: reset and get observation
+        obs, _ = self.env.reset()
+        return self._preprocess_state(obs)
+
+    def should_use_mcts(self) -> bool:
+        """Check if MCTS should be used this cycle."""
+        if not self.mcts_enabled or self._mcts_explorer is None:
+            return False
+
+        # Check stuck trigger
+        if self._steps_without_x_progress >= self.mcts_stuck_threshold:
+            return True
+
+        # Check periodic trigger
+        if self._mcts_episodes_since_last >= self.mcts_periodic_interval:
+            return True
+
+        return False
+
+    def collect_with_mcts(self, num_steps: int) -> dict[str, Any]:
+        """Collect experience using MCTS exploration.
+
+        MCTS explores multiple branches via save/restore,
+        collecting ALL transitions for training.
+
+        Args:
+            num_steps: Target number of steps (MCTS may collect more)
+
+        Returns:
+            Collection info dict
+        """
+        if self._mcts_explorer is None:
+            return self.collect(num_steps)
+
+        collect_start = time.time()
+
+        # Get current observation
+        obs = self._get_frame_stack_obs()
+
+        # Run MCTS exploration
+        self._mcts_explorer.clear_visited_states()
+        result = self._mcts_explorer.explore(
+            env=self.env,
+            root_obs=obs,
+            get_obs_fn=lambda env: self._get_frame_stack_obs(),
+        )
+
+        # Add all MCTS transitions to buffer
+        for t in result.transitions:
+            self._buffer.add(t)
+
+        transitions_collected = len(result.transitions)
+        self.total_steps += transitions_collected
+        self._steps_since_flush += transitions_collected
+
+        # Execute best action in real environment
+        best_action = result.best_action
+        obs, reward, terminated, truncated, info = self.env.step(best_action)
+        done = terminated or truncated
+
+        # Track x progress for stuck detection
+        x_pos = info.get("x_pos", 0)
+        if x_pos > self._last_best_x:
+            self._last_best_x = x_pos
+            self._steps_without_x_progress = 0
+        else:
+            self._steps_without_x_progress += 1
+
+        # Reset counters after MCTS
+        self._steps_without_x_progress = 0
+        self._mcts_episodes_since_last = 0
+
+        # Track episodes
+        episodes_completed = 1 if done else 0
+        if done:
+            self.total_episodes += 1
+            # Reset env for next cycle
+            self.env.reset()
+
+        # Calculate stats
+        collect_end = time.time()
+        elapsed = collect_end - collect_start
+        steps_per_sec = transitions_collected / max(elapsed, 0.001)
+
+        # Log metrics
+        if self.logger is not None:
+            self.logger.count("steps", n=transitions_collected)
+            self.logger.count("episodes", n=episodes_completed)
+            self.logger.count("mcts_explorations")
+            self.logger.gauge("mcts_transitions", transitions_collected)
+            self.logger.gauge("epsilon", self.epsilon_at(self.total_steps))
+            self.logger.gauge("buffer_size", len(self._buffer))
+            self.logger.gauge("steps_per_sec", steps_per_sec)
+
+            if self._steps_since_flush >= self.flush_every:
+                self.logger.flush()
+                self._steps_since_flush = 0
+
+        return {
+            "transitions": transitions_collected,
+            "episodes_completed": episodes_completed,
+            "step_infos": [info],
+            "episode_end_infos": [info] if done else [],
+            "mcts_used": True,
+        }
 
     def can_train(self) -> bool:
         """Check if buffer has enough data for training."""
@@ -386,8 +529,13 @@ class TrainingWorker:
         Returns:
             Cycle result with gradients and info
         """
-        # Collect
-        collection_info = self.collect(collect_steps)
+        # Collect (hybrid: MCTS or epsilon-greedy)
+        if self.should_use_mcts():
+            collection_info = self.collect_with_mcts(collect_steps)
+        else:
+            collection_info = self.collect(collect_steps)
+            # Track episodes for periodic MCTS trigger
+            self._mcts_episodes_since_last += collection_info.get("episodes_completed", 0)
 
         # Train (if we have enough data)
         all_grads: list[dict[str, Tensor]] = []

@@ -79,6 +79,13 @@ class Config:
     target_update_interval: int = 1  # Update target every step like working script
     checkpoint_interval: int = 10_000
 
+    # MCTS exploration (optional)
+    mcts_enabled: bool = False
+    mcts_num_simulations: int = 50
+    mcts_max_depth: int = 20
+    mcts_stuck_threshold: int = 500
+    mcts_periodic_interval: int = 10
+
 
 # =============================================================================
 # Helpers
@@ -237,6 +244,12 @@ def run_worker(
             epsilon_decay_steps=config.epsilon_decay_steps,
             logger=logger,
             flush_every=config.collect_steps * 10,  # Flush every 10 cycles
+            # MCTS exploration
+            mcts_enabled=config.mcts_enabled,
+            mcts_num_simulations=config.mcts_num_simulations,
+            mcts_max_depth=config.mcts_max_depth,
+            mcts_stuck_threshold=config.mcts_stuck_threshold,
+            mcts_periodic_interval=config.mcts_periodic_interval,
         )
 
         gradient_buffer = attach_tensor_buffer(
@@ -611,6 +624,12 @@ def start_monitor_thread(
 @click.option("--weight-decay", default=1e-4, help="L2 regularization")
 # Dreamer specific
 @click.option("--latent-dim", default=128, help="Latent dimension for Dreamer")
+# MCTS exploration
+@click.option("--mcts/--no-mcts", default=False, help="Enable MCTS exploration (hybrid mode)")
+@click.option("--mcts-sims", default=50, help="MCTS simulations per exploration")
+@click.option("--mcts-depth", default=20, help="MCTS max rollout depth")
+@click.option("--mcts-stuck", default=500, help="Steps without progress to trigger MCTS")
+@click.option("--mcts-periodic", default=10, help="Use MCTS every N episodes")
 # Other
 @click.option("--total-steps", default=2_000_000, help="Total training steps (for LR schedule)")
 @click.option("--no-ui", is_flag=True, help="Disable ncurses UI")
@@ -635,6 +654,11 @@ def main(
     max_grad_norm: float,
     weight_decay: float,
     latent_dim: int,
+    mcts: bool,
+    mcts_sims: int,
+    mcts_depth: int,
+    mcts_stuck: int,
+    mcts_periodic: int,
     total_steps: int,
     no_ui: bool,
 ) -> None:
@@ -651,6 +675,8 @@ def main(
     print(f"  Accumulate grads: {accumulate_grads}")
     print(f"  Epsilon: {eps_base}^(1+i/N), decay: {eps_decay_steps:,}")
     print(f"  Q-scale: {q_scale}, Max grad norm: {max_grad_norm}")
+    if mcts:
+        print(f"  MCTS: {mcts_sims} sims, depth={mcts_depth}, stuck={mcts_stuck}, periodic={mcts_periodic}")
     
     # Print GPU distribution
     from mario_rl.core.device import get_device_assignment_summary, assign_device
@@ -678,6 +704,11 @@ def main(
         epsilon_decay_steps=eps_decay_steps,
         q_scale=q_scale,
         latent_dim=latent_dim,
+        mcts_enabled=mcts,
+        mcts_num_simulations=mcts_sims,
+        mcts_max_depth=mcts_depth,
+        mcts_stuck_threshold=mcts_stuck,
+        mcts_periodic_interval=mcts_periodic,
     )
 
     # Setup directories
