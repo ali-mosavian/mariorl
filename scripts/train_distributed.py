@@ -414,6 +414,16 @@ def run_worker(
                 last_snapshot_saves = current_saves
                 last_snapshot_restores = current_restores
 
+            # Log MCTS metrics if MCTS was used this cycle
+            if info.get("mcts_used", False):
+                logger.gauge("mcts_used", 1)
+                logger.gauge("mcts_runs", info.get("mcts_runs", 0))
+                logger.gauge("mcts_avg_rollouts", info.get("mcts_avg_rollouts", 0))
+                logger.gauge("mcts_avg_tree_depth", info.get("mcts_avg_tree_depth", 0))
+                logger.gauge("mcts_avg_tree_size", info.get("mcts_avg_tree_size", 0))
+            else:
+                logger.gauge("mcts_used", 0)
+
             # Write gradients to shared memory
             if grads := result["gradients"]:
                 train_metrics = result.get("train_metrics", [{}])

@@ -1039,6 +1039,14 @@ class TrainingUI:
             else:
                 stdscr.addstr(" ✗", curses.color_pair(3) | curses.A_DIM)
 
+            # MCTS metrics (if using MCTS)
+            mcts_used = ws.get("mcts_used", False)
+            if mcts_used:
+                mcts_runs = int(ws.get("mcts_runs", 0))
+                mcts_rollouts = ws.get("mcts_avg_rollouts", 0)
+                mcts_depth = ws.get("mcts_avg_tree_depth", 0)
+                stdscr.addstr(f"  🌲{mcts_runs}x d={mcts_depth:.0f} r={mcts_rollouts:.0f}", curses.color_pair(4))
+
             # Show seconds since last action (for stuck detection)
             last_action_time = ws.get("last_action_time", 0)
             if last_action_time > 0:

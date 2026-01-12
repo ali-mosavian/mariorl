@@ -339,6 +339,12 @@ class TrainingWorker:
         episode_end_infos: list[dict] = []
         mcts_runs = 0
         actions_from_mcts = 0  # Track how many actions came from MCTS sequences
+        
+        # Aggregate MCTS stats across all runs
+        total_rollouts = 0
+        total_expansions = 0
+        total_tree_depth = 0
+        total_tree_size = 0
 
         # Get current observation
         obs = self._get_frame_stack_obs()
@@ -361,6 +367,13 @@ class TrainingWorker:
                     get_obs_fn=None,
                 )
                 mcts_runs += 1
+                
+                # Aggregate MCTS stats
+                stats = result.stats
+                total_rollouts += stats.get("rollouts_done", 0)
+                total_expansions += stats.get("expansions", 0)
+                total_tree_depth += stats.get("tree_depth", 0)
+                total_tree_size += stats.get("tree_size", 0)
 
                 # Add MCTS exploration transitions to buffer
                 for t in result.transitions:
@@ -429,6 +442,12 @@ class TrainingWorker:
         elapsed = collect_end - collect_start
         steps_per_sec = transitions_collected / max(elapsed, 0.001)
 
+        # Compute average MCTS stats
+        avg_rollouts = total_rollouts / max(mcts_runs, 1)
+        avg_expansions = total_expansions / max(mcts_runs, 1)
+        avg_tree_depth = total_tree_depth / max(mcts_runs, 1)
+        avg_tree_size = total_tree_size / max(mcts_runs, 1)
+
         # Log metrics
         if self.logger is not None:
             self.logger.count("steps", n=transitions_collected)
@@ -440,6 +459,11 @@ class TrainingWorker:
             self.logger.gauge("epsilon", self.epsilon_at(self.total_steps))
             self.logger.gauge("buffer_size", len(self._buffer))
             self.logger.gauge("steps_per_sec", steps_per_sec)
+            # New MCTS metrics
+            self.logger.gauge("mcts_avg_rollouts", avg_rollouts)
+            self.logger.gauge("mcts_avg_expansions", avg_expansions)
+            self.logger.gauge("mcts_avg_tree_depth", avg_tree_depth)
+            self.logger.gauge("mcts_avg_tree_size", avg_tree_size)
 
             if self._steps_since_flush >= self.flush_every:
                 self.logger.flush()
@@ -453,7 +477,11 @@ class TrainingWorker:
             "mcts_used": True,
             "mcts_runs": mcts_runs,
             "mcts_actions_executed": actions_from_mcts,
-            "mcts_runs": mcts_runs,
+            # MCTS quality metrics
+            "mcts_avg_rollouts": avg_rollouts,
+            "mcts_avg_expansions": avg_expansions,
+            "mcts_avg_tree_depth": avg_tree_depth,
+            "mcts_avg_tree_size": avg_tree_size,
         }
 
     def can_train(self) -> bool:
