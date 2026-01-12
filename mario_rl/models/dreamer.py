@@ -237,6 +237,132 @@ class Critic(nn.Module):
         return self.net(z).squeeze(-1)
 
 
+class Decoder(nn.Module):
+    """Transposed CNN decoder that reconstructs images from latent space."""
+
+    def __init__(self, output_shape: tuple[int, int, int], latent_dim: int) -> None:
+        super().__init__()
+        self.output_shape = output_shape
+        c, h, w = output_shape
+
+        # Compute the intermediate spatial dimensions
+        # These match the encoder's conv output before flattening
+        # For 64x64 input: conv1(8,4) -> 15, conv2(4,2) -> 6, conv3(3,1) -> 4
+        self.h_conv = 4
+        self.w_conv = 4
+        self.conv_channels = 64
+
+        # Project latent to conv feature size
+        self.fc = _layer_init(nn.Linear(latent_dim, self.conv_channels * self.h_conv * self.w_conv))
+
+        # Transposed convolutions (reverse of encoder)
+        self.deconv = nn.Sequential(
+            # Reverse of conv3: 4 -> 6
+            _layer_init(nn.ConvTranspose2d(64, 64, kernel_size=3, stride=1)),
+            nn.GELU(),
+            # Reverse of conv2: 6 -> 15  (kernel=4, stride=2 gives output_size = (6-1)*2 + 4 = 14)
+            # Adjust to get to 15
+            _layer_init(nn.ConvTranspose2d(64, 32, kernel_size=4, stride=2, output_padding=1)),
+            nn.GELU(),
+            # Reverse of conv1: 15 -> 64 (kernel=8, stride=4 gives output_size = (15-1)*4 + 8 = 64)
+            _layer_init(nn.ConvTranspose2d(32, c, kernel_size=8, stride=4)),
+            nn.Sigmoid(),  # Output in [0, 1] range
+        )
+
+    def forward(self, z: Tensor) -> Tensor:
+        """Decode latent to image.
+
+        Args:
+            z: Latent representation (batch, latent_dim)
+
+        Returns:
+            Reconstructed image (batch, C, H, W) in [0, 1]
+        """
+        batch_size = z.shape[0]
+
+        # Project and reshape to conv feature map
+        h = self.fc(z)
+        h = F.gelu(h)
+        h = h.view(batch_size, self.conv_channels, self.h_conv, self.w_conv)
+
+        # Decode through transposed convolutions
+        return self.deconv(h)
+
+
+# =============================================================================
+# SSIM Loss
+# =============================================================================
+
+
+def _gaussian_window(size: int, sigma: float, device: torch.device) -> Tensor:
+    """Create a 1D Gaussian window."""
+    coords = torch.arange(size, dtype=torch.float32, device=device)
+    coords -= size // 2
+    g = torch.exp(-(coords**2) / (2 * sigma**2))
+    return g / g.sum()
+
+
+def _create_ssim_window(window_size: int, channels: int, device: torch.device) -> Tensor:
+    """Create a 2D Gaussian window for SSIM."""
+    _1d_window = _gaussian_window(window_size, 1.5, device)
+    _2d_window = _1d_window.unsqueeze(1) @ _1d_window.unsqueeze(0)
+    return _2d_window.expand(channels, 1, window_size, window_size).contiguous()
+
+
+def ssim(
+    x: Tensor,
+    y: Tensor,
+    window_size: int = 11,
+    reduction: str = "mean",
+) -> Tensor:
+    """Compute Structural Similarity Index (SSIM) between two images.
+
+    Args:
+        x: First image tensor (N, C, H, W) in [0, 1]
+        y: Second image tensor (N, C, H, W) in [0, 1]
+        window_size: Size of the Gaussian window
+        reduction: 'none', 'mean', or 'sum'
+
+    Returns:
+        SSIM value(s) in [0, 1], higher is better
+    """
+    if x.dim() != 4:
+        raise ValueError(f"Expected 4D tensor, got {x.dim()}D")
+
+    channels = x.shape[1]
+    window = _create_ssim_window(window_size, channels, x.device)
+
+    # Constants for numerical stability
+    C1 = 0.01**2
+    C2 = 0.03**2
+
+    padding = window_size // 2
+
+    # Compute means
+    mu_x = F.conv2d(x, window, padding=padding, groups=channels)
+    mu_y = F.conv2d(y, window, padding=padding, groups=channels)
+
+    mu_x_sq = mu_x**2
+    mu_y_sq = mu_y**2
+    mu_xy = mu_x * mu_y
+
+    # Compute variances and covariance
+    sigma_x_sq = F.conv2d(x**2, window, padding=padding, groups=channels) - mu_x_sq
+    sigma_y_sq = F.conv2d(y**2, window, padding=padding, groups=channels) - mu_y_sq
+    sigma_xy = F.conv2d(x * y, window, padding=padding, groups=channels) - mu_xy
+
+    # SSIM formula
+    numerator = (2 * mu_xy + C1) * (2 * sigma_xy + C2)
+    denominator = (mu_x_sq + mu_y_sq + C1) * (sigma_x_sq + sigma_y_sq + C2)
+    ssim_map = numerator / denominator
+
+    if reduction == "mean":
+        return ssim_map.mean()
+    elif reduction == "sum":
+        return ssim_map.sum()
+    return ssim_map
+
+
 class DreamerModel(nn.Module):
     """Dreamer: World Model + Actor-Critic for model-based RL.
 
@@ -264,6 +390,7 @@ class DreamerModel(nn.Module):
 
         # World model components
         self.encoder = Encoder(input_shape, latent_dim)
+        self.decoder = Decoder(input_shape, latent_dim)
         self.dynamics = Dynamics(latent_dim, num_actions, hidden_dim)
         self.reward_pred = RewardPredictor(latent_dim, hidden_dim)
         self.done_pred = DonePredictor(latent_dim, hidden_dim)

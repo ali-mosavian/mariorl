@@ -18,6 +18,7 @@ from torch import Tensor
 import torch.nn.functional as F
 
 from mario_rl.models import DreamerModel
+from mario_rl.models.dreamer import ssim
 
 
 @dataclass
@@ -43,6 +44,9 @@ class DreamerLearner:
     actor_scale: float = 1.0
     critic_scale: float = 1.0
     entropy_scale: float = 0.001
+    recon_scale: float = 1.0
+    ssim_scale: float = 0.1
+    kl_scale: float = 0.1
 
     def compute_loss(
         self,
@@ -102,6 +106,9 @@ class DreamerLearner:
         """Compute world model loss on real transitions.
 
         Losses:
+        - Reconstruction: decode latent back to image
+        - SSIM: perceptual similarity between reconstruction and original
+        - KL: regularize encoder distribution
         - Dynamics: predict next latent from current latent + action
         - Reward: predict reward from next latent
 
@@ -113,29 +120,54 @@ class DreamerLearner:
 
         Returns:
             loss: World model loss
-            metrics: Dynamics and reward loss metrics
+            metrics: All loss component metrics
         """
-        # Encode current and next states
-        z = self.model.encode(states, deterministic=False)
+        # Normalize states to [0, 1] for loss computation
+        states_norm = states / 255.0
+        next_states_norm = next_states / 255.0
+
+        # Encode current and next states (raw encode for mu/logvar)
+        z_mu, z_logvar = self.model.encoder(states_norm)
+        z = self.model.encoder.sample(z_mu, z_logvar)
         z_next_target = self.model.encode(next_states, deterministic=True).detach()
 
-        # Predict next latent using dynamics
+        # 1. Reconstruction loss (current frame)
+        recon = self.model.decoder(z)
+        recon_loss = F.mse_loss(recon, states_norm)
+
+        # 2. SSIM for perceptual quality
+        ssim_val = ssim(recon, states_norm)
+
+        # 3. KL divergence for encoder regularization
+        # Clamp logvar for numerical stability
+        z_logvar_clamped = z_logvar.clamp(-10, 2)
+        kl_loss = -0.5 * torch.mean(
+            1 + z_logvar_clamped - z_mu.pow(2) - z_logvar_clamped.exp()
+        )
+
+        # 4. Predict next latent using dynamics
         z_next_pred, _, z_next_mu = self.model.dynamics(z, actions)
 
         # Dynamics loss: MSE between predicted and actual next latent
         dynamics_loss = F.mse_loss(z_next_mu, z_next_target)
 
-        # Reward prediction loss
+        # 5. Reward prediction loss
         reward_pred = self.model.reward_pred(z_next_pred)
         reward_loss = F.mse_loss(reward_pred, rewards)
 
         # Total world model loss
         wm_loss = (
-            self.dynamics_scale * dynamics_loss
+            self.recon_scale * recon_loss
+            - self.ssim_scale * ssim_val  # Negative because we maximize SSIM
+            + self.kl_scale * kl_loss
+            + self.dynamics_scale * dynamics_loss
             + self.reward_scale * reward_loss
         )
 
         metrics = {
+            "recon_loss": recon_loss.item(),
+            "ssim": ssim_val.item(),
+            "kl_loss": kl_loss.item(),
             "dynamics_loss": dynamics_loss.item(),
             "reward_loss": reward_loss.item(),
             "wm_loss": wm_loss.item(),

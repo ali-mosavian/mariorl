@@ -47,40 +47,40 @@ def render_workers_tab(workers: dict[int, pd.DataFrame]) -> None:
     # Row 1: Reward and Speed (common)
     col1, col2 = st.columns(2)
     with col1:
-        _render_worker_chart(workers, "reward", "Rolling Avg Reward by Worker", colors, show_legend=True)
+        _render_worker_chart(workers, "reward", "Rolling Avg Reward by Worker", colors, x_column="steps", show_legend=True)
     with col2:
-        _render_worker_chart(workers, "speed", "Speed by Worker", colors)
+        _render_worker_chart(workers, "speed", "Speed by Worker", colors, x_column="steps")
 
     # Row 2: Best X and Loss (common)
     col3, col4 = st.columns(2)
     with col3:
-        _render_worker_chart(workers, "best_x_ever", "Best X Position by Worker", colors)
+        _render_worker_chart(workers, "best_x_ever", "Best X Position by Worker", colors, x_column="steps")
     with col4:
-        _render_worker_chart(workers, "loss", "Total Loss by Worker", colors)
+        _render_worker_chart(workers, "loss", "Total Loss by Worker", colors, x_column="steps")
 
     # Row 3: Model-specific metrics
     col5, col6 = st.columns(2)
     if model_type == "dreamer":
         # Dreamer: World model and behavior losses
         with col5:
-            _render_worker_chart(workers, "wm_loss", "World Model Loss by Worker", colors)
+            _render_worker_chart(workers, "wm_loss", "World Model Loss by Worker", colors, x_column="steps")
         with col6:
-            _render_worker_chart(workers, "behavior_loss", "Behavior Loss by Worker", colors)
+            _render_worker_chart(workers, "behavior_loss", "Behavior Loss by Worker", colors, x_column="steps")
     else:
         # DDQN: Q-values and TD error
         with col5:
-            _render_worker_chart(workers, "q_mean", "Q Mean by Worker", colors)
+            _render_worker_chart(workers, "q_mean", "Q Mean by Worker", colors, x_column="steps")
         with col6:
-            _render_worker_chart(workers, "td_error", "TD Error by Worker", colors)
+            _render_worker_chart(workers, "td_error", "TD Error by Worker", colors, x_column="steps")
 
     # Row 4: Model-specific metrics (continued)
     col7, col8 = st.columns(2)
     if model_type == "dreamer":
         # Dreamer: Actor and Critic losses
         with col7:
-            _render_worker_chart(workers, "actor_loss", "Actor Loss by Worker", colors)
+            _render_worker_chart(workers, "actor_loss", "Actor Loss by Worker", colors, x_column="steps")
         with col8:
-            _render_worker_chart(workers, "critic_loss", "Critic Loss by Worker", colors)
+            _render_worker_chart(workers, "critic_loss", "Critic Loss by Worker", colors, x_column="steps")
     else:
         # DDQN: Epsilon and PER Beta
         with col7:
@@ -91,11 +91,11 @@ def render_workers_tab(workers: dict[int, pd.DataFrame]) -> None:
     # Row 5: Model-specific charts
     col_e1, col_e2 = st.columns(2)
     if model_type == "dreamer":
-        # Dreamer: Policy entropy (from actor loss) and Value estimates
+        # Dreamer: Reconstruction and SSIM (world model quality)
         with col_e1:
-            _render_worker_chart(workers, "entropy", "Policy Entropy (Actor)", colors, key="dreamer_entropy")
+            _render_worker_chart(workers, "recon_loss", "Reconstruction Loss by Worker", colors, x_column="steps", key="recon_loss")
         with col_e2:
-            _render_worker_chart(workers, "value_mean", "Value Mean by Worker", colors)
+            _render_worker_chart(workers, "ssim", "SSIM by Worker", colors, x_column="steps", key="ssim")
     else:
         # DDQN: Elite buffer charts
         with col_e1:
@@ -103,13 +103,39 @@ def render_workers_tab(workers: dict[int, pd.DataFrame]) -> None:
         with col_e2:
             _render_elite_quality_chart(workers, colors)
 
-    # Row 6: Action distribution (empirical, from actual actions taken)
+    # Row 6: Model-specific charts (continued)
+    col_f1, col_f2 = st.columns(2)
+    if model_type == "dreamer":
+        # Dreamer: KL loss and Value estimates
+        with col_f1:
+            _render_worker_chart(workers, "kl_loss", "KL Divergence by Worker", colors, x_column="steps", key="kl_loss")
+        with col_f2:
+            _render_worker_chart(workers, "value_mean", "Value Mean by Worker", colors, x_column="steps")
+    else:
+        # DDQN: additional metrics if needed
+        pass
+
+    # Row 7: Entropy metrics
+    col_g1, col_g2 = st.columns(2)
+    if model_type == "dreamer":
+        # Dreamer: Policy entropy (from actor loss)
+        with col_g1:
+            _render_worker_chart(workers, "entropy", "Policy Entropy (Actor)", colors, x_column="steps", key="dreamer_entropy")
+        with col_g2:
+            _render_worker_chart(workers, "action_entropy", "Action Entropy (Empirical)", colors, x_column="steps", key="action_entropy")
+    else:
+        # DDQN: Action entropy only
+        with col_g1:
+            _render_worker_chart(workers, "action_entropy", "Action Entropy (Empirical)", colors, x_column="steps", key="action_entropy")
+        with col_g2:
+            pass
+
+    # Row 8: Action distribution heatmap (common)
     col9, col10 = st.columns(2)
     with col9:
-        # action_entropy is computed from actual action distribution during rollouts
-        _render_worker_chart(workers, "action_entropy", "Action Entropy (Empirical)", colors, key="action_entropy")
-    with col10:
         _render_action_distribution_heatmap(workers)
+    with col10:
+        pass
 
 
 def _render_summary_table(workers: dict[int, pd.DataFrame], model_type: str = "ddqn") -> None:
@@ -158,8 +184,8 @@ def _render_summary_table(workers: dict[int, pd.DataFrame], model_type: str = "d
         if model_type == "dreamer":
             row.update({
                 "WM Loss": f"{latest.get('wm_loss', 0):.3f}",
-                "Actor": f"{latest.get('actor_loss', 0):.3f}",
-                "Critic": f"{latest.get('critic_loss', 0):.3f}",
+                "Recon": f"{latest.get('recon_loss', 0):.3f}",
+                "SSIM": f"{latest.get('ssim', 0):.3f}",
                 "Entropy": f"{latest.get('entropy', 0):.3f}",
             })
         else:
@@ -205,11 +231,25 @@ def _render_worker_chart(
     column: str,
     title: str,
     colors: list[str],
-    x_column: str = "episodes",
+    x_column: str = "steps",
     show_legend: bool = False,
     key: str | None = None,
 ) -> None:
     """Render a comparison chart for a single metric across workers."""
+    # Check if any worker has this column
+    has_data = any(len(df) > 0 and column in df.columns for df in workers.values())
+    
+    if not has_data:
+        st.caption(f"📊 {title}")
+        st.info(f"No data for '{column}' (metric not tracked in this run)")
+        return
+    
+    # Use column name as key if not provided
+    chart_key = key or f"worker_chart_{column}"
+    
+    # Log scale toggle using a small toggle in the title row
+    log_scale = st.toggle("📈", key=f"{chart_key}_log", help="Log Y scale")
+    
     fig = go.Figure()
     
     for i, (wid, df) in enumerate(sorted(workers.items())):
@@ -222,21 +262,21 @@ def _render_worker_chart(
                 opacity=0.8,
             ))
     
+    x_title = "Episode" if x_column == "episodes" else "Steps"
+    y_type = "log" if log_scale else "linear"
     fig.update_layout(
-        title=title,
+        title=dict(text=title, font=dict(size=12)),
         height=280,
         margin=dict(l=0, r=0, t=30, b=0),
         **DARK_LAYOUT,
-        xaxis=dict(title="Episode" if x_column == "episodes" else "Steps", **GRID_STYLE),
-        yaxis=dict(**GRID_STYLE),
+        xaxis=dict(title=x_title, **GRID_STYLE),
+        yaxis=dict(type=y_type, **GRID_STYLE),
         showlegend=show_legend,
     )
     
     if show_legend:
         fig.update_layout(legend=dict(orientation="h", yanchor="bottom", y=1.02))
     
-    # Use column name as key if not provided
-    chart_key = key or f"worker_chart_{column}"
     st.plotly_chart(fig, use_container_width=True, key=chart_key)
 
 

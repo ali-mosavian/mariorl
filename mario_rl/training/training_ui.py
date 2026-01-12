@@ -717,7 +717,7 @@ class TrainingUI:
             if reward_mean != 0:
                 stdscr.addstr(f"  r̄={reward_mean:.1f}")
 
-            # Learning rate and weight version (diagnostic info)
+            # Learning rate, weight version, and device (diagnostic info)
             stdscr.addstr(y + 4, 4, "")
             if lr > 0:
                 stdscr.addstr("LR=")
@@ -732,6 +732,10 @@ class TrainingUI:
                 stdscr.addstr("  ")
             if weight_version > 0:
                 stdscr.addstr(f"Weights: v{weight_version}")
+            # Device info
+            device = ls.get("device", "")
+            if device:
+                stdscr.addstr(f"  📍{device}", curses.color_pair(4))
             # Status indicator
             status_color = curses.color_pair(1) if status == "training" else curses.color_pair(2)
             if status != "running":
@@ -890,7 +894,7 @@ class TrainingUI:
         """Draw a worker section."""
         ws = self.worker_statuses.get(worker_id, {})
 
-        # Header with level info
+        # Header with level info and device
         if ws:
             # Try new world/stage format first, fall back to current_level string
             world = ws.get("world", 0)
@@ -899,9 +903,12 @@ class TrainingUI:
                 current_level = f"{int(world)}-{int(stage)}"
             else:
                 current_level = ws.get("current_level", "?")
+            device = ws.get("device", "")
         else:
             current_level = "?"
-        header = f"├─ WORKER {worker_id} [{current_level}] "
+            device = ""
+        device_str = f" @{device}" if device else ""
+        header = f"├─ WORKER {worker_id} [{current_level}]{device_str} "
         stdscr.addstr(y, 2, header, curses.A_BOLD | curses.color_pair(5))
         stdscr.addstr(y, 2 + len(header), "─" * (width - len(header) - 4))
 
@@ -1118,7 +1125,7 @@ class TrainingUI:
         """Draw a compact 3-line worker display within a column."""
         ws = self.worker_statuses.get(worker_id, {})
 
-        # Header with worker ID and level
+        # Header with worker ID, level, and device
         if ws:
             # Try new world/stage format first, fall back to current_level string
             world = ws.get("world", 0)
@@ -1127,9 +1134,18 @@ class TrainingUI:
                 current_level = f"{int(world)}-{int(stage)}"
             else:
                 current_level = ws.get("current_level", "?")
+            # Get device (e.g., "cuda:0" -> "0", "cpu" -> "cpu")
+            device = ws.get("device", "")
+            if device.startswith("cuda:"):
+                device_short = f"G{device[5:]}"  # "cuda:0" -> "G0"
+            elif device:
+                device_short = device[:3]  # "cpu" -> "cpu", "mps" -> "mps"
+            else:
+                device_short = ""
         else:
             current_level = "?"
-        header = f"W{worker_id}[{current_level}]"
+            device_short = ""
+        header = f"W{worker_id}[{current_level}]" + (f"({device_short})" if device_short else "")
         
         # Calculate heartbeat status
         last_heartbeat = ws.get("last_heartbeat", 0) if ws else 0

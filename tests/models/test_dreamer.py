@@ -348,3 +348,136 @@ def test_large_batch(dreamer_model, config: DreamerTestConfig) -> None:
 
     assert z.shape == (256, config.latent_dim)
     assert logits.shape == (256, config.num_actions)
+
+
+# =============================================================================
+# Decoder Tests
+# =============================================================================
+
+
+def test_has_decoder(dreamer_model) -> None:
+    """DreamerModel should have a decoder for reconstruction."""
+    assert hasattr(dreamer_model, "decoder")
+
+
+def test_decoder_returns_correct_shape(
+    dreamer_model, config: DreamerTestConfig
+) -> None:
+    """Decoder should reconstruct images with original input shape."""
+    batch_size = 8
+    z = torch.randn(batch_size, config.latent_dim)
+
+    reconstruction = dreamer_model.decoder(z)
+
+    # Should match input_shape: (C, H, W)
+    assert reconstruction.shape == (batch_size, *config.input_shape)
+
+
+def test_decoder_output_in_valid_range(
+    dreamer_model, config: DreamerTestConfig
+) -> None:
+    """Decoder output should be in [0, 1] range for images."""
+    z = torch.randn(8, config.latent_dim)
+
+    reconstruction = dreamer_model.decoder(z)
+
+    assert reconstruction.min() >= 0.0
+    assert reconstruction.max() <= 1.0
+
+
+def test_decoder_supports_gradient_flow(
+    dreamer_model, config: DreamerTestConfig
+) -> None:
+    """Gradients should flow through decoder."""
+    z = torch.randn(8, config.latent_dim, requires_grad=True)
+
+    reconstruction = dreamer_model.decoder(z)
+    loss = reconstruction.sum()
+    loss.backward()
+
+    assert z.grad is not None
+
+
+def test_encode_decode_roundtrip(
+    dreamer_model, sample_batch: Tensor, config: DreamerTestConfig
+) -> None:
+    """Encoding then decoding should produce same-shaped output."""
+    # Normalize to [0, 1] like real inputs
+    normalized = sample_batch.abs() / (sample_batch.abs().max() + 1e-6)
+
+    z = dreamer_model.encode(normalized * 255)  # encode expects [0, 255]
+    reconstruction = dreamer_model.decoder(z)
+
+    assert reconstruction.shape == normalized.shape
+
+
+# =============================================================================
+# SSIM Function Tests
+# =============================================================================
+
+
+def test_ssim_function_exists() -> None:
+    """SSIM function should be importable from models.dreamer."""
+    from mario_rl.models.dreamer import ssim
+
+    assert callable(ssim)
+
+
+def test_ssim_identical_images_returns_one() -> None:
+    """SSIM of identical images should be 1.0."""
+    from mario_rl.models.dreamer import ssim
+
+    x = torch.rand(4, 1, 64, 64)
+
+    score = ssim(x, x)
+
+    assert score.item() == pytest.approx(1.0, abs=1e-5)
+
+
+def test_ssim_different_images_returns_less_than_one() -> None:
+    """SSIM of different images should be less than 1.0."""
+    from mario_rl.models.dreamer import ssim
+
+    x = torch.rand(4, 1, 64, 64)
+    y = torch.rand(4, 1, 64, 64)
+
+    score = ssim(x, y)
+
+    assert score.item() < 1.0
+
+
+def test_ssim_returns_scalar() -> None:
+    """SSIM with mean reduction should return a scalar."""
+    from mario_rl.models.dreamer import ssim
+
+    x = torch.rand(4, 1, 64, 64)
+    y = torch.rand(4, 1, 64, 64)
+
+    score = ssim(x, y, reduction="mean")
+
+    assert score.dim() == 0
+
+
+def test_ssim_is_differentiable() -> None:
+    """SSIM should support gradient computation."""
+    from mario_rl.models.dreamer import ssim
+
+    x = torch.rand(4, 1, 64, 64, requires_grad=True)
+    y = torch.rand(4, 1, 64, 64)
+
+    score = ssim(x, y)
+    score.backward()
+
+    assert x.grad is not None
+
+
+def test_ssim_multi_channel() -> None:
+    """SSIM should work with multiple channels."""
+    from mario_rl.models.dreamer import ssim
+
+    x = torch.rand(4, 4, 64, 64)  # 4 channels (frame stack)
+    y = torch.rand(4, 4, 64, 64)
+
+    score = ssim(x, y)
+
+    assert 0.0 <= score.item() <= 1.0

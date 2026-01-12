@@ -85,15 +85,6 @@ class Config:
 # =============================================================================
 
 
-def get_device() -> torch.device:
-    """Get best available accelerator device."""
-    if torch.cuda.is_available():
-        return torch.device("cuda")
-    if hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
-        return torch.device("mps")
-    return torch.device("cpu")
-
-
 def create_model_and_learner(
     config: Config,
     device: torch.device | None = None,
@@ -188,6 +179,7 @@ def run_worker(
     shm_dir: Path,
     zmq_endpoint: str,
     run_dir: Path,
+    device_str: str,
 ) -> None:
     """Run a training worker process."""
     install_exit_handler()
@@ -200,7 +192,7 @@ def run_worker(
         from mario_rl.training.shared_gradient_tensor import attach_tensor_buffer
         from mario_rl.metrics import MetricLogger, DDQNMetrics, DreamerMetrics
 
-        device = get_device()
+        device = torch.device(device_str)
         events.log(f"Starting on {device}...")
 
         # Worker-specific epsilon for diverse exploration
@@ -228,6 +220,9 @@ def run_worker(
             csv_path=csv_path,
             publisher=events,
         )
+        
+        # Set device as a constant text metric (included in all flushes)
+        logger.text("device", device_str)
 
         worker = TrainingWorker(
             env=env,
@@ -443,6 +438,7 @@ def run_coordinator(
     shm_dir: Path,
     zmq_endpoint: str,
     run_dir: Path,
+    device_str: str,
 ) -> None:
     """Run the training coordinator process."""
     install_exit_handler()
@@ -452,7 +448,7 @@ def run_coordinator(
         from mario_rl.distributed.training_coordinator import TrainingCoordinator
         from mario_rl.metrics import MetricLogger, CoordinatorMetrics
 
-        device = get_device()
+        device = torch.device(device_str)
         events.log(f"Starting on {device}...")
 
         _, learner = create_model_and_learner(config, device)
@@ -500,6 +496,7 @@ def run_coordinator(
                     grad_norm=result.get("grad_norm", 0.0),
                     weight_version=result.get("weight_version", 0),
                     lr=result.get("lr", 0.0),
+                    device=device_str,
                 )
 
                 last_log = time.time()
@@ -654,6 +651,10 @@ def main(
     print(f"  Accumulate grads: {accumulate_grads}")
     print(f"  Epsilon: {eps_base}^(1+i/N), decay: {eps_decay_steps:,}")
     print(f"  Q-scale: {q_scale}, Max grad norm: {max_grad_norm}")
+    
+    # Print GPU distribution
+    from mario_rl.core.device import get_device_assignment_summary, assign_device
+    print(f"  {get_device_assignment_summary(workers)}")
     print("=" * 70)
 
     config = Config(
@@ -802,25 +803,30 @@ def main(
         ui_process.start()
 
     # Start workers (pass zmq_endpoint, not ui_queue)
+    # Workers are process_id 1, 2, 3, ... (coordinator is 0)
+    num_processes = workers + 1
     worker_processes = []
     for i in range(workers):
+        worker_device = assign_device(process_id=i + 1, num_processes=num_processes)
         p = Process(
             target=run_worker,
-            args=(i, config, weights_path, shm_paths[i], shm_dir, zmq_endpoint, run_dir),
+            args=(i, config, weights_path, shm_paths[i], shm_dir, zmq_endpoint, run_dir, worker_device),
             daemon=True,
         )
         p.start()
         worker_processes.append((p, i))
-        print(f"Started worker {i}")
+        print(f"Started worker {i} on {worker_device}")
 
     # Start coordinator (pass zmq_endpoint, not ui_queue)
+    # Coordinator is process_id 0
+    coord_device = assign_device(process_id=0, num_processes=num_processes)
     coord_process = Process(
         target=run_coordinator,
-        args=(config, weights_path, run_dir, shm_dir, zmq_endpoint, run_dir),
+        args=(config, weights_path, run_dir, shm_dir, zmq_endpoint, run_dir, coord_device),
         daemon=True,
     )
     coord_process.start()
-    print("Started coordinator")
+    print(f"Started coordinator on {coord_device}")
 
     # Process manager
     stop_event = threading.Event()

@@ -14,7 +14,7 @@ from mario_rl.core.types import WorkerStatus
 from mario_rl.core.config import BufferConfig
 from mario_rl.core.config import WorkerConfig
 from mario_rl.core.config import LearnerConfig
-from mario_rl.core.device import detect_device
+from mario_rl.core.device import detect_device, get_gpu_count, assign_device, get_device_assignment_summary
 from mario_rl.core.episode import EpisodeState
 from mario_rl.core.types import GradientPacket
 from mario_rl.core.config import SnapshotConfig
@@ -38,6 +38,9 @@ __all__ = [
     "ExplorationConfig",
     # Utilities
     "detect_device",
+    "get_gpu_count",
+    "assign_device",
+    "get_device_assignment_summary",
     # State tracking
     "EpisodeState",
     "MetricsTracker",

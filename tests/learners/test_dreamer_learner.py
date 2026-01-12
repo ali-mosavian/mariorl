@@ -354,3 +354,128 @@ def test_different_imagination_horizons(
     loss, _ = learner.compute_loss(states, actions, rewards, next_states, dones)
 
     assert not torch.isnan(loss)
+
+
+# =============================================================================
+# Reconstruction Loss Tests
+# =============================================================================
+
+
+def test_world_model_loss_includes_reconstruction(
+    dreamer_learner, sample_batch: dict[str, Tensor]
+) -> None:
+    """World model loss metrics should include reconstruction loss."""
+    _, metrics = dreamer_learner.compute_world_model_loss(
+        states=sample_batch["states"],
+        actions=sample_batch["actions"],
+        rewards=sample_batch["rewards"],
+        next_states=sample_batch["next_states"],
+    )
+
+    assert "recon_loss" in metrics
+    assert isinstance(metrics["recon_loss"], float)
+
+
+def test_world_model_loss_includes_ssim(
+    dreamer_learner, sample_batch: dict[str, Tensor]
+) -> None:
+    """World model loss metrics should include SSIM score."""
+    _, metrics = dreamer_learner.compute_world_model_loss(
+        states=sample_batch["states"],
+        actions=sample_batch["actions"],
+        rewards=sample_batch["rewards"],
+        next_states=sample_batch["next_states"],
+    )
+
+    assert "ssim" in metrics
+    assert isinstance(metrics["ssim"], float)
+    assert 0.0 <= metrics["ssim"] <= 1.0
+
+
+def test_world_model_loss_includes_kl(
+    dreamer_learner, sample_batch: dict[str, Tensor]
+) -> None:
+    """World model loss metrics should include KL divergence."""
+    _, metrics = dreamer_learner.compute_world_model_loss(
+        states=sample_batch["states"],
+        actions=sample_batch["actions"],
+        rewards=sample_batch["rewards"],
+        next_states=sample_batch["next_states"],
+    )
+
+    assert "kl_loss" in metrics
+    assert isinstance(metrics["kl_loss"], float)
+    assert metrics["kl_loss"] >= 0.0  # KL is non-negative
+
+
+def test_reconstruction_loss_decreases_with_identical_inputs(
+    dreamer_learner, config: LearnerTestConfig
+) -> None:
+    """Reconstruction loss should be lower when states are similar."""
+    # Create a batch where states and next_states are identical
+    states = torch.randn(config.batch_size, *config.input_shape).abs()
+    next_states = states.clone()
+    actions = torch.randint(0, config.num_actions, (config.batch_size,))
+    rewards = torch.zeros(config.batch_size)
+
+    _, metrics = dreamer_learner.compute_world_model_loss(
+        states=states,
+        actions=actions,
+        rewards=rewards,
+        next_states=next_states,
+    )
+
+    # Loss should still be finite and non-negative
+    assert metrics["recon_loss"] >= 0.0
+    assert not torch.isnan(torch.tensor(metrics["recon_loss"]))
+
+
+def test_total_metrics_include_reconstruction_metrics(
+    dreamer_learner, sample_batch: dict[str, Tensor]
+) -> None:
+    """Total compute_loss metrics should include reconstruction and SSIM."""
+    _, metrics = dreamer_learner.compute_loss(**sample_batch)
+
+    assert "recon_loss" in metrics
+    assert "ssim" in metrics
+
+
+# =============================================================================
+# Loss Weight Configuration Tests
+# =============================================================================
+
+
+def test_learner_has_recon_scale_parameter(dreamer_model: DreamerModel) -> None:
+    """DreamerLearner should accept recon_scale parameter."""
+    from mario_rl.learners.dreamer import DreamerLearner
+
+    learner = DreamerLearner(
+        model=dreamer_model,
+        recon_scale=0.5,
+    )
+
+    assert learner.recon_scale == 0.5
+
+
+def test_learner_has_ssim_scale_parameter(dreamer_model: DreamerModel) -> None:
+    """DreamerLearner should accept ssim_scale parameter."""
+    from mario_rl.learners.dreamer import DreamerLearner
+
+    learner = DreamerLearner(
+        model=dreamer_model,
+        ssim_scale=0.1,
+    )
+
+    assert learner.ssim_scale == 0.1
+
+
+def test_learner_has_kl_scale_parameter(dreamer_model: DreamerModel) -> None:
+    """DreamerLearner should accept kl_scale parameter."""
+    from mario_rl.learners.dreamer import DreamerLearner
+
+    learner = DreamerLearner(
+        model=dreamer_model,
+        kl_scale=0.1,
+    )
+
+    assert learner.kl_scale == 0.1

@@ -145,6 +145,9 @@ class DreamerMetrics(CommonMetrics):
     
     # World model losses
     WM_LOSS = MetricDef("wm_loss", MetricType.ROLLING)
+    RECON_LOSS = MetricDef("recon_loss", MetricType.ROLLING)
+    SSIM = MetricDef("ssim", MetricType.GAUGE)
+    KL_LOSS = MetricDef("kl_loss", MetricType.ROLLING)
     DYNAMICS_LOSS = MetricDef("dynamics_loss", MetricType.ROLLING)
     REWARD_LOSS = MetricDef("reward_loss", MetricType.ROLLING)
     
@@ -169,6 +172,9 @@ class DreamerMetrics(CommonMetrics):
             cls.LOSS,
             cls.GRAD_NORM,
             cls.WM_LOSS,
+            cls.RECON_LOSS,
+            cls.SSIM,
+            cls.KL_LOSS,
             cls.DYNAMICS_LOSS,
             cls.REWARD_LOSS,
             cls.BEHAVIOR_LOSS,

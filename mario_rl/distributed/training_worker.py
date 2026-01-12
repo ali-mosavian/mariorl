@@ -322,6 +322,12 @@ class TrainingWorker:
             # Dreamer-specific metrics
             if "wm_loss" in metrics:
                 self.logger.observe("wm_loss", float(metrics["wm_loss"]))
+            if "recon_loss" in metrics:
+                self.logger.observe("recon_loss", float(metrics["recon_loss"]))
+            if "ssim" in metrics:
+                self.logger.gauge("ssim", float(metrics["ssim"]))
+            if "kl_loss" in metrics:
+                self.logger.observe("kl_loss", float(metrics["kl_loss"]))
             if "dynamics_loss" in metrics:
                 self.logger.observe("dynamics_loss", float(metrics["dynamics_loss"]))
             if "reward_loss" in metrics:
