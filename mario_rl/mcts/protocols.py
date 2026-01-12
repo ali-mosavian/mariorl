@@ -7,11 +7,13 @@ and allows any compatible network to be used without inheritance.
 """
 
 from typing import Protocol
+from typing import runtime_checkable
 
 import torch
 import numpy as np
 
 
+@runtime_checkable
 class PolicyAdapter(Protocol):
     """
     Protocol for policy networks usable with MCTS.
@@ -47,6 +49,7 @@ class PolicyAdapter(Protocol):
         ...
 
 
+@runtime_checkable
 class ValueAdapter(Protocol):
     """
     Protocol for value estimation usable with MCTS.
@@ -68,6 +71,7 @@ class ValueAdapter(Protocol):
         ...
 
 
+@runtime_checkable
 class WorldModelAdapter(Protocol):
     """
     Protocol for world models usable with imagined MCTS.

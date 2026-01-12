@@ -118,6 +118,14 @@ class SnapshotMarioEnvironment:
         return self.env.base_env
 
     @property
+    def unwrapped(self) -> Any:
+        """Access to unwrapped NES environment (for MCTS save/restore).
+        
+        Returns the actual NES emulator which has dump_state()/load_state().
+        """
+        return self.env.base_env.env
+
+    @property
     def fstack(self) -> Any:
         """Access to frame stack wrapper."""
         return self.env.fstack
