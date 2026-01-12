@@ -129,15 +129,19 @@ class TrainingWorker:
             # Check if adapter supports world model (Dreamer)
             world_model = adapter if isinstance(adapter, WorldModelAdapter) else None
 
+            # Use pure random search - no policy network during MCTS
+            from mario_rl.mcts.adapters import RandomAdapter
+            random_adapter = RandomAdapter(num_actions=self.model.num_actions)
+
             self._mcts_explorer = MCTSExplorer(
                 config=MCTSConfig(
                     num_simulations=self.mcts_num_simulations,
                     max_rollout_depth=self.mcts_max_depth,
-                    rollout_policy="mixed",
-                    value_source="mixed",
+                    rollout_policy="random",  # Pure random rollouts
+                    value_source="rollout",   # Use actual rollout returns, not network
                 ),
-                policy=adapter,
-                value_fn=adapter,
+                policy=random_adapter,  # Random action selection
+                value_fn=random_adapter,  # Zero value (use rollout)
                 num_actions=self.model.num_actions,
                 world_model=world_model,  # Dreamer can use imagined rollouts
             )
@@ -304,13 +308,14 @@ class TrainingWorker:
         return False
 
     def collect_with_mcts(self, num_steps: int) -> dict[str, Any]:
-        """Collect experience using MCTS exploration.
+        """Collect experience using MCTS exploration for entire episode.
 
-        MCTS explores multiple branches via save/restore,
-        collecting ALL transitions for training.
+        Uses pure MCTS tree search (no policy network) to explore and
+        find optimal actions. Runs MCTS for EVERY action decision until
+        episode ends or num_steps collected.
 
         Args:
-            num_steps: Target number of steps (MCTS may collect more)
+            num_steps: Target number of steps to collect
 
         Returns:
             Collection info dict
@@ -319,49 +324,76 @@ class TrainingWorker:
             return self.collect(num_steps)
 
         collect_start = time.time()
+        transitions_collected = 0
+        episodes_completed = 0
+        step_infos: list[dict] = []
+        episode_end_infos: list[dict] = []
+        mcts_runs = 0
 
         # Get current observation
         obs = self._get_frame_stack_obs()
+        done = False
 
-        # Run MCTS exploration
-        self._mcts_explorer.clear_visited_states()
-        result = self._mcts_explorer.explore(
-            env=self.env,
-            root_obs=obs,
-            get_obs_fn=lambda env: self._get_frame_stack_obs(),
-        )
+        # Run MCTS for entire episode (or until num_steps)
+        while not done and transitions_collected < num_steps:
+            # Clear visited states for fresh MCTS from current position
+            self._mcts_explorer.clear_visited_states()
 
-        # Add all MCTS transitions to buffer
-        for t in result.transitions:
-            self._buffer.add(t)
+            # Run MCTS to find best action (pure tree search)
+            result = self._mcts_explorer.explore(
+                env=self.env,
+                root_obs=obs,
+                get_obs_fn=lambda env: self._get_frame_stack_obs(),
+            )
+            mcts_runs += 1
 
-        transitions_collected = len(result.transitions)
-        self.total_steps += transitions_collected
-        self._steps_since_flush += transitions_collected
+            # Add MCTS exploration transitions to buffer
+            for t in result.transitions:
+                self._buffer.add(t)
+            transitions_collected += len(result.transitions)
 
-        # Execute best action in real environment
-        best_action = result.best_action
-        obs, reward, terminated, truncated, info = self.env.step(best_action)
-        done = terminated or truncated
+            # Execute best action in real environment
+            best_action = result.best_action
+            next_obs, reward, terminated, truncated, info = self.env.step(best_action)
+            done = terminated or truncated
 
-        # Track x progress for stuck detection
-        x_pos = info.get("x_pos", 0)
-        if x_pos > self._last_best_x:
-            self._last_best_x = x_pos
-            self._steps_without_x_progress = 0
-        else:
-            self._steps_without_x_progress += 1
+            # Also add the real transition we just took
+            from mario_rl.core.types import Transition
+            real_transition = Transition(
+                state=obs,
+                action=best_action,
+                reward=reward,
+                next_state=next_obs if not done else obs,
+                done=done,
+            )
+            self._buffer.add(real_transition)
+            transitions_collected += 1
 
-        # Reset counters after MCTS
-        self._steps_without_x_progress = 0
-        self._mcts_episodes_since_last = 0
+            # Update observation for next MCTS
+            obs = next_obs
+            step_infos.append(info)
 
-        # Track episodes
-        episodes_completed = 1 if done else 0
+            # Track x progress
+            x_pos = info.get("x_pos", 0)
+            if x_pos > self._last_best_x:
+                self._last_best_x = x_pos
+                self._steps_without_x_progress = 0
+            else:
+                self._steps_without_x_progress += 1
+
+        # Episode ended
         if done:
+            episodes_completed = 1
             self.total_episodes += 1
+            episode_end_infos.append(info)
             # Reset env for next cycle
             self.env.reset()
+
+        # Update counters
+        self.total_steps += transitions_collected
+        self._steps_since_flush += transitions_collected
+        self._steps_without_x_progress = 0
+        self._mcts_episodes_since_last = 0
 
         # Calculate stats
         collect_end = time.time()
@@ -372,8 +404,9 @@ class TrainingWorker:
         if self.logger is not None:
             self.logger.count("steps", n=transitions_collected)
             self.logger.count("episodes", n=episodes_completed)
-            self.logger.count("mcts_explorations")
+            self.logger.count("mcts_explorations", n=mcts_runs)
             self.logger.gauge("mcts_transitions", transitions_collected)
+            self.logger.gauge("mcts_runs_per_episode", mcts_runs)
             self.logger.gauge("epsilon", self.epsilon_at(self.total_steps))
             self.logger.gauge("buffer_size", len(self._buffer))
             self.logger.gauge("steps_per_sec", steps_per_sec)
@@ -385,9 +418,10 @@ class TrainingWorker:
         return {
             "transitions": transitions_collected,
             "episodes_completed": episodes_completed,
-            "step_infos": [info],
-            "episode_end_infos": [info] if done else [],
+            "step_infos": step_infos,
+            "episode_end_infos": episode_end_infos,
             "mcts_used": True,
+            "mcts_runs": mcts_runs,
         }
 
     def can_train(self) -> bool:

@@ -275,3 +275,31 @@ def create_adapter(
         return DDQNAdapter(net=net, device=device, temperature=temperature)
 
     raise TypeError(f"Unsupported network type: {type(net)}")
+
+
+@dataclass
+class RandomAdapter:
+    """
+    Random adapter for pure MCTS without policy network.
+
+    Used when MCTS should do pure tree search without any
+    learned policy guidance. Actions are selected uniformly
+    at random.
+
+    Attributes:
+        num_actions: Number of available actions
+    """
+
+    num_actions: int
+
+    def get_action(self, state: np.ndarray) -> int:
+        """Get random action."""
+        return np.random.randint(self.num_actions)
+
+    def get_action_probs(self, state: np.ndarray) -> np.ndarray:
+        """Get uniform action probabilities."""
+        return np.ones(self.num_actions) / self.num_actions
+
+    def get_value(self, state: np.ndarray) -> float:
+        """Return zero value (use rollout returns instead)."""
+        return 0.0
