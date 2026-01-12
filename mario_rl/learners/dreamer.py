@@ -5,14 +5,26 @@ Implements the Learner protocol for Dreamer:
 2. Behavior Learning: actor-critic trained on imagined trajectories
 
 Key improvements to prevent encoder/decoder collapse:
-- SSIM as primary reconstruction loss
-- Aggressive free bits (5.0) to guarantee information flow
+
+ENCODER COLLAPSE PREVENTION:
 - Contrastive diversity loss to push apart different latents
 - Variance regularization to prevent constant outputs
-- Delayed KL warmup (no penalty for first 20k steps)
-- Very gentle KL penalty (max_beta=0.001, was 0.05)
+- Aggressive free bits (5.0) to guarantee information flow
+
+DECODER COLLAPSE PREVENTION (THE KEY FIX!):
+- Decoder diversity loss: forces decoder to produce DIFFERENT outputs for
+  different latent inputs (prevents decoder from ignoring latent)
+- Decoder sensitivity loss: penalizes decoder if output doesn't change
+  when latent is perturbed (forces decoder to USE the latent)
+
+KL REGULARIZATION:
+- Very gentle KL penalty (max_beta=0.0001)
+- Short delay (5k steps) then slow ramp (100k steps)
 - KL balancing between encoder/decoder
-- Spatially-weighted MSE for stability
+- Free bits to guarantee minimum information flow
+
+RECONSTRUCTION:
+- SSIM as primary loss + spatially-weighted MSE
 """
 
 from typing import Any
@@ -150,6 +162,93 @@ def latent_diversity_loss(z: Tensor, target_std: float = 1.0) -> Tensor:
     return diversity_loss
 
 
+def decoder_diversity_loss(decoder_outputs: Tensor, min_diff: float = 0.01) -> Tensor:
+    """
+    Force decoder to produce DIFFERENT outputs for different latent inputs.
+    
+    THIS IS THE KEY FIX FOR DECODER COLLAPSE!
+    
+    The decoder can collapse by ignoring its input and producing constant output.
+    This loss penalizes when decoder outputs are too similar across the batch.
+    
+    Args:
+        decoder_outputs: (batch_size, C, H, W) - reconstructed images
+        min_diff: Minimum required difference between outputs
+    
+    Returns:
+        Loss that penalizes similar decoder outputs
+    """
+    if decoder_outputs.size(0) < 2:
+        return torch.tensor(0.0, device=decoder_outputs.device)
+    
+    batch_size = decoder_outputs.size(0)
+    
+    # Flatten to (batch, -1)
+    flat = decoder_outputs.view(batch_size, -1)
+    
+    # Compute pairwise L1 differences
+    # More efficient: use broadcasting
+    # flat[i] - flat[j] for all i < j
+    total_diff = 0.0
+    count = 0
+    for i in range(min(batch_size, 8)):  # Limit to avoid O(n^2) explosion
+        for j in range(i + 1, min(batch_size, 8)):
+            diff = torch.mean(torch.abs(flat[i] - flat[j]))
+            total_diff = total_diff + diff
+            count += 1
+    
+    if count == 0:
+        return torch.tensor(0.0, device=decoder_outputs.device)
+    
+    mean_diff = total_diff / count
+    
+    # Penalize if outputs are too similar (below min_diff threshold)
+    # Loss = max(0, min_diff - mean_diff)
+    loss = F.relu(min_diff - mean_diff)
+    
+    return loss
+
+
+def decoder_sensitivity_loss(
+    decoder: torch.nn.Module,
+    z: Tensor,
+    perturbation_scale: float = 0.1,
+    min_response: float = 0.001,
+) -> Tensor:
+    """
+    Ensure decoder output CHANGES when latent input changes.
+    
+    Tests if decoder actually uses its input by measuring response to perturbation.
+    If decoder is collapsed (ignoring input), perturbing z won't change output.
+    
+    Args:
+        decoder: The decoder module
+        z: Latent codes (batch_size, latent_dim)
+        perturbation_scale: Size of perturbation to apply
+        min_response: Minimum required response to perturbation
+    
+    Returns:
+        Loss penalizing decoder that doesn't respond to input changes
+    """
+    # Get baseline output
+    output_base = decoder(z)
+    
+    # Perturb latent
+    perturbation = torch.randn_like(z) * perturbation_scale
+    z_perturbed = z + perturbation
+    
+    # Get perturbed output
+    output_perturbed = decoder(z_perturbed)
+    
+    # Measure response (should be non-zero if decoder uses input)
+    response = torch.mean(torch.abs(output_base - output_perturbed))
+    
+    # Penalize if response is too small
+    loss = F.relu(min_response - response)
+    
+    return loss
+
+
 @dataclass
 class BetaScheduler:
     """Warmup schedule for KL weight to prevent early collapse.
@@ -218,16 +317,22 @@ class DreamerLearner:
     kl_imagination_scale: float = 0.1  # Regularize imagined latents
     
     # Diversity loss to prevent encoder collapse
-    diversity_scale: float = 0.1  # NEW: Contrastive loss weight
-    variance_scale: float = 0.05  # NEW: Variance regularization weight
+    diversity_scale: float = 0.1  # Contrastive loss weight
+    variance_scale: float = 0.05  # Variance regularization weight
     target_latent_std: float = 1.0  # Target std for latent dimensions
     
-    # Beta warmup (much more conservative now)
+    # DECODER COLLAPSE PREVENTION (THE KEY FIX!)
+    decoder_diversity_scale: float = 10.0  # Force decoder to produce varied outputs
+    decoder_sensitivity_scale: float = 5.0  # Force decoder to respond to latent changes
+    decoder_min_diff: float = 0.01  # Minimum required difference between outputs
+    decoder_min_response: float = 0.001  # Minimum response to latent perturbation
+    
+    # Beta warmup - reduced delay since decoder collapsed by 20k
     beta_scheduler: BetaScheduler = field(default_factory=lambda: BetaScheduler(
-        max_beta=0.001,      # DECREASED from 0.05 - much gentler KL penalty
-        warmup_steps=200000, # INCREASED from 50000 - slower ramp
+        max_beta=0.0001,     # DECREASED further - even gentler KL
+        warmup_steps=100000, # Slower ramp
         start_beta=0.0,
-        delay_steps=20000    # NEW: No KL for first 20k steps
+        delay_steps=5000     # DECREASED from 20k - start KL earlier to prevent explosion
     ))
     
     # Spatial weighting
@@ -314,6 +419,17 @@ class DreamerLearner:
         # Variance loss: ensure latents have sufficient spread
         diversity_loss_variance = latent_diversity_loss(z, target_std=self.target_latent_std)
 
+        # 2c. DECODER COLLAPSE PREVENTION (THE KEY FIX!)
+        # Force decoder to produce different outputs for different latents
+        dec_diversity = decoder_diversity_loss(recon, min_diff=self.decoder_min_diff)
+        
+        # Force decoder to actually USE the latent input (respond to changes)
+        dec_sensitivity = decoder_sensitivity_loss(
+            self.model.decoder, z, 
+            perturbation_scale=0.1, 
+            min_response=self.decoder_min_response
+        )
+
         # 3. Dynamics loss
         z_next_pred, _, z_next_mu = self.model.dynamics(z, actions)
         dynamics_loss = F.mse_loss(z_next_mu, z_next_target)
@@ -328,6 +444,8 @@ class DreamerLearner:
             + kl_weight * kl_loss
             + self.diversity_scale * diversity_loss_contrastive
             + self.variance_scale * diversity_loss_variance
+            + self.decoder_diversity_scale * dec_diversity  # DECODER FIX
+            + self.decoder_sensitivity_scale * dec_sensitivity  # DECODER FIX
             + self.dynamics_scale * dynamics_loss
             + self.reward_scale * reward_loss
         )
@@ -341,6 +459,8 @@ class DreamerLearner:
             "kl_weight": kl_weight,
             "diversity_contrastive": diversity_loss_contrastive.item(),
             "diversity_variance": diversity_loss_variance.item(),
+            "decoder_diversity": dec_diversity.item(),  # NEW: Monitor decoder diversity
+            "decoder_sensitivity": dec_sensitivity.item(),  # NEW: Monitor decoder response
             "latent_std": z.std().item(),  # Monitor actual latent diversity
             "dynamics_loss": dynamics_loss.item(),
             "reward_loss": reward_loss.item(),
