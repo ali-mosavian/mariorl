@@ -866,11 +866,10 @@ class _EncoderWrappedQNet(nn.Module):
     making DreamerDDQN a true drop-in replacement for DoubleDQN.
     """
 
-    def __init__(self, encoder: SimpleEncoder, q_net: LatentDuelingDQN, q_scale: float = 100.0):
+    def __init__(self, encoder: SimpleEncoder, q_net: LatentDuelingDQN):
         super().__init__()
         self.encoder = encoder
         self.q_net = q_net
-        self.q_scale = q_scale  # Softsign activation scales Q-values to [-q_scale, q_scale]
 
     def forward(self, x: Tensor) -> Tensor:
         """
@@ -885,10 +884,7 @@ class _EncoderWrappedQNet(nn.Module):
         z = self.encoder.encode(x, deterministic=True)
         q_values = self.q_net(z)
         
-        # Softsign activation: x / (1 + |x|) bounded to [-1, 1], then scale
-        # Polynomial gradient decay (1/(1+|x|)^2) retains gradients better than tanh
-        q_values = torch.nn.functional.softsign(q_values) * self.q_scale
-        
+        # Raw linear output (no activation)
         return q_values
 
 
@@ -918,14 +914,12 @@ class DreamerDDQN(nn.Module):
         latent_dim: int = 128,
         hidden_dim: int = 256,
         freeze_encoder: bool = False,
-        q_scale: float = 100.0,
     ):
         super().__init__()
         self.input_shape = input_shape
         self.num_actions = num_actions
         self.latent_dim = latent_dim
         self.freeze_encoder = freeze_encoder
-        self.q_scale = q_scale  # Softsign activation scales Q-values to [-q_scale, q_scale]
         
         # Encoder: frames → latent (uses SimpleEncoder for (C, H, W) input format)
         self.encoder = SimpleEncoder(input_shape, latent_dim)
@@ -936,9 +930,8 @@ class DreamerDDQN(nn.Module):
         
         # Wrapped Q-networks that accept frames (for compatibility with DDQN code)
         # These share the encoder, so gradients flow through correctly
-        # Pass q_scale for softsign activation
-        self.online = _EncoderWrappedQNet(self.encoder, self._online_q, q_scale)
-        self.target = _EncoderWrappedQNet(self.encoder, self._target_q, q_scale)
+        self.online = _EncoderWrappedQNet(self.encoder, self._online_q)
+        self.target = _EncoderWrappedQNet(self.encoder, self._target_q)
         
         # Copy weights and freeze target Q-network
         self._target_q.load_state_dict(self._online_q.state_dict())
@@ -975,10 +968,7 @@ class DreamerDDQN(nn.Module):
         else:
             raise ValueError(f"Unknown network: {network}")
         
-        # Softsign activation: x / (1 + |x|) bounded to [-1, 1], then scale
-        # Polynomial gradient decay (1/(1+|x|)^2) retains gradients better than tanh
-        q_values = torch.nn.functional.softsign(q_values) * self.q_scale
-        
+        # Raw linear output (no activation)
         return q_values
 
     def get_action(self, x: Tensor, epsilon: float = 0.0) -> Tensor:

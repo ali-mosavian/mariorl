@@ -114,8 +114,7 @@ class WorkerConfig:
     # Entropy regularization (encourages exploration, prevents policy collapse)
     entropy_coef: float = 0.01  # Coefficient for entropy bonus in loss
 
-    # Stability settings (prevent Q-value explosion)
-    q_scale: float = 100.0  # Softsign activation scales Q-values to [-q_scale, q_scale]
+    # Stability settings
     loss_threshold: float = 1000.0  # Skip gradient if loss exceeds this
 
     # Device (None = auto-detect)
@@ -146,7 +145,6 @@ class WorkerConfig:
             reward_scale=self.reward_scale,
             reward_clip=self.reward_clip,
             entropy_coef=self.entropy_coef,
-            q_scale=self.q_scale,
             loss_threshold=self.loss_threshold,
             device=self.device,
             initial_steps=self.initial_steps,
@@ -178,9 +176,6 @@ class LearnerConfig:
     # Target network
     tau: float = 0.005  # Soft update rate
     gamma: float = 0.99
-
-    # Stability settings
-    q_scale: float = 100.0  # Softsign activation scales Q-values to [-q_scale, q_scale]
 
     # Scheduling
     lr_schedule_steps: int = 500_000
@@ -229,7 +224,6 @@ class TrainingConfig:
                 reward_scale=self.worker.reward_scale,
                 reward_clip=self.worker.reward_clip,
                 entropy_coef=self.worker.entropy_coef,
-                q_scale=self.worker.q_scale,
                 loss_threshold=self.worker.loss_threshold,
                 device=self.worker.device,
                 initial_steps=self.worker.initial_steps,

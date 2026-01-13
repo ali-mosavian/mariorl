@@ -73,7 +73,6 @@ class Config:
     alpha: float = 0.6
     eps_base: float = 0.15  # Base for per-worker epsilon (floor ~2-9%)
     epsilon_decay_steps: int = 1_000_000
-    q_scale: float = 100.0
     latent_dim: int = 128
     entropy_coef: float = 0.01  # Entropy regularization for exploration
     target_update_interval: int = 1  # Update target every step like working script
@@ -106,14 +105,13 @@ def create_model_and_learner(
         from mario_rl.models.ddqn import DoubleDQN, DDQNConfig
         from mario_rl.learners.ddqn import DDQNLearner
 
-        cfg = DDQNConfig(input_shape=(4, 64, 64), num_actions=12, q_scale=config.q_scale)
+        cfg = DDQNConfig(input_shape=(4, 64, 64), num_actions=7)  # SIMPLE_MOVEMENT
         model = DoubleDQN(
             input_shape=cfg.input_shape,
             num_actions=cfg.num_actions,
             feature_dim=cfg.feature_dim,
             hidden_dim=cfg.hidden_dim,
             dropout=cfg.dropout,
-            q_scale=cfg.q_scale,
         )
         if device:
             model = model.to(device)
@@ -137,7 +135,7 @@ def create_model_and_learner(
 
         cfg = DreamerConfig(
             input_shape=(4, 64, 64),
-            num_actions=12,
+            num_actions=7,  # SIMPLE_MOVEMENT
             latent_dim=config.latent_dim,
         )
         model = DreamerModel(
@@ -654,7 +652,6 @@ def start_monitor_thread(
 @click.option("--eps-base", default=0.4, help="Base for per-worker epsilon (ε = base^(1+i/N))")
 @click.option("--eps-decay-steps", default=1_000_000, help="Steps for epsilon decay")
 # Stability settings
-@click.option("--q-scale", default=100.0, help="Q-value scale for softsign")
 @click.option("--max-grad-norm", default=10.0, help="Maximum gradient norm")
 @click.option("--weight-decay", default=1e-4, help="L2 regularization")
 # Dreamer specific
@@ -686,7 +683,6 @@ def main(
     accumulate_grads: int,
     eps_base: float,
     eps_decay_steps: int,
-    q_scale: float,
     max_grad_norm: float,
     weight_decay: float,
     latent_dim: int,
@@ -711,7 +707,7 @@ def main(
     print(f"  Collect steps: {collect_steps}, Train steps: {train_steps}")
     print(f"  Accumulate grads: {accumulate_grads}")
     print(f"  Epsilon: {eps_base}^(1+i/N), decay: {eps_decay_steps:,}")
-    print(f"  Q-scale: {q_scale}, Max grad norm: {max_grad_norm}")
+    print(f"  Max grad norm: {max_grad_norm}")
     if mcts:
         print(f"  MCTS: {mcts_sims} sims, depth={mcts_depth}, seq_len={mcts_seq_len}, stuck={mcts_stuck}, periodic={mcts_periodic}")
     
@@ -739,7 +735,6 @@ def main(
         n_step=n_step,
         eps_base=eps_base,
         epsilon_decay_steps=eps_decay_steps,
-        q_scale=q_scale,
         latent_dim=latent_dim,
         mcts_enabled=mcts,
         mcts_num_simulations=mcts_sims,

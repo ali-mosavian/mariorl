@@ -201,7 +201,7 @@ class DreamerAdapter:
         """
         with torch.no_grad():
             # One-hot encode action
-            num_actions = getattr(self.net, "num_actions", 12)
+            num_actions = getattr(self.net, "num_actions", 7)  # SIMPLE_MOVEMENT default
             action_t = torch.zeros(1, num_actions, device=self.device)
             action_t[0, action] = 1.0
 
@@ -320,10 +320,10 @@ class MarioRolloutAdapter:
     - 10% other actions
 
     Attributes:
-        num_actions: Number of available actions (12 for Mario)
+        num_actions: Number of available actions (7 for SIMPLE_MOVEMENT)
     """
 
-    num_actions: int = 12
+    num_actions: int = 7  # SIMPLE_MOVEMENT
 
     # Mario action indices
     RIGHT_ACTIONS: tuple = (1, 2, 3, 4)  # RIGHT, R+A, R+B, R+A+B

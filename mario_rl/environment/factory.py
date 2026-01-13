@@ -87,7 +87,7 @@ def create_mario_env(
             pass
 
     base_env = SuperMarioBrosMultiLevel(level=level)
-    env = JoypadSpace(base_env, actions=smb_actions.COMPLEX_MOVEMENT)
+    env = JoypadSpace(base_env, actions=smb_actions.SIMPLE_MOVEMENT)
     env = SkipFrame(env, skip=4, render_frames=render_frames)
     env = GrayScaleObservation(env, keep_dim=False)
     env = ResizeObservation(env, shape=64)

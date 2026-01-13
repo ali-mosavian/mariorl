@@ -17,8 +17,6 @@ Architecture:
     └──────┬──────┘
            ↓
     Q(s,a) = V(s) + (A(s,a) - mean(A))
-           ↓
-    softsign(Q) * q_scale
 
 Stability Techniques (from PPO):
 - GELU activation (smoother gradients than ReLU)
@@ -64,7 +62,6 @@ class DDQNConfig:
     feature_dim: int = 512
     hidden_dim: int = 256
     dropout: float = 0.1
-    q_scale: float = 100.0
 
 
 class DDQNBackbone(nn.Module):
@@ -170,7 +167,7 @@ class DDQNNet(nn.Module):
     - Nature DQN-style CNN backbone with modern improvements
     - Dueling architecture (separate value and advantage streams)
     - GELU activation, LayerNorm, Dropout, Orthogonal init
-    - Softsign activation with scaling to bound Q-values while retaining gradients
+    - Raw linear Q-value output (unbounded)
     """
 
     def __init__(
@@ -180,13 +177,11 @@ class DDQNNet(nn.Module):
         feature_dim: int = 512,
         hidden_dim: int = 256,
         dropout: float = 0.1,
-        q_scale: float = 100.0,
     ) -> None:
         super().__init__()
         self.backbone = DDQNBackbone(input_shape, feature_dim, dropout)
         self.head = DuelingHead(feature_dim, num_actions, hidden_dim)
         self.num_actions = num_actions
-        self.q_scale = q_scale  # Q-values bounded to [-q_scale, q_scale]
 
     def forward(self, x: Tensor) -> Tensor:
         """Forward pass returning Q-values for all actions.
@@ -202,12 +197,7 @@ class DDQNNet(nn.Module):
         features = self.backbone(x)
         q_values = self.head(features)
 
-        # Softsign activation: x / (1 + |x|) bounded to [-1, 1]
-        # Then scale to [-q_scale, q_scale]
-        # Softsign has polynomial gradient decay (1/(1+|x|)^2) vs tanh's exponential
-        # This retains gradients much better at extreme values
-        q_values = torch.nn.functional.softsign(q_values) * self.q_scale
-
+        # Raw linear output (no activation)
         return q_values
 
     def select_action(self, x: Tensor, epsilon: float = 0.0) -> Tensor:
@@ -243,8 +233,8 @@ class DoubleDQN(nn.Module):
     - Soft update (polyak averaging): θ_target = τ * θ_online + (1-τ) * θ_target
     - Hard sync: copy online weights to target every N steps
 
-    Stability features:
-    - Softsign activation with scaling bounds Q-values while retaining gradients
+    Features:
+    - Raw linear Q-value output (unbounded)
     """
 
     def __init__(
@@ -254,13 +244,11 @@ class DoubleDQN(nn.Module):
         feature_dim: int = 512,
         hidden_dim: int = 256,
         dropout: float = 0.1,
-        q_scale: float = 100.0,
     ) -> None:
         super().__init__()
-        self.online = DDQNNet(input_shape, num_actions, feature_dim, hidden_dim, dropout, q_scale)
-        self.target = DDQNNet(input_shape, num_actions, feature_dim, hidden_dim, dropout, q_scale)
+        self.online = DDQNNet(input_shape, num_actions, feature_dim, hidden_dim, dropout)
+        self.target = DDQNNet(input_shape, num_actions, feature_dim, hidden_dim, dropout)
         self.num_actions = num_actions
-        self.q_scale = q_scale
 
         # Copy online weights to target and freeze target
         self.sync_target()
