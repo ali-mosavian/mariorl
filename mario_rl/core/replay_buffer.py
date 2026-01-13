@@ -7,7 +7,6 @@ Combines:
 - Batch sampling with tensor conversion
 """
 
-from typing import Any
 from dataclasses import field
 from dataclasses import dataclass
 
@@ -16,8 +15,166 @@ import numpy as np
 from torch import Tensor
 
 from mario_rl.core.types import Transition
-from mario_rl.buffers.nstep import NStepBuffer
-from mario_rl.buffers.sum_tree import SumTree
+from mario_rl.core.types import TreeNode
+
+
+# =============================================================================
+# N-Step Buffer (inlined from buffers/nstep.py)
+# =============================================================================
+
+
+@dataclass
+class NStepBuffer:
+    """Buffer for computing N-step returns."""
+
+    n_step: int
+    gamma: float
+    buffer: list[Transition] = field(init=False, default_factory=list)
+
+    def add(self, transition: Transition) -> Transition | None:
+        """Add transition and return N-step transition if ready."""
+        self.buffer.append(
+            Transition(
+                state=transition.state.copy(),
+                action=transition.action,
+                reward=transition.reward,
+                next_state=transition.next_state.copy(),
+                done=transition.done,
+                flag_get=transition.flag_get,
+                max_x=transition.max_x,
+            )
+        )
+
+        if len(self.buffer) < self.n_step:
+            return None
+
+        # Compute N-step return
+        n_step_reward = 0.0
+        for i, t in enumerate(self.buffer):
+            n_step_reward += (self.gamma**i) * t.reward
+            if t.done:
+                result = Transition(
+                    state=self.buffer[0].state,
+                    action=self.buffer[0].action,
+                    reward=n_step_reward,
+                    next_state=self.buffer[i].next_state,
+                    done=True,
+                    flag_get=self.buffer[0].flag_get,
+                    max_x=self.buffer[0].max_x,
+                )
+                self.buffer.pop(0)
+                return result
+
+        result = Transition(
+            state=self.buffer[0].state,
+            action=self.buffer[0].action,
+            reward=n_step_reward,
+            next_state=self.buffer[-1].next_state,
+            done=self.buffer[-1].done,
+            flag_get=self.buffer[0].flag_get,
+            max_x=self.buffer[0].max_x,
+        )
+        self.buffer.pop(0)
+        return result
+
+    def flush(self) -> list[Transition]:
+        """Flush remaining transitions at episode end."""
+        transitions: list[Transition] = []
+        while len(self.buffer) > 0:
+            n_step_reward = 0.0
+            last_idx = len(self.buffer) - 1
+
+            for i, t in enumerate(self.buffer):
+                n_step_reward += (self.gamma**i) * t.reward
+                if t.done:
+                    last_idx = i
+                    break
+
+            transitions.append(
+                Transition(
+                    state=self.buffer[0].state,
+                    action=self.buffer[0].action,
+                    reward=n_step_reward,
+                    next_state=self.buffer[last_idx].next_state,
+                    done=self.buffer[last_idx].done,
+                    flag_get=self.buffer[0].flag_get,
+                    max_x=self.buffer[0].max_x,
+                )
+            )
+            self.buffer.pop(0)
+
+        return transitions
+
+    def reset(self) -> None:
+        """Clear the buffer."""
+        self.buffer.clear()
+
+
+# =============================================================================
+# Sum Tree for PER (inlined from buffers/sum_tree.py)
+# =============================================================================
+
+
+@dataclass
+class SumTree:
+    """Sum Tree data structure for O(log n) priority sampling."""
+
+    capacity: int
+    tree: np.ndarray = field(init=False, repr=False)
+    data_pointer: int = field(init=False, default=0)
+
+    def __post_init__(self) -> None:
+        """Initialize tree array with zeros."""
+        self.tree = np.zeros(2 * self.capacity - 1, dtype=np.float64)
+        self.data_pointer = 0
+
+    @property
+    def total(self) -> float:
+        """Return the root node (sum of all priorities)."""
+        return float(self.tree[0])
+
+    def add(self, priority: float) -> int:
+        """Add a new priority and return the leaf index."""
+        leaf_idx = self.data_pointer + self.capacity - 1
+        self.update(leaf_idx, priority)
+        self.data_pointer = (self.data_pointer + 1) % self.capacity
+        return leaf_idx
+
+    def update(self, leaf_idx: int, priority: float) -> None:
+        """Update priority at leaf_idx and propagate change up the tree."""
+        change = priority - self.tree[leaf_idx]
+        self.tree[leaf_idx] = priority
+
+        parent = leaf_idx
+        while parent != 0:
+            parent = (parent - 1) // 2
+            self.tree[parent] += change
+
+    def get(self, value: float) -> TreeNode:
+        """Find leaf node for a given cumulative value."""
+        parent = 0
+
+        while True:
+            left = 2 * parent + 1
+            right = left + 1
+
+            if left >= len(self.tree):
+                leaf_idx = parent
+                break
+
+            if value <= self.tree[left]:
+                parent = left
+            else:
+                value -= self.tree[left]
+                parent = right
+
+        data_idx = leaf_idx - self.capacity + 1
+        return TreeNode(leaf_idx=leaf_idx, priority=float(self.tree[leaf_idx]), data_idx=data_idx)
+
+
+# =============================================================================
+# Replay Buffer
+# =============================================================================
 
 
 @dataclass(frozen=True, slots=True)

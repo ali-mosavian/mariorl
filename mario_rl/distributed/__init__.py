@@ -1,9 +1,9 @@
 """Distributed training infrastructure."""
 
-from mario_rl.distributed.coordinator import Coordinator
-from mario_rl.distributed.worker import Worker
+from mario_rl.distributed.training_coordinator import TrainingCoordinator
+from mario_rl.distributed.training_worker import TrainingWorker
 
 __all__ = [
-    "Coordinator",
-    "Worker",
+    "TrainingCoordinator",
+    "TrainingWorker",
 ]
