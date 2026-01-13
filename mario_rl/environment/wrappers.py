@@ -97,13 +97,3 @@ class GrayScaleObservation(gym.ObservationWrapper):
         return gray
 
 
-class FrameStack(gym.Wrapper):
-    def __init__(self, env):
-        super().__init__(env)
-        self._stack = []
-
-    def reset(self, **kwargs) -> Tuple[gym.core.ObsType, dict]:
-        return self.env.reset(**kwargs)  # type: ignore[no-any-return]
-
-    def step(self, action) -> Tuple[gym.core.ObsType, float, bool, bool, dict]:
-        return self.env.step(action)  # type: ignore[no-any-return]
