@@ -46,7 +46,7 @@ def _layer_init(layer: nn.Module, std: float = np.sqrt(2), bias_const: float = 0
 
 
 # =============================================================================
-# Residual Building Blocks
+# ResNet Building Blocks
 # =============================================================================
 
 
@@ -68,40 +68,157 @@ class ResidualMLPBlock(nn.Module):
         return x + self.net(x)
 
 
-class ResidualConvBlock(nn.Module):
-    """Residual CNN block with GroupNorm and Dropout."""
+class ResNetBasicBlock(nn.Module):
+    """ResNet BasicBlock: two 3x3 convs with skip connection.
 
-    def __init__(self, channels: int, dropout: float = 0.1) -> None:
+    Pre-activation style (GroupNorm -> GELU -> Conv) for better gradient flow.
+    """
+
+    expansion = 1
+
+    def __init__(
+        self,
+        in_channels: int,
+        out_channels: int,
+        stride: int = 1,
+        dropout: float = 0.1,
+    ) -> None:
         super().__init__()
-        self.net = nn.Sequential(
-            nn.GroupNorm(min(8, channels), channels),
-            _layer_init(nn.Conv2d(channels, channels, kernel_size=3, padding=1)),
-            nn.GELU(),
-            nn.Dropout2d(dropout),
-            _layer_init(nn.Conv2d(channels, channels, kernel_size=3, padding=1)),
-            nn.Dropout2d(dropout),
+
+        # Main path
+        self.norm1 = nn.GroupNorm(min(8, in_channels), in_channels)
+        self.conv1 = _layer_init(
+            nn.Conv2d(in_channels, out_channels, kernel_size=3, stride=stride, padding=1, bias=False)
         )
+        self.norm2 = nn.GroupNorm(min(8, out_channels), out_channels)
+        self.conv2 = _layer_init(
+            nn.Conv2d(out_channels, out_channels, kernel_size=3, stride=1, padding=1, bias=False)
+        )
+        self.dropout = nn.Dropout2d(dropout)
+
+        # Skip connection (identity or projection)
+        self.skip = nn.Identity()
+        if stride != 1 or in_channels != out_channels:
+            self.skip = _layer_init(
+                nn.Conv2d(in_channels, out_channels, kernel_size=1, stride=stride, bias=False)
+            )
 
     def forward(self, x: Tensor) -> Tensor:
-        return x + self.net(x)
+        identity = self.skip(x)
+
+        out = self.norm1(x)
+        out = F.gelu(out)
+        out = self.conv1(out)
+
+        out = self.norm2(out)
+        out = F.gelu(out)
+        out = self.dropout(out)
+        out = self.conv2(out)
+
+        return out + identity
 
 
-class ResidualDeconvBlock(nn.Module):
-    """Residual transposed conv block with GroupNorm and Dropout."""
+class ResNetBottleneck(nn.Module):
+    """ResNet Bottleneck: 1x1 -> 3x3 -> 1x1 with skip connection.
 
-    def __init__(self, channels: int, dropout: float = 0.1) -> None:
+    Pre-activation style for better gradient flow.
+    """
+
+    expansion = 4
+
+    def __init__(
+        self,
+        in_channels: int,
+        mid_channels: int,
+        stride: int = 1,
+        dropout: float = 0.1,
+    ) -> None:
         super().__init__()
-        self.net = nn.Sequential(
-            nn.GroupNorm(min(8, channels), channels),
-            _layer_init(nn.Conv2d(channels, channels, kernel_size=3, padding=1)),
-            nn.GELU(),
-            nn.Dropout2d(dropout),
-            _layer_init(nn.Conv2d(channels, channels, kernel_size=3, padding=1)),
-            nn.Dropout2d(dropout),
+        out_channels = mid_channels * self.expansion
+
+        # Main path: 1x1 reduce -> 3x3 -> 1x1 expand
+        self.norm1 = nn.GroupNorm(min(8, in_channels), in_channels)
+        self.conv1 = _layer_init(nn.Conv2d(in_channels, mid_channels, kernel_size=1, bias=False))
+
+        self.norm2 = nn.GroupNorm(min(8, mid_channels), mid_channels)
+        self.conv2 = _layer_init(
+            nn.Conv2d(mid_channels, mid_channels, kernel_size=3, stride=stride, padding=1, bias=False)
         )
 
+        self.norm3 = nn.GroupNorm(min(8, mid_channels), mid_channels)
+        self.conv3 = _layer_init(nn.Conv2d(mid_channels, out_channels, kernel_size=1, bias=False))
+
+        self.dropout = nn.Dropout2d(dropout)
+
+        # Skip connection
+        self.skip = nn.Identity()
+        if stride != 1 or in_channels != out_channels:
+            self.skip = _layer_init(
+                nn.Conv2d(in_channels, out_channels, kernel_size=1, stride=stride, bias=False)
+            )
+
     def forward(self, x: Tensor) -> Tensor:
-        return x + self.net(x)
+        identity = self.skip(x)
+
+        out = self.norm1(x)
+        out = F.gelu(out)
+        out = self.conv1(out)
+
+        out = self.norm2(out)
+        out = F.gelu(out)
+        out = self.conv2(out)
+
+        out = self.norm3(out)
+        out = F.gelu(out)
+        out = self.dropout(out)
+        out = self.conv3(out)
+
+        return out + identity
+
+
+class ResNetUpsampleBlock(nn.Module):
+    """ResNet block for decoder with upsampling."""
+
+    def __init__(
+        self,
+        in_channels: int,
+        out_channels: int,
+        upsample: bool = True,
+        dropout: float = 0.1,
+    ) -> None:
+        super().__init__()
+
+        # Upsample first if needed
+        self.upsample = nn.Upsample(scale_factor=2, mode="nearest") if upsample else nn.Identity()
+
+        # Main path
+        self.norm1 = nn.GroupNorm(min(8, in_channels), in_channels)
+        self.conv1 = _layer_init(nn.Conv2d(in_channels, out_channels, kernel_size=3, padding=1, bias=False))
+
+        self.norm2 = nn.GroupNorm(min(8, out_channels), out_channels)
+        self.conv2 = _layer_init(nn.Conv2d(out_channels, out_channels, kernel_size=3, padding=1, bias=False))
+
+        self.dropout = nn.Dropout2d(dropout)
+
+        # Skip connection with channel adjustment
+        self.skip = nn.Identity()
+        if in_channels != out_channels:
+            self.skip = _layer_init(nn.Conv2d(in_channels, out_channels, kernel_size=1, bias=False))
+
+    def forward(self, x: Tensor) -> Tensor:
+        x = self.upsample(x)
+        identity = self.skip(x)
+
+        out = self.norm1(x)
+        out = F.gelu(out)
+        out = self.conv1(out)
+
+        out = self.norm2(out)
+        out = F.gelu(out)
+        out = self.dropout(out)
+        out = self.conv2(out)
+
+        return out + identity
 
 
 @dataclass(frozen=True)
@@ -116,12 +233,12 @@ class DreamerConfig:
 
 
 class Encoder(nn.Module):
-    """Deep CNN encoder with residual connections, LayerNorm, and dropout.
+    """ResNet-style encoder that stops at 32x32 spatial resolution.
 
-    Architecture: Deeper network with 3x3 kernels, stride 1, and MaxPool for downsampling.
-    Uses residual blocks for better gradient flow.
+    Architecture: ResNet blocks with stride-2 downsampling, stopping at 32x32.
+    Uses pre-activation (GroupNorm -> GELU -> Conv) for better gradient flow.
 
-    64x64 input -> 32x32 -> 16x16 -> 8x8 -> 4x4 -> flatten -> latent
+    64x64 input -> 32x32 (with 128 channels) -> flatten -> latent
     """
 
     def __init__(
@@ -134,71 +251,50 @@ class Encoder(nn.Module):
         c, h, w = input_shape
         self.latent_dim = latent_dim
 
-        # Initial conv: C -> 32 channels
+        # Stem: 64x64, C -> 64 channels
         self.stem = nn.Sequential(
-            _layer_init(nn.Conv2d(c, 32, kernel_size=3, padding=1)),
-            nn.GELU(),
-            nn.Dropout2d(dropout),
-        )
-
-        # Stage 1: 64x64 -> 32x32, 32 -> 64 channels
-        self.stage1 = nn.Sequential(
-            _layer_init(nn.Conv2d(32, 64, kernel_size=3, padding=1)),
-            nn.GELU(),
+            _layer_init(nn.Conv2d(c, 64, kernel_size=7, stride=1, padding=3, bias=False)),
             nn.GroupNorm(8, 64),
+            nn.GELU(),
             nn.Dropout2d(dropout),
-            ResidualConvBlock(64, dropout),
-            nn.MaxPool2d(2, 2),  # 64 -> 32
         )
 
-        # Stage 2: 32x32 -> 16x16, 64 -> 128 channels
+        # Stage 1: 64x64 -> 32x32, 64 -> 64 channels (2 blocks, first with stride 2)
+        self.stage1 = nn.Sequential(
+            ResNetBasicBlock(64, 64, stride=2, dropout=dropout),  # downsample
+            ResNetBasicBlock(64, 64, stride=1, dropout=dropout),
+        )
+
+        # Stage 2: 32x32, 64 -> 128 channels (2 blocks, no downsample)
         self.stage2 = nn.Sequential(
-            _layer_init(nn.Conv2d(64, 128, kernel_size=3, padding=1)),
-            nn.GELU(),
-            nn.GroupNorm(8, 128),
-            nn.Dropout2d(dropout),
-            ResidualConvBlock(128, dropout),
-            nn.MaxPool2d(2, 2),  # 32 -> 16
+            ResNetBasicBlock(64, 128, stride=1, dropout=dropout),  # channel expansion
+            ResNetBasicBlock(128, 128, stride=1, dropout=dropout),
         )
 
-        # Stage 3: 16x16 -> 8x8, 128 -> 256 channels
-        self.stage3 = nn.Sequential(
-            _layer_init(nn.Conv2d(128, 256, kernel_size=3, padding=1)),
-            nn.GELU(),
-            nn.GroupNorm(8, 256),
-            nn.Dropout2d(dropout),
-            ResidualConvBlock(256, dropout),
-            nn.MaxPool2d(2, 2),  # 16 -> 8
-        )
+        # Final norm before flatten
+        self.final_norm = nn.GroupNorm(8, 128)
 
-        # Stage 4: 8x8 -> 4x4, 256 -> 256 channels
-        self.stage4 = nn.Sequential(
-            _layer_init(nn.Conv2d(256, 256, kernel_size=3, padding=1)),
-            nn.GELU(),
-            nn.GroupNorm(8, 256),
-            nn.Dropout2d(dropout),
-            ResidualConvBlock(256, dropout),
-            nn.MaxPool2d(2, 2),  # 8 -> 4
-            nn.Flatten(),
-        )
-
-        # Compute flattened size
+        # Compute flattened size (should be 128 * 32 * 32 = 131072 for 64x64 input)
         with torch.no_grad():
             dummy = torch.zeros(1, c, h, w)
             x = self.stem(dummy)
             x = self.stage1(x)
             x = self.stage2(x)
-            x = self.stage3(x)
-            x = self.stage4(x)
-            flat_size = x.shape[1]
+            x = self.final_norm(x)
+            self.spatial_size = x.shape[2]  # Should be 32
+            flat_size = x.flatten(1).shape[1]
 
         # Project to latent with residual MLP
         self.fc_pre = nn.Sequential(
-            _layer_init(nn.Linear(flat_size, latent_dim * 2)),
+            _layer_init(nn.Linear(flat_size, latent_dim * 4)),
+            nn.LayerNorm(latent_dim * 4),
+            nn.GELU(),
+            nn.Dropout(dropout),
+            ResidualMLPBlock(latent_dim * 4, dropout),
+            _layer_init(nn.Linear(latent_dim * 4, latent_dim * 2)),
             nn.LayerNorm(latent_dim * 2),
             nn.GELU(),
             nn.Dropout(dropout),
-            ResidualMLPBlock(latent_dim * 2, dropout),
         )
 
         # VAE-style outputs for stochastic latent
@@ -217,8 +313,9 @@ class Encoder(nn.Module):
         h = self.stem(x)
         h = self.stage1(h)
         h = self.stage2(h)
-        h = self.stage3(h)
-        h = self.stage4(h)
+        h = self.final_norm(h)
+        h = F.gelu(h)
+        h = h.flatten(1)
         h = self.fc_pre(h)
         return self.fc_mu(h), self.fc_logvar(h)
 
@@ -444,12 +541,12 @@ class Critic(nn.Module):
 
 
 class Decoder(nn.Module):
-    """Deep transposed CNN decoder with residual connections.
+    """ResNet-style decoder that starts from 32x32 spatial resolution.
 
-    Architecture matches the Encoder: uses upsampling + conv instead of
-    transposed conv for better quality. Residual blocks for gradient flow.
+    Architecture mirrors the Encoder: starts at 32x32, upsamples to 64x64.
+    Uses ResNet upsample blocks for gradient flow.
 
-    latent -> 4x4 -> 8x8 -> 16x16 -> 32x32 -> 64x64
+    latent -> 32x32 (128 channels) -> 64x64 -> output
     """
 
     def __init__(
@@ -462,67 +559,47 @@ class Decoder(nn.Module):
         self.output_shape = output_shape
         c, h, w = output_shape
 
-        # Start from 4x4 spatial size (matches encoder output)
-        self.h_conv = 4
-        self.w_conv = 4
-        self.conv_channels = 256
+        # Start from 32x32 spatial size (matches encoder output)
+        self.h_conv = 32
+        self.w_conv = 32
+        self.conv_channels = 128  # Match encoder output channels
 
         # Project latent to conv feature size with residual MLP
+        flat_size = self.conv_channels * self.h_conv * self.w_conv  # 128 * 32 * 32 = 131072
         self.fc = nn.Sequential(
             _layer_init(nn.Linear(latent_dim, latent_dim * 2)),
             nn.LayerNorm(latent_dim * 2),
             nn.GELU(),
             nn.Dropout(dropout),
-            ResidualMLPBlock(latent_dim * 2, dropout),
-            _layer_init(nn.Linear(latent_dim * 2, self.conv_channels * self.h_conv * self.w_conv)),
-            nn.LayerNorm(self.conv_channels * self.h_conv * self.w_conv),
+            _layer_init(nn.Linear(latent_dim * 2, latent_dim * 4)),
+            nn.LayerNorm(latent_dim * 4),
+            nn.GELU(),
+            nn.Dropout(dropout),
+            ResidualMLPBlock(latent_dim * 4, dropout),
+            _layer_init(nn.Linear(latent_dim * 4, flat_size)),
+            nn.LayerNorm(flat_size),
             nn.GELU(),
         )
 
-        # Stage 1: 4x4 -> 8x8, 256 -> 256 channels
+        # Stage 1: 32x32, 128 -> 128 channels (2 ResNet blocks, no upsample)
         self.stage1 = nn.Sequential(
-            nn.Upsample(scale_factor=2, mode="nearest"),  # 4 -> 8
-            _layer_init(nn.Conv2d(256, 256, kernel_size=3, padding=1)),
-            nn.GELU(),
-            nn.GroupNorm(8, 256),
-            nn.Dropout2d(dropout),
-            ResidualDeconvBlock(256, dropout),
+            ResNetUpsampleBlock(128, 128, upsample=False, dropout=dropout),
+            ResNetUpsampleBlock(128, 128, upsample=False, dropout=dropout),
         )
 
-        # Stage 2: 8x8 -> 16x16, 256 -> 128 channels
+        # Stage 2: 32x32 -> 64x64, 128 -> 64 channels
         self.stage2 = nn.Sequential(
-            nn.Upsample(scale_factor=2, mode="nearest"),  # 8 -> 16
-            _layer_init(nn.Conv2d(256, 128, kernel_size=3, padding=1)),
-            nn.GELU(),
-            nn.GroupNorm(8, 128),
-            nn.Dropout2d(dropout),
-            ResidualDeconvBlock(128, dropout),
+            ResNetUpsampleBlock(128, 64, upsample=True, dropout=dropout),  # upsample
+            ResNetUpsampleBlock(64, 64, upsample=False, dropout=dropout),
         )
 
-        # Stage 3: 16x16 -> 32x32, 128 -> 64 channels
-        self.stage3 = nn.Sequential(
-            nn.Upsample(scale_factor=2, mode="nearest"),  # 16 -> 32
-            _layer_init(nn.Conv2d(128, 64, kernel_size=3, padding=1)),
-            nn.GELU(),
-            nn.GroupNorm(8, 64),
-            nn.Dropout2d(dropout),
-            ResidualDeconvBlock(64, dropout),
-        )
-
-        # Stage 4: 32x32 -> 64x64, 64 -> 32 -> C channels
-        self.stage4 = nn.Sequential(
-            nn.Upsample(scale_factor=2, mode="nearest"),  # 32 -> 64
-            _layer_init(nn.Conv2d(64, 32, kernel_size=3, padding=1)),
-            nn.GELU(),
-            nn.GroupNorm(8, 32),
-            nn.Dropout2d(dropout),
-            _layer_init(nn.Conv2d(32, 32, kernel_size=3, padding=1)),
-            nn.GELU(),
-        )
-
-        # Final output conv (no dropout before output)
+        # Final output: 64x64, 64 -> C channels
+        self.final_norm = nn.GroupNorm(8, 64)
         self.output = nn.Sequential(
-            _layer_init(nn.Conv2d(32, c, kernel_size=3, padding=1)),
+            _layer_init(nn.Conv2d(64, 64, kernel_size=3, padding=1)),
+            nn.GroupNorm(8, 64),
+            nn.GELU(),
+            _layer_init(nn.Conv2d(64, c, kernel_size=7, padding=3)),
             nn.Sigmoid(),  # Output in [0, 1] range
         )
 
@@ -541,12 +618,13 @@ class Decoder(nn.Module):
         h = self.fc(z)
         h = h.view(batch_size, self.conv_channels, self.h_conv, self.w_conv)
 
-        # Decode through upsampling stages
+        # Decode through ResNet stages
         h = self.stage1(h)
         h = self.stage2(h)
-        h = self.stage3(h)
-        h = self.stage4(h)
 
+        # Final output
+        h = self.final_norm(h)
+        h = F.gelu(h)
         return self.output(h)
 
 
