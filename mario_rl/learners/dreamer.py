@@ -565,15 +565,24 @@ class DreamerLearner:
             # Embed action and get dynamics prediction
             a_embed = self.model.dynamics.action_embed(action)
             x = torch.cat([z, a_embed], dim=-1)
-            h = self.model.dynamics.gru(x, h)
             
-            out = self.model.dynamics.fc_out(h)
+            # Project through pre_gru before GRU (matches Dynamics.forward)
+            x = self.model.dynamics.pre_gru(x)
+            h = self.model.dynamics.gru(x, h)
+            h = self.model.dynamics.gru_norm(h)
+            
+            # Residual connection around GRU
+            h = h + x
+            
+            # Post-GRU processing
+            out = self.model.dynamics.post_gru(h)
             mu = self.model.dynamics.fc_mu(out)
             logvar = self.model.dynamics.fc_logvar(out).clamp(-10, 2)
             
-            # Sample next latent
+            # Sample next latent with residual from current z
             std = torch.exp(0.5 * logvar)
-            z_next = mu + std * torch.randn_like(std)
+            z_delta = mu + std * torch.randn_like(std)
+            z_next = self.model.dynamics.z_skip(z) + z_delta
             
             # Compute KL divergence: KL(N(mu, sigma^2) || N(0, 1))
             # KL = 0.5 * (sigma^2 + mu^2 - 1 - log(sigma^2))
