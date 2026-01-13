@@ -10,13 +10,13 @@ from typing import Tuple
 
 import numpy as np
 from nes_py.wrappers import JoypadSpace
-from gymnasium.wrappers import FrameStackObservation
 from gym_super_mario_bros import actions as smb_actions
 
 from mario_rl.core.config import LevelType
 from mario_rl.environment.wrappers import SkipFrame
 from mario_rl.environment.wrappers import ResizeObservation
 from mario_rl.environment.wrappers import GrayScaleObservation
+from mario_rl.environment.frame_stack import FrameStack
 from mario_rl.environment.mariogym import SuperMarioBrosMultiLevel
 
 
@@ -32,7 +32,7 @@ class MarioEnvironment:
         self,
         env: Any,
         base_env: SuperMarioBrosMultiLevel,
-        fstack: FrameStackObservation,
+        fstack: FrameStack,
     ):
         self.env = env
         self.base_env = base_env
@@ -64,6 +64,7 @@ class MarioEnvironment:
 def create_mario_env(
     level: LevelType = (1, 1),
     render_frames: bool = False,
+    lz4_compress: bool = True,
 ) -> MarioEnvironment:
     """
     Create a wrapped Mario environment.
@@ -71,6 +72,7 @@ def create_mario_env(
     Args:
         level: Level specification - tuple (world, stage) or "random"/"sequential"
         render_frames: Whether to render frames for visualization
+        lz4_compress: Whether to use LZ4 compression for frame stacking (saves memory)
 
     Returns:
         MarioEnvironment containing the wrapped env and components
@@ -91,7 +93,8 @@ def create_mario_env(
     env = ResizeObservation(env, shape=64)
     # Note: Normalization (x/255) is done in the neural network on GPU
     # This keeps observations as uint8 (smaller memory, faster transfer)
-    fstack = FrameStackObservation(env, stack_size=4)
+    # LZ4 compression further reduces memory for replay buffer storage
+    fstack = FrameStack(env, num_stack=4, lz4_compress=lz4_compress)
 
     return MarioEnvironment(env=fstack, base_env=base_env, fstack=fstack)
 
@@ -100,16 +103,18 @@ def create_mario_env(
 def create_env(
     level: LevelType = (1, 1),
     render_frames: bool = False,
-) -> Tuple[Any, SuperMarioBrosMultiLevel, FrameStackObservation]:
+    lz4_compress: bool = True,
+) -> Tuple[Any, SuperMarioBrosMultiLevel, FrameStack]:
     """
     Create a wrapped Mario environment (legacy interface).
 
     Args:
         level: Level specification
         render_frames: Whether to render frames
+        lz4_compress: Whether to use LZ4 compression for frame stacking
 
     Returns:
         Tuple of (env, base_env, fstack)
     """
-    mario_env = create_mario_env(level, render_frames)
+    mario_env = create_mario_env(level, render_frames, lz4_compress)
     return mario_env.env, mario_env.base_env, mario_env.fstack

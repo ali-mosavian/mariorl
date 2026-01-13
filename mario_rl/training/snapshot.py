@@ -93,8 +93,11 @@ class SnapshotManager:
             nes_state = self.base_env.env.dump_state()
 
             # Save COPIES of frame stack queue as immutable tuple
+            # Support both gymnasium's FrameStackObservation (obs_queue) and our FrameStack (frames)
             frame_queue: tuple = ()
-            if hasattr(self.fstack, "obs_queue"):
+            if hasattr(self.fstack, "frames"):
+                frame_queue = tuple(np.array(f, copy=True) for f in self.fstack.frames)
+            elif hasattr(self.fstack, "obs_queue"):
                 frame_queue = tuple(np.array(f, copy=True) for f in self.fstack.obs_queue)
 
             self._slot_to_state[slot_id] = GameSnapshot(
@@ -146,10 +149,16 @@ class SnapshotManager:
 
         try:
             # Restore frame stack queue FIRST (like MadMario does)
-            if snapshot.frame_queue and hasattr(self.fstack, "obs_queue"):
-                self.fstack.obs_queue.clear()
-                for frame in snapshot.frame_queue:
-                    self.fstack.obs_queue.append(frame)
+            # Support both gymnasium's FrameStackObservation (obs_queue) and our FrameStack (frames)
+            if snapshot.frame_queue:
+                if hasattr(self.fstack, "frames"):
+                    self.fstack.frames.clear()
+                    for frame in snapshot.frame_queue:
+                        self.fstack.frames.append(frame)
+                elif hasattr(self.fstack, "obs_queue"):
+                    self.fstack.obs_queue.clear()
+                    for frame in snapshot.frame_queue:
+                        self.fstack.obs_queue.append(frame)
 
             # Then restore NES emulator state
             self.base_env.env.load_state(snapshot.nes_state)
