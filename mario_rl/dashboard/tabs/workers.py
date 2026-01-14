@@ -10,8 +10,8 @@ from mario_rl.dashboard.chart_helpers import COLORS, DARK_LAYOUT, GRID_STYLE, ma
 from mario_rl.dashboard.aggregators import sample_data
 
 
-# Action names for Mario
-ACTION_NAMES = ["NOOP", "→", "→A", "→B", "→AB", "A", "←", "←A", "←B", "←AB", "↓", "↑"]
+# Action names for Mario (SIMPLE_MOVEMENT: 7 actions)
+ACTION_NAMES = ["NOOP", "→", "→A", "→B", "→AB", "A", "←"]
 
 
 def detect_model_type(workers: dict[int, pd.DataFrame]) -> str:
@@ -487,12 +487,14 @@ def _render_action_distribution_heatmap(workers: dict[int, pd.DataFrame]) -> Non
         
         # Build heatmap matrix
         x_labels = [f"{int(d[0]//1000)}k" for d in sampled_data]
-        z_data = [[d[1][action_idx] for d in sampled_data] for action_idx in range(12)]
+        num_actions = len(sampled_data[0][1]) if sampled_data else len(ACTION_NAMES)
+        z_data = [[d[1][action_idx] for d in sampled_data] for action_idx in range(num_actions)]
+        y_labels = ACTION_NAMES[:num_actions]
         
         fig = make_heatmap(
             z_data=z_data,
             x_labels=x_labels,
-            y_labels=ACTION_NAMES,
+            y_labels=y_labels,
             title="Action Distribution Over Time (%)",
             height=280,
         )

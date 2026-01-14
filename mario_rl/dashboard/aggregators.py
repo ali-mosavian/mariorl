@@ -7,6 +7,9 @@ from pathlib import Path
 import duckdb
 import pandas as pd
 
+# Max valid x position in Super Mario Bros (levels are ~3000-3500 px long)
+MAX_VALID_X_POS = 5000
+
 
 @dataclass
 class LevelStats:
@@ -101,9 +104,11 @@ def aggregate_level_stats(workers: dict[int, pd.DataFrame]) -> dict[str, LevelSt
     speed_expr = "speed" if "speed" in columns else "0"
     
     # Build best_x expression dynamically from available columns
+    # Filter outliers like 65535 (max uint16) which are invalid
     best_x_cols = [c for c in ["best_x_ever", "best_x", "x_pos"] if c in columns]
     if best_x_cols:
-        best_x_expr = f"MAX(COALESCE({', '.join(best_x_cols)}, 0))"
+        coalesce_expr = f"COALESCE({', '.join(best_x_cols)}, 0)"
+        best_x_expr = f"MAX(CASE WHEN {coalesce_expr} <= {MAX_VALID_X_POS} THEN {coalesce_expr} ELSE 0 END)"
     else:
         best_x_expr = "0"
     
@@ -188,7 +193,8 @@ def aggregate_action_distribution(
         if dist_str and isinstance(dist_str, str):
             try:
                 pcts = [float(p) for p in dist_str.split(",")]
-                if len(pcts) == 12:
+                # Accept both 7 (SIMPLE_MOVEMENT) and 12 (COMPLEX_MOVEMENT) actions
+                if len(pcts) == 7 or len(pcts) == 12:
                     if level not in action_data:
                         action_data[level] = []
                     action_data[level].append(ActionDistPoint(steps=steps, percentages=pcts))
@@ -202,7 +208,11 @@ def aggregate_rate_data(
     workers: dict[int, pd.DataFrame],
     step_bucket_size: int = 10000,
 ) -> dict[str, list[RatePoint]]:
-    """Aggregate death/flag/episode/timeout rate data per level using DuckDB."""
+    """Aggregate death/flag/episode/timeout rate data per level using DuckDB.
+    
+    Returns rolling deltas per bucket (not cumulative totals) to show
+    completion rate as a rolling average over recent episodes.
+    """
     if not workers:
         return {}
     
@@ -221,6 +231,7 @@ def aggregate_rate_data(
     timeouts_expr = "COALESCE(timeouts, 0)" if "timeouts" in columns else "0"
     
     # Use DuckDB for bucketing and aggregation
+    # Compute deltas (changes since previous bucket) per worker, then aggregate
     result = duckdb.sql(f"""
         WITH bucketed AS (
             SELECT 
@@ -236,18 +247,36 @@ def aggregate_rate_data(
             WHERE {level_expr} IS NOT NULL AND {level_expr} != '?'
         ),
         latest_per_worker AS (
-            SELECT level, step_bucket, deaths, flags, episodes, timeouts
+            SELECT 
+                level, 
+                worker_id,
+                step_bucket, 
+                deaths, 
+                flags, 
+                episodes, 
+                timeouts
             FROM bucketed
             WHERE rn = 1
+        ),
+        with_deltas AS (
+            SELECT 
+                level,
+                worker_id,
+                step_bucket,
+                deaths - COALESCE(LAG(deaths) OVER (PARTITION BY worker_id, level ORDER BY step_bucket), 0) AS delta_deaths,
+                flags - COALESCE(LAG(flags) OVER (PARTITION BY worker_id, level ORDER BY step_bucket), 0) AS delta_flags,
+                episodes - COALESCE(LAG(episodes) OVER (PARTITION BY worker_id, level ORDER BY step_bucket), 0) AS delta_episodes,
+                timeouts - COALESCE(LAG(timeouts) OVER (PARTITION BY worker_id, level ORDER BY step_bucket), 0) AS delta_timeouts
+            FROM latest_per_worker
         )
         SELECT 
             level,
             step_bucket,
-            SUM(deaths) AS total_deaths,
-            SUM(flags) AS total_flags,
-            SUM(episodes) AS total_episodes,
-            SUM(timeouts) AS total_timeouts
-        FROM latest_per_worker
+            SUM(CASE WHEN delta_deaths > 0 THEN delta_deaths ELSE 0 END) AS total_deaths,
+            SUM(CASE WHEN delta_flags > 0 THEN delta_flags ELSE 0 END) AS total_flags,
+            SUM(CASE WHEN delta_episodes > 0 THEN delta_episodes ELSE 0 END) AS total_episodes,
+            SUM(CASE WHEN delta_timeouts > 0 THEN delta_timeouts ELSE 0 END) AS total_timeouts
+        FROM with_deltas
         GROUP BY level, step_bucket
         ORDER BY level, step_bucket
     """).df()
@@ -308,7 +337,9 @@ def aggregate_death_hotspots_from_csv(
             (pos // 25) * 25 AS bucket,
             COUNT(*) AS count
         FROM exploded
-        WHERE pos IS NOT NULL
+        WHERE pos IS NOT NULL 
+          AND pos > 0 
+          AND pos <= {MAX_VALID_X_POS}
         GROUP BY level, bucket
         ORDER BY level, bucket
     """).df()

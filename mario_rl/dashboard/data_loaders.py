@@ -6,6 +6,9 @@ from pathlib import Path
 import pandas as pd
 import streamlit as st
 
+# Max valid x position in Super Mario Bros (levels are ~3000-3500 px long)
+MAX_VALID_X_POS = 5000
+
 
 @st.cache_data(ttl=2)
 def find_latest_checkpoint(base_dir: str = "checkpoints") -> str | None:
@@ -52,8 +55,13 @@ def load_death_hotspots(checkpoint_dir: str) -> dict[str, dict[int, int]] | None
         with open(json_path) as f:
             data = json.load(f)
         # Convert string keys back to int for position buckets
+        # Filter outliers like 65535 (max uint16) which are invalid
         return {
-            level: {int(pos): count for pos, count in buckets.items()}
+            level: {
+                int(pos): count 
+                for pos, count in buckets.items() 
+                if 0 < int(pos) <= MAX_VALID_X_POS
+            }
             for level, buckets in data.items()
         }
     except Exception:

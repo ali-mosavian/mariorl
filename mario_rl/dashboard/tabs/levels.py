@@ -23,8 +23,8 @@ from mario_rl.dashboard.aggregators import (
 )
 
 
-# Action names for Mario
-ACTION_NAMES = ["NOOP", "→", "→A", "→B", "→AB", "A", "←", "←A", "←B", "←AB", "↓", "↑"]
+# Action names for Mario (SIMPLE_MOVEMENT: 7 actions)
+ACTION_NAMES = ["NOOP", "→", "→A", "→B", "→AB", "A", "←"]
 
 
 def render_levels_tab(
@@ -276,12 +276,14 @@ def _render_level_action_heatmap(level: str, action_data: dict[str, list]) -> No
         sampled = sample_data(level_data, max_points=30)
         
         x_labels = [f"{int(d.steps // 1000)}k" for d in sampled]
-        z_data = [[d.percentages[action_idx] for d in sampled] for action_idx in range(12)]
+        num_actions = len(sampled[0].percentages) if sampled else len(ACTION_NAMES)
+        z_data = [[d.percentages[action_idx] for d in sampled] for action_idx in range(num_actions)]
+        y_labels = ACTION_NAMES[:num_actions]
         
         fig = make_heatmap(
             z_data=z_data,
             x_labels=x_labels,
-            y_labels=ACTION_NAMES,
+            y_labels=y_labels,
             title="🎮 Actions Over Time",
             height=250,
         )
@@ -290,7 +292,7 @@ def _render_level_action_heatmap(level: str, action_data: dict[str, list]) -> No
         
         # Current top actions
         latest = level_data[-1].percentages
-        top_idx = sorted(range(12), key=lambda i: latest[i], reverse=True)[:3]
+        top_idx = sorted(range(len(ACTION_NAMES)), key=lambda i: latest[i], reverse=True)[:3]
         top_actions = ", ".join(f"{ACTION_NAMES[i]} ({latest[i]:.0f}%)" for i in top_idx)
         st.caption(f"🏆 Current: {top_actions}")
     else:
