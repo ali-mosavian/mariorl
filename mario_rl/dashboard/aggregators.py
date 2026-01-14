@@ -153,8 +153,13 @@ def aggregate_level_stats(workers: dict[int, pd.DataFrame]) -> dict[str, LevelSt
 
 def aggregate_action_distribution(
     workers: dict[int, pd.DataFrame],
+    max_points_per_level: int = 100,
 ) -> dict[str, list[ActionDistPoint]]:
-    """Aggregate action distribution data per level using DuckDB."""
+    """Aggregate action distribution data per level using DuckDB.
+    
+    Samples up to max_points_per_level evenly-spaced points per level
+    to avoid parsing 500k+ rows for dashboard visualization.
+    """
     if not workers:
         return {}
     
@@ -171,20 +176,32 @@ def aggregate_action_distribution(
     
     level_expr = _get_level_expr(columns)
     
+    # Sample evenly-spaced points per level using NTILE (10x faster than parsing all)
     result = duckdb.sql(f"""
-        SELECT 
-            {level_expr} AS level,
-            steps,
-            action_dist
-        FROM combined
-        WHERE action_dist IS NOT NULL 
-          AND action_dist != ''
-          AND {level_expr} IS NOT NULL
-          AND {level_expr} != '?'
+        WITH ranked AS (
+            SELECT 
+                {level_expr} AS level,
+                steps,
+                action_dist,
+                NTILE({max_points_per_level}) OVER (PARTITION BY {level_expr} ORDER BY steps) as bucket
+            FROM combined
+            WHERE action_dist IS NOT NULL 
+              AND action_dist != ''
+              AND {level_expr} IS NOT NULL
+              AND {level_expr} != '?'
+        ),
+        first_per_bucket AS (
+            SELECT level, steps, action_dist, bucket,
+                ROW_NUMBER() OVER (PARTITION BY level, bucket ORDER BY steps) as bucket_rn
+            FROM ranked
+        )
+        SELECT level, steps, action_dist
+        FROM first_per_bucket
+        WHERE bucket_rn = 1
         ORDER BY level, steps
     """).df()
     
-    # Use zip over numpy arrays instead of iterrows() - 10x faster
+    # Use zip over numpy arrays instead of iterrows()
     action_data: dict[str, list[ActionDistPoint]] = {}
     levels = result["level"].values
     steps_arr = result["steps"].values
