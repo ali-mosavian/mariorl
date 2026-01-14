@@ -184,12 +184,14 @@ def aggregate_action_distribution(
         ORDER BY level, steps
     """).df()
     
+    # Use zip over numpy arrays instead of iterrows() - 10x faster
     action_data: dict[str, list[ActionDistPoint]] = {}
-    for _, row in result.iterrows():
-        level = str(row["level"])
-        dist_str = row["action_dist"]
-        steps = int(row["steps"])
-        
+    levels = result["level"].values
+    steps_arr = result["steps"].values
+    dists = result["action_dist"].values
+    
+    for level, steps, dist_str in zip(levels, steps_arr, dists):
+        level = str(level)
         if dist_str and isinstance(dist_str, str):
             try:
                 pcts = [float(p) for p in dist_str.split(",")]
@@ -197,7 +199,7 @@ def aggregate_action_distribution(
                 if len(pcts) == 7 or len(pcts) == 12:
                     if level not in action_data:
                         action_data[level] = []
-                    action_data[level].append(ActionDistPoint(steps=steps, percentages=pcts))
+                    action_data[level].append(ActionDistPoint(steps=int(steps), percentages=pcts))
             except (ValueError, TypeError):
                 pass
     
@@ -281,17 +283,25 @@ def aggregate_rate_data(
         ORDER BY level, step_bucket
     """).df()
     
+    # Use zip over numpy arrays instead of iterrows()
     rate_data: dict[str, list[RatePoint]] = {}
-    for _, row in result.iterrows():
-        level = str(row["level"])
+    levels = result["level"].values
+    buckets = result["step_bucket"].values
+    deaths = result["total_deaths"].values
+    flags = result["total_flags"].values
+    episodes = result["total_episodes"].values
+    timeouts = result["total_timeouts"].values
+    
+    for level, bucket, d, f, e, t in zip(levels, buckets, deaths, flags, episodes, timeouts):
+        level = str(level)
         if level not in rate_data:
             rate_data[level] = []
         rate_data[level].append(RatePoint(
-            steps=int(row["step_bucket"]),
-            deaths=int(row["total_deaths"]),
-            flags=int(row["total_flags"]),
-            episodes=int(row["total_episodes"]),
-            timeouts=int(row["total_timeouts"]),
+            steps=int(bucket),
+            deaths=int(d),
+            flags=int(f),
+            episodes=int(e),
+            timeouts=int(t),
         ))
     
     return rate_data
@@ -345,15 +355,17 @@ def aggregate_death_hotspots_from_csv(
         ORDER BY level, bucket
     """).df()
     
+    # Use zip over numpy arrays instead of iterrows()
     hotspots: dict[str, dict[int, int]] = {}
-    for _, row in result.iterrows():
-        level = str(row["level"])
-        bucket = int(row["bucket"])
-        count = int(row["count"])
-        
+    levels = result["level"].values
+    buckets = result["bucket"].values
+    counts = result["count"].values
+    
+    for level, bucket, count in zip(levels, buckets, counts):
+        level = str(level)
         if level not in hotspots:
             hotspots[level] = {}
-        hotspots[level][bucket] = count
+        hotspots[level][int(bucket)] = int(count)
     
     return hotspots
 
