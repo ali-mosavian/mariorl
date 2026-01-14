@@ -315,7 +315,8 @@ def aggregate_death_hotspots_from_csv(
         return {}
     
     # Filter and extract death positions using DuckDB
-    result = duckdb.sql("""
+    # Filter outliers like 65535 (max uint16) which are invalid
+    result = duckdb.sql(f"""
         WITH parsed AS (
             SELECT 
                 split_part(CAST(death_positions AS VARCHAR), ':', 1) AS level,
