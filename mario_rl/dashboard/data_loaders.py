@@ -32,6 +32,21 @@ def find_latest_checkpoint(base_dir: str = "checkpoints") -> str | None:
     return str(dirs[0]) if dirs else None
 
 
+@st.cache_data(ttl=5)
+def list_checkpoints(base_dir: str = "checkpoints") -> list[str]:
+    """List all checkpoint directories, sorted by modification time (newest first)."""
+    base = Path(base_dir)
+    if not base.exists():
+        return []
+    # Look for any dist_ directories (ddqn_dist_ or dreamer_dist_)
+    dirs = sorted(
+        [d for d in base.iterdir() if d.is_dir() and "_dist_" in d.name],
+        key=lambda x: x.stat().st_mtime,
+        reverse=True,
+    )
+    return [str(d) for d in dirs]
+
+
 @st.cache_data(ttl=2)
 def load_coordinator_metrics(checkpoint_dir: str) -> pd.DataFrame | None:
     """Load coordinator metrics directly from files via DuckDB."""

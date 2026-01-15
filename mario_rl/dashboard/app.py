@@ -12,10 +12,10 @@ from pathlib import Path
 import streamlit as st
 
 from mario_rl.dashboard.data_loaders import (
-    find_latest_checkpoint,
+    list_checkpoints,
     load_coordinator_metrics,
-    load_worker_metrics,
     load_death_hotspots,
+    load_worker_metrics,
 )
 from mario_rl.dashboard.tabs import (
     render_coordinator_tab,
@@ -49,12 +49,25 @@ def render_sidebar() -> tuple[str, int]:
     with st.sidebar:
         st.header("Settings")
 
-        default_checkpoint = find_latest_checkpoint()
-        checkpoint_input = st.text_input(
-            "Checkpoint",
-            value=default_checkpoint if default_checkpoint else "checkpoints/",
-        )
-        checkpoint_dir = checkpoint_input
+        checkpoints = list_checkpoints()
+        if checkpoints:
+            # Format display names: show just the directory name for cleaner UI
+            display_names = [Path(cp).name for cp in checkpoints]
+            selected_idx = st.selectbox(
+                "Checkpoint",
+                range(len(checkpoints)),
+                index=0,  # Default to latest (list is sorted newest first)
+                format_func=lambda i: display_names[i],
+                help="Select a checkpoint directory (sorted by newest first)",
+            )
+            checkpoint_dir = checkpoints[selected_idx]
+        else:
+            # Fallback to text input if no checkpoints found
+            checkpoint_dir = st.text_input(
+                "Checkpoint",
+                value="checkpoints/",
+                help="No checkpoints found. Enter path manually.",
+            )
 
         refresh_sec = st.slider("Refresh interval (sec)", 2, 30, 5)
 
