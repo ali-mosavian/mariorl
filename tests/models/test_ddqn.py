@@ -30,7 +30,6 @@ class DDQNTestConfig:
     feature_dim: int = 512
     hidden_dim: int = 256
     dropout: float = 0.0  # Disable dropout for deterministic tests
-    q_scale: float = 100.0
 
 
 # =============================================================================
@@ -56,7 +55,6 @@ def ddqn_model(config: DDQNTestConfig):
         feature_dim=config.feature_dim,
         hidden_dim=config.hidden_dim,
         dropout=config.dropout,
-        q_scale=config.q_scale,
     )
 
 
@@ -118,12 +116,12 @@ def test_forward_invalid_network_raises(ddqn_model, sample_batch: Tensor) -> Non
         ddqn_model(sample_batch, network="invalid")
 
 
-def test_q_values_are_bounded(ddqn_model, sample_batch: Tensor, config: DDQNTestConfig) -> None:
-    """Q-values should be bounded by [-q_scale, q_scale] due to softsign activation."""
+def test_q_values_are_finite(ddqn_model, sample_batch: Tensor) -> None:
+    """Q-values should be finite (not NaN or Inf)."""
     q_values = ddqn_model(sample_batch)
 
-    assert q_values.min() >= -config.q_scale
-    assert q_values.max() <= config.q_scale
+    assert torch.isfinite(q_values).all()
+    # Q-values are unbounded (raw linear output), symlog is applied in learner
 
 
 def test_q_values_gradient_flows(ddqn_model, sample_batch: Tensor) -> None:
@@ -322,18 +320,43 @@ def test_large_batch(ddqn_model, config: DDQNTestConfig) -> None:
     assert q_values.shape == (256, config.num_actions)
 
 
-@pytest.mark.parametrize("q_scale", [1.0, 10.0, 100.0, 1000.0])
-def test_different_q_scales(q_scale: float) -> None:
-    """Model should respect different q_scale values."""
-    from mario_rl.models.ddqn import DoubleDQN
+# =============================================================================
+# Symlog Tests
+# =============================================================================
 
-    model = DoubleDQN(
-        input_shape=(4, 64, 64),
-        num_actions=12,
-        q_scale=q_scale,
-    )
-    batch = torch.randn(8, 4, 64, 64)
-    q_values = model(batch)
 
-    assert q_values.min() >= -q_scale
-    assert q_values.max() <= q_scale
+def test_symlog_function_exists() -> None:
+    """symlog function should be importable from ddqn module."""
+    from mario_rl.models.ddqn import symlog
+
+    assert callable(symlog)
+
+
+def test_symexp_function_exists() -> None:
+    """symexp function should be importable from ddqn module."""
+    from mario_rl.models.ddqn import symexp
+
+    assert callable(symexp)
+
+
+def test_symlog_symexp_roundtrip() -> None:
+    """symexp(symlog(x)) should equal x."""
+    from mario_rl.models.ddqn import symlog, symexp
+
+    x = torch.randn(100) * 100  # Large range
+
+    recovered = symexp(symlog(x))
+
+    assert torch.allclose(recovered, x, atol=1e-5)
+
+
+def test_symlog_compresses_large_values() -> None:
+    """symlog should compress large values for stable learning."""
+    from mario_rl.models.ddqn import symlog
+
+    x = torch.tensor([1.0, 10.0, 100.0, 1000.0])
+    y = symlog(x)
+
+    # Output should be much smaller than input for large values
+    assert (y < x).all()
+    assert y[-1] < 10  # 1000 -> ~7

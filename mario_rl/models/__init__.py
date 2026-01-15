@@ -3,6 +3,8 @@
 from mario_rl.models.base import Model
 from mario_rl.models.ddqn import DDQNConfig
 from mario_rl.models.ddqn import DoubleDQN
+from mario_rl.models.ddqn import symexp
+from mario_rl.models.ddqn import symlog
 from mario_rl.models.dreamer import DreamerConfig
 from mario_rl.models.dreamer import DreamerModel
 from mario_rl.models.muzero import MuZeroConfig
@@ -20,4 +22,6 @@ __all__ = [
     "MuZeroModel",
     "MuZeroNetwork",
     "info_nce_loss",
+    "symexp",
+    "symlog",
 ]

@@ -2,6 +2,7 @@
 
 Implements the Learner protocol for Double DQN:
 - Computes TD loss using Double DQN targets
+- Uses symlog transform for scale-invariant Q-learning
 - Supports N-step returns with correct gamma discounting
 - Uses importance sampling weights for PER correction
 - Includes entropy regularization for exploration
@@ -18,6 +19,7 @@ from torch import Tensor
 import torch.nn.functional as F
 
 from mario_rl.models import DoubleDQN
+from mario_rl.models.ddqn import symlog, symexp
 from mario_rl.mcts.protocols import PolicyAdapter, ValueAdapter
 
 
@@ -25,11 +27,12 @@ from mario_rl.mcts.protocols import PolicyAdapter, ValueAdapter
 class DDQNLearner:
     """Learner for Double DQN training.
 
-    Computes Double DQN loss with N-step returns:
-        target = r + γ^n * Q_target(s', argmax_a Q_online(s', a)) * (1 - done)
-        loss = mean(weights * huber_loss(Q_online(s, a), target))
+    Computes Double DQN loss with N-step returns and symlog transform:
+        target = symlog(r + γ^n * Q_target(s', argmax_a Q_online(s', a)) * (1 - done))
+        loss = mean(weights * huber_loss(symlog(Q_online(s, a)), target))
 
     Features:
+    - Symlog transform for scale-invariant Q-learning (handles varying reward scales)
     - N-step returns with correct gamma^n discounting
     - Importance sampling weights for PER bias correction
     - Entropy regularization for exploration
@@ -62,6 +65,10 @@ class DDQNLearner:
     ) -> tuple[Tensor, dict[str, Any]]:
         """Compute Double DQN loss for a batch of transitions.
 
+        Uses symlog transform for scale-invariant learning:
+        - Predictions and targets are transformed to symlog space before loss
+        - This handles varying reward scales without manual normalization
+
         Args:
             states: Current observations (batch, *obs_shape)
             actions: Actions taken (batch,)
@@ -93,9 +100,13 @@ class DDQNLearner:
             # TD target with N-step gamma: r + γ^n * Q_target(s', a*) * (1 - done)
             target_q = rewards + self._n_step_gamma * next_q_selected * (1.0 - dones.float())
 
-        # Compute element-wise Huber loss
+        # Apply symlog transform for scale-invariant loss
+        current_q_symlog = symlog(current_q_selected)
+        target_q_symlog = symlog(target_q)
+
+        # Compute element-wise Huber loss in symlog space
         element_wise_loss = F.huber_loss(
-            current_q_selected, target_q, reduction="none", delta=1.0
+            current_q_symlog, target_q_symlog, reduction="none", delta=1.0
         )
 
         # Apply importance sampling weights for PER bias correction
@@ -113,7 +124,7 @@ class DDQNLearner:
         # Total loss: TD loss - entropy bonus (we want to maximize entropy)
         loss = td_loss - self.entropy_coef * entropy
 
-        # Compute TD errors for prioritized replay (absolute error)
+        # Compute TD errors for prioritized replay (in original space for PER)
         td_errors = (current_q_selected - target_q).abs().detach()
 
         # Training metrics
