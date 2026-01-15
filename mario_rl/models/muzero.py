@@ -45,6 +45,30 @@ from torch import Tensor
 from torch import nn
 
 
+# =============================================================================
+# Symlog Transform (from Dreamer V3)
+# =============================================================================
+
+
+def symlog(x: Tensor) -> Tensor:
+    """Symmetric logarithm: sign(x) * ln(|x| + 1).
+
+    Compresses large values while preserving small values and sign.
+    Used for scale-invariant value and reward predictions.
+    """
+    return torch.sign(x) * torch.log1p(torch.abs(x))
+
+
+def symexp(x: Tensor) -> Tensor:
+    """Inverse of symlog: sign(x) * (exp(|x|) - 1)."""
+    return torch.sign(x) * (torch.exp(torch.abs(x)) - 1)
+
+
+# =============================================================================
+# Initialization
+# =============================================================================
+
+
 def _layer_init(
     layer: nn.Module,
     std: float = np.sqrt(2),

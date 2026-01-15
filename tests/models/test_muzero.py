@@ -436,3 +436,68 @@ class TestMuZeroModelGrounding:
         z_pred = model.predict(z)
 
         assert z_pred.shape == (2, config.latent_dim)
+
+
+class TestSymlogTransform:
+    """Tests for symlog/symexp transforms in MuZero."""
+
+    def test_symlog_small_values_unchanged(self) -> None:
+        """Small values should be approximately unchanged by symlog."""
+        from mario_rl.models.muzero import symlog
+
+        x = torch.tensor([0.1, -0.1, 0.5, -0.5])
+        y = symlog(x)
+
+        # For small |x|, symlog(x) ≈ x (within ~10% for |x| < 0.5)
+        assert torch.allclose(y, x, atol=0.15)
+
+    def test_symlog_compresses_large_values(self) -> None:
+        """Large values should be compressed by symlog."""
+        from mario_rl.models.muzero import symlog
+
+        x = torch.tensor([100.0, -100.0, 1000.0, -1000.0])
+        y = symlog(x)
+
+        # Symlog(100) = ln(101) ≈ 4.6
+        # Symlog(1000) = ln(1001) ≈ 6.9
+        assert torch.all(torch.abs(y) < torch.abs(x))
+        assert y[0] > 0 and y[1] < 0  # Sign preserved
+
+    def test_symexp_is_inverse_of_symlog(self) -> None:
+        """symexp(symlog(x)) should equal x."""
+        from mario_rl.models.muzero import symexp
+        from mario_rl.models.muzero import symlog
+
+        x = torch.tensor([-100.0, -10.0, -1.0, 0.0, 1.0, 10.0, 100.0])
+        y = symexp(symlog(x))
+
+        assert torch.allclose(y, x, rtol=1e-5)
+
+    def test_symlog_preserves_sign(self) -> None:
+        """symlog should preserve the sign of values."""
+        from mario_rl.models.muzero import symlog
+
+        x = torch.tensor([-50.0, -1.0, 0.0, 1.0, 50.0])
+        y = symlog(x)
+
+        assert (y[0] < 0) and (y[1] < 0)
+        assert y[2] == 0
+        assert (y[3] > 0) and (y[4] > 0)
+
+    def test_symlog_zero_is_zero(self) -> None:
+        """symlog(0) should equal 0."""
+        from mario_rl.models.muzero import symlog
+
+        x = torch.tensor([0.0])
+        y = symlog(x)
+
+        assert y.item() == 0.0
+
+    def test_symexp_zero_is_zero(self) -> None:
+        """symexp(0) should equal 0."""
+        from mario_rl.models.muzero import symexp
+
+        x = torch.tensor([0.0])
+        y = symexp(x)
+
+        assert y.item() == 0.0

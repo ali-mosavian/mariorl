@@ -15,6 +15,7 @@ import numpy as np
 import torch.nn.functional as F
 
 from mario_rl.agent.ddqn_net import DoubleDQN
+from mario_rl.models.muzero import symexp
 
 if TYPE_CHECKING:
     from mario_rl.agent.world_model import DreamerDDQN
@@ -409,16 +410,19 @@ class MuZeroAdapter:
         """
         Get value estimate from prediction network.
 
+        Note: Network outputs symlog-scaled values, we convert to real space.
+
         Args:
             state: Observation
 
         Returns:
-            Value estimate
+            Value estimate (in real space)
         """
         with torch.no_grad():
             state_t = self._prepare_state(state)
-            _, _, value = self.model.initial_inference(state_t)
-            return float(value.item())
+            _, _, value_symlog = self.model.initial_inference(state_t)
+            # Convert from symlog space to real space
+            return float(symexp(value_symlog).item())
 
     def get_action_fast(self, state: np.ndarray) -> int:
         """

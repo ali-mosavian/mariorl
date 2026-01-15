@@ -33,6 +33,8 @@ from mario_rl.mcts import MCTSNode
 from mario_rl.models.muzero import MuZeroConfig
 from mario_rl.models.muzero import MuZeroModel
 from mario_rl.models.muzero import info_nce_loss
+from mario_rl.models.muzero import symexp
+from mario_rl.models.muzero import symlog
 
 
 def scale_gradient(tensor: Tensor, scale: float) -> Tensor:
@@ -148,7 +150,12 @@ class MuZeroLearner:
         contrastive_losses = []
 
         # Initial inference: s → z
+        # Note: v is in symlog space (network implicitly learns symlog-scaled values)
         z, policy_logits, v = self.model.initial_inference(s)
+
+        # Convert value targets to symlog space for scale-invariant loss
+        target_values_symlog = symlog(target_values)
+        rewards_symlog = symlog(rewards)
 
         # Loss at root (step 0)
         policy_loss_0 = F.cross_entropy(
@@ -156,7 +163,8 @@ class MuZeroLearner:
             target_policies[:, 0],
             reduction="none",
         )
-        value_loss_0 = F.mse_loss(v, target_values[:, 0], reduction="none")
+        # Value loss in symlog space
+        value_loss_0 = F.mse_loss(v, target_values_symlog[:, 0], reduction="none")
 
         policy_losses.append(policy_loss_0)
         value_losses.append(value_loss_0)
@@ -170,6 +178,7 @@ class MuZeroLearner:
             # This ensures each unroll step contributes equally to gradients
             z_scaled = scale_gradient(z, gradient_scale)
 
+            # r and v are in symlog space
             z_pred, r, policy_logits, v = self.model.recurrent_inference(
                 z_scaled, actions[:, k]
             )
@@ -182,12 +191,12 @@ class MuZeroLearner:
             )
             policy_losses.append(policy_loss_k)
 
-            # Value loss
-            value_loss_k = F.mse_loss(v, target_values[:, k + 1], reduction="none")
+            # Value loss in symlog space
+            value_loss_k = F.mse_loss(v, target_values_symlog[:, k + 1], reduction="none")
             value_losses.append(value_loss_k)
 
-            # Reward loss
-            reward_loss_k = F.mse_loss(r, rewards[:, k], reduction="none")
+            # Reward loss in symlog space
+            reward_loss_k = F.mse_loss(r, rewards_symlog[:, k], reduction="none")
             reward_losses.append(reward_loss_k)
 
             # Latent grounding losses (if next_states provided)
@@ -248,7 +257,7 @@ class MuZeroLearner:
         # Apply importance weights and average over batch
         loss = (weights * total_loss).mean()
 
-        # Metrics
+        # Metrics - convert values back to real space for interpretability
         metrics = {
             "loss": loss.item(),
             "policy_loss": (weights * policy_loss).mean().item(),
@@ -256,7 +265,8 @@ class MuZeroLearner:
             "reward_loss": (weights * reward_loss).mean().item(),
             "consistency_loss": consistency_loss_mean,
             "contrastive_loss": contrastive_loss_mean,
-            "value_pred_mean": v.mean().item(),
+            # Convert from symlog space to real space for metrics
+            "value_pred_mean": symexp(v).mean().item(),
             "value_target_mean": target_values[:, -1].mean().item(),
         }
 
@@ -291,22 +301,29 @@ class MuZeroLearner:
             metrics: Training metrics
         """
         # Get initial predictions: s → z
+        # Note: v is in symlog space (network implicitly learns symlog-scaled values)
         z, policy_logits, v = self.model.initial_inference(states)
 
         # Get next latent predictions (1-step unroll): z, a → z', r
+        # r_pred is in symlog space
         z_pred, r_pred, _, v_next = self.model.recurrent_inference(z, actions)
 
         # Get target value from target network
         with torch.no_grad():
-            _, _, v_target = self.model.target.initial_inference(next_states)
-            # Bootstrap target: r + γ * V(s') * (1 - done)
-            value_target = rewards + self.model.config.discount * v_target * (
+            # v_target_symlog is in symlog space
+            _, _, v_target_symlog = self.model.target.initial_inference(next_states)
+            # Convert to real space for TD calculation
+            v_target_real = symexp(v_target_symlog)
+            # Bootstrap target in real space: r + γ * V(s') * (1 - done)
+            value_target_real = rewards + self.model.config.discount * v_target_real * (
                 1.0 - dones.float()
             )
+            # Convert back to symlog space for loss
+            value_target_symlog = symlog(value_target_real)
 
-        # Task losses
-        value_loss = F.mse_loss(v, value_target, reduction="none")
-        reward_loss = F.mse_loss(r_pred, rewards, reduction="none")
+        # Task losses in symlog space
+        value_loss = F.mse_loss(v, value_target_symlog, reduction="none")
+        reward_loss = F.mse_loss(r_pred, symlog(rewards), reduction="none")
 
         # No policy target in single-step mode, use entropy regularization
         policy = F.softmax(policy_logits, dim=-1)
@@ -349,6 +366,7 @@ class MuZeroLearner:
         else:
             loss = total_loss.mean()
 
+        # Metrics - convert values back to real space for interpretability
         metrics = {
             "loss": loss.item(),
             "value_loss": value_loss.mean().item(),
@@ -356,8 +374,8 @@ class MuZeroLearner:
             "consistency_loss": consistency_loss.mean().item(),
             "contrastive_loss": contrastive_loss.mean().item(),
             "entropy": entropy.mean().item(),
-            "value_pred_mean": v.mean().item(),
-            "value_target_mean": value_target.mean().item(),
+            "value_pred_mean": symexp(v).mean().item(),
+            "value_target_mean": value_target_real.mean().item(),
         }
 
         return loss, metrics
@@ -409,10 +427,11 @@ def run_mcts(
     s = s.to(device)
 
     # Initial inference for root: s → z, π, v
+    # Note: v is in symlog space, convert to real for MCTS
     with torch.no_grad():
-        z, policy_logits, v = model.initial_inference(s)
+        z, policy_logits, v_symlog = model.initial_inference(s)
         root_policy = F.softmax(policy_logits, dim=-1).squeeze(0).cpu().numpy()
-        root_value = v.item()
+        root_value = symexp(v_symlog).item()  # Convert to real space
         z_root = z.squeeze(0)  # (latent_dim,)
 
     num_actions = model.num_actions
@@ -433,7 +452,7 @@ def run_mcts(
     # Expand root with all actions
     for a in range(num_actions):
         with torch.no_grad():
-            z_next, r, policy_logits, v = model.recurrent_inference(
+            z_next, r_symlog, policy_logits, v = model.recurrent_inference(
                 z_root.unsqueeze(0), torch.tensor([a], device=device)
             )
 
@@ -443,7 +462,7 @@ def run_mcts(
             parent=root,
             action=a,
             prior=root_policy[a],
-            reward=r.item(),
+            reward=symexp(r_symlog).item(),  # Convert to real space
         )
         root.children.append(child)
 
@@ -459,13 +478,14 @@ def run_mcts(
         if not node.terminal:
             with torch.no_grad():
                 # Get policy from current node's latent state z
-                policy_logits, v_leaf = model.online.prediction(node.state.unsqueeze(0))
+                # v_leaf is in symlog space
+                policy_logits, v_leaf_symlog = model.online.prediction(node.state.unsqueeze(0))
                 leaf_policy = F.softmax(policy_logits, dim=-1).squeeze(0).cpu().numpy()
-                v_leaf = v_leaf.item()
+                v_leaf = symexp(v_leaf_symlog).item()  # Convert to real space
 
             for a in range(num_actions):
                 with torch.no_grad():
-                    z_next, r, _, _ = model.recurrent_inference(
+                    z_next, r_symlog, _, _ = model.recurrent_inference(
                         node.state.unsqueeze(0),
                         torch.tensor([a], device=device),
                     )
@@ -476,11 +496,11 @@ def run_mcts(
                     parent=node,
                     action=a,
                     prior=leaf_policy[a],
-                    reward=r.item(),
+                    reward=symexp(r_symlog).item(),  # Convert to real space
                 )
                 node.children.append(child)
 
-            # Use leaf value for backprop
+            # Use leaf value for backprop (already in real space)
             value_to_backprop = v_leaf
         else:
             value_to_backprop = 0.0
