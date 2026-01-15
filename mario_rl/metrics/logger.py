@@ -1,20 +1,25 @@
 """
-MetricLogger - tracks metrics and writes to CSV / publishes via ZMQ.
+MetricLogger - tracks metrics and writes to CSV/Parquet / publishes via ZMQ.
 
 Single responsibility: track metric values and output them.
 Does NOT aggregate across sources (that's MetricAggregator's job).
+
+Uses TieredMetricWriter for storage: CSV hot tier with Parquet cold tier.
 """
 
 from __future__ import annotations
 
-import csv
 import time
 from collections import deque
-from dataclasses import dataclass, field
+from dataclasses import dataclass
+from dataclasses import field
 from pathlib import Path
-from typing import Any, Protocol, TextIO
+from typing import Any
+from typing import Protocol
 
-from mario_rl.metrics.schema import MetricType, MetricDef
+from mario_rl.metrics.schema import MetricDef
+from mario_rl.metrics.schema import MetricType
+from mario_rl.metrics.tiered_writer import TieredMetricWriter
 
 
 class MetricSchema(Protocol):
@@ -32,13 +37,16 @@ class Publisher(Protocol):
 
 @dataclass
 class MetricLogger:
-    """Tracks metrics and writes to CSV / publishes via ZMQ.
+    """Tracks metrics and writes to CSV/Parquet / publishes via ZMQ.
+    
+    Uses tiered storage: CSV for hot data (fast appends), rotates to
+    Parquet for cold data (efficient storage and reads).
     
     Usage:
         logger = MetricLogger(
             source_id="worker.0",
             schema=DDQNMetrics,
-            csv_path=Path("worker_0.csv"),
+            csv_path=Path("metrics/worker_0.csv"),
             publisher=event_publisher,  # Optional
         )
         
@@ -48,13 +56,14 @@ class MetricLogger:
         logger.observe("reward", 150.0)
         
         # Periodically
-        logger.flush()  # Writes CSV row + publishes snapshot
+        logger.flush()  # Writes to storage + publishes snapshot
     """
     
     source_id: str
     schema: type[MetricSchema]
     csv_path: Path
     publisher: Publisher | None = None
+    max_csv_rows: int = 5000  # Rotate to Parquet after this many rows
     
     # Internal state
     _counters: dict[str, int] = field(default_factory=dict, init=False, repr=False)
@@ -63,13 +72,12 @@ class MetricLogger:
     _rolling_windows: dict[str, int] = field(default_factory=dict, init=False, repr=False)
     _text: dict[str, str] = field(default_factory=dict, init=False, repr=False)
     
-    # CSV state
-    _csv_file: TextIO | None = field(default=None, init=False, repr=False)
-    _csv_writer: csv.DictWriter | None = field(default=None, init=False, repr=False)
-    _header_written: bool = field(default=False, init=False, repr=False)
+    # Tiered storage writer
+    _writer: TieredMetricWriter | None = field(default=None, init=False, repr=False)
     
     def __post_init__(self) -> None:
-        """Initialize metric storage based on schema."""
+        """Initialize metric storage and tiered writer."""
+        # Initialize metric storage based on schema
         for defn in self.schema.definitions():
             match defn.metric_type:
                 case MetricType.COUNTER:
@@ -81,6 +89,15 @@ class MetricLogger:
                     self._rolling_windows[defn.name] = defn.window
                 case MetricType.TEXT:
                     self._text[defn.name] = ""
+        
+        # Initialize tiered writer (CSV hot tier + Parquet cold tier)
+        # Derive base_path and source_id from csv_path for compatibility
+        csv_path = Path(self.csv_path)
+        self._writer = TieredMetricWriter(
+            base_path=csv_path.parent,
+            source_id=csv_path.stem,
+            max_csv_rows=self.max_csv_rows,
+        )
     
     def count(self, name: str, n: int = 1) -> None:
         """Increment a counter metric.
@@ -147,11 +164,11 @@ class MetricLogger:
         return snap
     
     def flush(self) -> None:
-        """Write current snapshot to CSV and publish via ZMQ."""
+        """Write current snapshot to storage and publish via ZMQ."""
         snap = self.snapshot()
         
-        # Write to CSV
-        self._write_csv_row(snap)
+        # Write to tiered storage (CSV hot tier, rotates to Parquet)
+        self._write_row(snap)
         
         # Publish via ZMQ if publisher provided
         if self.publisher is not None:
@@ -160,28 +177,16 @@ class MetricLogger:
                 "snapshot": snap,
             })
     
-    def _write_csv_row(self, snap: dict[str, Any]) -> None:
-        """Write a row to CSV file."""
-        # Lazy open file
-        if self._csv_file is None:
-            self._csv_file = open(self.csv_path, "w", newline="")
-            fieldnames = ["timestamp"] + [d.name for d in self.schema.definitions()]
-            self._csv_writer = csv.DictWriter(self._csv_file, fieldnames=fieldnames)
-        
-        # Write header on first row
-        if not self._header_written:
-            self._csv_writer.writeheader()
-            self._header_written = True
-        
-        # Write data row
-        self._csv_writer.writerow(snap)
-        self._csv_file.flush()
+    def _write_row(self, snap: dict[str, Any]) -> None:
+        """Write a row to tiered storage (CSV hot tier, rotates to Parquet)."""
+        if self._writer is not None:
+            self._writer.write(snap)
     
     def close(self) -> None:
-        """Close the CSV file."""
-        if self._csv_file is not None:
-            self._csv_file.close()
-            self._csv_file = None
+        """Close the storage writer."""
+        if self._writer is not None:
+            self._writer.close()
+            self._writer = None
     
     def save_state(self) -> dict[str, Any]:
         """Serialize state for checkpointing.

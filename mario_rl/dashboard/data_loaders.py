@@ -1,11 +1,17 @@
-"""Data loading functions for the training dashboard."""
+"""Data loading functions for the training dashboard.
+
+Uses DuckDB to read CSV + Parquet files directly for optimal performance.
+"""
 
 import json
 from pathlib import Path
 
-import duckdb
 import pandas as pd
 import streamlit as st
+
+from mario_rl.dashboard.query import get_metrics_dir
+from mario_rl.dashboard.query import query_coordinator
+from mario_rl.dashboard.query import query_workers
 
 # Max valid x position in Super Mario Bros (levels are ~3000-3500 px long)
 MAX_VALID_X_POS = 5000
@@ -28,15 +34,12 @@ def find_latest_checkpoint(base_dir: str = "checkpoints") -> str | None:
 
 @st.cache_data(ttl=2)
 def load_coordinator_metrics(checkpoint_dir: str) -> pd.DataFrame | None:
-    """Load coordinator metrics CSV."""
-    # Try metrics subdirectory first, then root (for compatibility)
-    csv_path = Path(checkpoint_dir) / "metrics" / "coordinator.csv"
-    if not csv_path.exists():
-        csv_path = Path(checkpoint_dir) / "coordinator.csv"
-    if not csv_path.exists():
-        return None
+    """Load coordinator metrics directly from files via DuckDB."""
     try:
-        df = pd.read_csv(csv_path)
+        df = query_coordinator(checkpoint_dir, "SELECT * FROM coordinator ORDER BY timestamp").df()
+        if len(df) == 0:
+            return None
+
         # Compute elapsed_min from timestamp if not present
         if "elapsed_min" not in df.columns and "timestamp" in df.columns:
             start_time = df["timestamp"].iloc[0]
@@ -59,8 +62,8 @@ def load_death_hotspots(checkpoint_dir: str) -> dict[str, dict[int, int]] | None
         # Filter outliers like 65535 (max uint16) which are invalid
         return {
             level: {
-                int(pos): count 
-                for pos, count in buckets.items() 
+                int(pos): count
+                for pos, count in buckets.items()
                 if 0 < int(pos) <= MAX_VALID_X_POS
             }
             for level, buckets in data.items()
@@ -71,50 +74,60 @@ def load_death_hotspots(checkpoint_dir: str) -> dict[str, dict[int, int]] | None
 
 @st.cache_data(ttl=2)
 def load_worker_metrics(checkpoint_dir: str) -> dict[int, pd.DataFrame]:
-    """Load all worker metrics CSVs using DuckDB for 2-4x faster loading."""
-    checkpoint_path = Path(checkpoint_dir)
-    
-    # Try metrics subdirectory first, then root (for compatibility)
-    metrics_dir = checkpoint_path / "metrics"
-    if not metrics_dir.exists():
-        metrics_dir = checkpoint_path
-    
-    glob_pattern = str(metrics_dir / "worker_*.csv")
-    
-    # Check if any CSV files exist
-    csv_files = list(metrics_dir.glob("worker_*.csv"))
-    if not csv_files:
-        return {}
-    
+    """Load all worker metrics directly from files via DuckDB."""
     try:
-        # Use DuckDB to read all CSVs at once (2-4x faster than pandas per-file)
-        # Extract worker_id from filename using regex
-        combined_df = duckdb.sql(f"""
-            SELECT 
-                *,
-                CAST(regexp_extract(filename, 'worker_(\\d+)', 1) AS INTEGER) as worker_id 
-            FROM read_csv_auto('{glob_pattern}', filename=true, union_by_name=true)
-        """).df()
-        
-        # Split into dict by worker_id for compatibility with aggregators
+        # Query all workers at once with worker_id column
+        combined_df = query_workers(
+            checkpoint_dir,
+            "SELECT * FROM workers ORDER BY worker_id, timestamp",
+        ).df()
+
+        if len(combined_df) == 0:
+            return {}
+
+        # Split into dict by worker_id for compatibility with tabs
         workers = {}
         for worker_id in combined_df["worker_id"].unique():
-            worker_df = combined_df[combined_df["worker_id"] == worker_id].drop(
-                columns=["filename", "worker_id"]
-            )
+            worker_df = combined_df[combined_df["worker_id"] == worker_id].copy()
+            # Drop the worker_id column since it's now the dict key
+            if "worker_id" in worker_df.columns:
+                worker_df = worker_df.drop(columns=["worker_id"])
+            # Drop filename column if present
+            if "filename" in worker_df.columns:
+                worker_df = worker_df.drop(columns=["filename"])
             if len(worker_df) > 0:
                 workers[int(worker_id)] = worker_df
-        
+
         return workers
     except Exception:
-        # Fallback to pandas if DuckDB fails
-        workers = {}
-        for csv_file in sorted(csv_files):
-            try:
-                worker_id = int(csv_file.stem.split("_")[1])
-                df = pd.read_csv(csv_file)
-                if len(df) > 0:
-                    workers[worker_id] = df
-            except Exception:
-                continue
-        return workers
+        return {}
+
+
+@st.cache_data(ttl=2)
+def load_worker_latest(checkpoint_dir: str) -> pd.DataFrame | None:
+    """Load only the latest row per worker (for summary tables)."""
+    try:
+        df = query_workers(
+            checkpoint_dir,
+            """
+            SELECT * FROM (
+                SELECT *, 
+                    ROW_NUMBER() OVER (PARTITION BY worker_id ORDER BY timestamp DESC) as rn
+                FROM workers
+            ) 
+            WHERE rn = 1
+            ORDER BY worker_id
+            """,
+        ).df()
+        
+        if len(df) == 0:
+            return None
+        
+        # Drop helper columns
+        df = df.drop(columns=["rn"], errors="ignore")
+        if "filename" in df.columns:
+            df = df.drop(columns=["filename"])
+        
+        return df
+    except Exception:
+        return None
