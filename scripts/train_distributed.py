@@ -178,7 +178,7 @@ def create_model_and_learner(
         cfg = DreamerConfig(
             input_shape=(4, 64, 64),
             num_actions=7,  # SIMPLE_MOVEMENT
-            latent_dim=config.latent_dim,
+            # latent_dim is computed from num_categoricals * num_classes (default: 32*32=1024)
         )
         model = DreamerModel(
             input_shape=cfg.input_shape,
