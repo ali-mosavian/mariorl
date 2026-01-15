@@ -390,3 +390,227 @@ class TestLatentGroundingLoss:
 
         assert learner.consistency_loss_weight == model.config.consistency_weight
         assert learner.contrastive_loss_weight == model.config.contrastive_weight
+
+
+class TestScaleGradient:
+    """Tests for gradient scaling function."""
+
+    def test_forward_pass_unchanged(self) -> None:
+        """Forward pass returns tensor unchanged."""
+        from mario_rl.learners.muzero import scale_gradient
+
+        x = torch.randn(4, 8, requires_grad=True)
+        scaled = scale_gradient(x, 0.5)
+
+        assert torch.allclose(scaled, x)
+
+    def test_gradient_scaling(self) -> None:
+        """Backward pass scales gradients correctly."""
+        from mario_rl.learners.muzero import scale_gradient
+
+        x = torch.randn(4, 8, requires_grad=True)
+        scale = 0.25
+
+        # Forward
+        scaled = scale_gradient(x, scale)
+        loss = (scaled ** 2).sum()
+
+        # Backward
+        loss.backward()
+
+        # Gradient should be scaled: d/dx[(x*s + x.detach()*(1-s))^2] at x
+        # = 2 * (x*s + x*(1-s)) * s = 2 * x * s
+        expected_grad = 2 * x * scale
+        assert torch.allclose(x.grad, expected_grad, rtol=1e-5)
+
+    def test_scale_one_is_identity(self) -> None:
+        """Scale of 1.0 gives normal gradients."""
+        from mario_rl.learners.muzero import scale_gradient
+
+        x = torch.randn(4, 8, requires_grad=True)
+        scaled = scale_gradient(x, 1.0)
+        loss = (scaled ** 2).sum()
+        loss.backward()
+
+        # Full gradient: 2x
+        expected_grad = 2 * x
+        assert torch.allclose(x.grad, expected_grad)
+
+    def test_scale_zero_no_gradient(self) -> None:
+        """Scale of 0.0 stops gradients."""
+        from mario_rl.learners.muzero import scale_gradient
+
+        x = torch.randn(4, 8, requires_grad=True)
+        scaled = scale_gradient(x, 0.0)
+        loss = (scaled ** 2).sum()
+        loss.backward()
+
+        # Gradient should be zero
+        expected_grad = torch.zeros_like(x)
+        assert torch.allclose(x.grad, expected_grad)
+
+
+class TestMuZeroTrajectoryCollector:
+    """Tests for trajectory collection."""
+
+    def test_collector_creation(self) -> None:
+        """Collector can be created with valid config."""
+        from mario_rl.learners.muzero import MuZeroTrajectoryCollector
+        import numpy as np
+
+        collector = MuZeroTrajectoryCollector(
+            unroll_steps=5,
+            num_actions=7,
+            td_steps=10,
+            discount=0.99,
+        )
+
+        assert collector.unroll_steps == 5
+        assert collector.num_actions == 7
+
+    def test_start_episode(self) -> None:
+        """Start episode initializes trajectory data."""
+        from mario_rl.learners.muzero import MuZeroTrajectoryCollector
+        import numpy as np
+
+        collector = MuZeroTrajectoryCollector(
+            unroll_steps=3,
+            num_actions=4,
+        )
+
+        obs = np.random.rand(4, 84, 84).astype(np.float32)
+        policy = np.array([0.25, 0.25, 0.25, 0.25])
+        value = 1.5
+
+        collector.start_episode(obs, policy, value)
+
+        assert len(collector._obs) == 1
+        assert len(collector._actions) == 0
+        assert len(collector._policies) == 1
+
+    def test_add_step(self) -> None:
+        """Adding steps accumulates trajectory data."""
+        from mario_rl.learners.muzero import MuZeroTrajectoryCollector
+        import numpy as np
+
+        collector = MuZeroTrajectoryCollector(
+            unroll_steps=3,
+            num_actions=4,
+        )
+
+        obs = np.random.rand(4, 84, 84).astype(np.float32)
+        policy = np.array([0.25, 0.25, 0.25, 0.25])
+        value = 1.5
+
+        collector.start_episode(obs, policy, value)
+        
+        # Add a step
+        next_obs = np.random.rand(4, 84, 84).astype(np.float32)
+        next_policy = np.array([0.1, 0.2, 0.3, 0.4])
+        collector.add_step(
+            action=2,
+            reward=0.5,
+            next_obs=next_obs,
+            done=False,
+            next_policy=next_policy,
+            next_value=2.0,
+        )
+
+        assert len(collector._obs) == 2
+        assert len(collector._actions) == 1
+        assert collector._actions[0] == 2
+        assert collector._rewards[0] == 0.5
+
+    def test_get_trajectories_returns_segments(self) -> None:
+        """Get trajectories returns proper K-step segments."""
+        from mario_rl.learners.muzero import MuZeroTrajectoryCollector
+        import numpy as np
+
+        K = 3
+        collector = MuZeroTrajectoryCollector(
+            unroll_steps=K,
+            num_actions=4,
+        )
+
+        obs_shape = (4, 84, 84)
+        
+        # Start episode
+        obs = np.random.rand(*obs_shape).astype(np.float32)
+        policy = np.ones(4) / 4
+        collector.start_episode(obs, policy, 0.0)
+
+        # Add K+2 steps (should give us 2 trajectories)
+        for i in range(K + 2):
+            next_obs = np.random.rand(*obs_shape).astype(np.float32)
+            collector.add_step(
+                action=i % 4,
+                reward=float(i),
+                next_obs=next_obs,
+                done=False,
+                next_policy=policy,
+                next_value=float(i + 1),
+            )
+
+        trajectories = collector.get_trajectories()
+
+        # Should have 2 trajectory segments
+        assert len(trajectories) >= 1
+
+        # Check first trajectory shapes
+        traj = trajectories[0]
+        assert traj["obs"].shape == obs_shape
+        assert traj["actions"].shape == (K,)
+        assert traj["rewards"].shape == (K,)
+        assert traj["policies"].shape == (K + 1, 4)
+        assert traj["values"].shape == (K + 1,)
+        assert traj["next_obs"].shape == (K, *obs_shape)
+        assert traj["dones"].shape == (K + 1,)
+
+    def test_get_trajectories_requires_minimum_steps(self) -> None:
+        """Get trajectories returns empty if not enough steps."""
+        from mario_rl.learners.muzero import MuZeroTrajectoryCollector
+        import numpy as np
+
+        K = 5
+        collector = MuZeroTrajectoryCollector(
+            unroll_steps=K,
+            num_actions=4,
+        )
+
+        obs = np.random.rand(4, 84, 84).astype(np.float32)
+        policy = np.ones(4) / 4
+        collector.start_episode(obs, policy, 0.0)
+
+        # Add only K-1 steps (not enough)
+        for _ in range(K - 1):
+            collector.add_step(
+                action=0,
+                reward=0.0,
+                next_obs=obs.copy(),
+                done=False,
+                next_policy=policy,
+                next_value=0.0,
+            )
+
+        trajectories = collector.get_trajectories()
+        assert len(trajectories) == 0
+
+    def test_reset_clears_data(self) -> None:
+        """Reset clears all collected data."""
+        from mario_rl.learners.muzero import MuZeroTrajectoryCollector
+        import numpy as np
+
+        collector = MuZeroTrajectoryCollector(
+            unroll_steps=3,
+            num_actions=4,
+        )
+
+        obs = np.random.rand(4, 84, 84).astype(np.float32)
+        policy = np.ones(4) / 4
+        collector.start_episode(obs, policy, 0.0)
+        collector.add_step(0, 1.0, obs, False, policy, 0.0)
+
+        assert len(collector) == 1
+
+        collector.reset()
+        assert len(collector) == 0

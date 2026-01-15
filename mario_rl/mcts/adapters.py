@@ -340,6 +340,26 @@ class MuZeroAdapter:
         Returns:
             Best action from MCTS
         """
+        action, _, _ = self.get_action_with_targets(state)
+        return action
+
+    def get_action_with_targets(self, state: np.ndarray) -> tuple[int, np.ndarray, float]:
+        """
+        Get action AND MCTS targets for MuZero training.
+
+        This is the primary method for data collection. Returns:
+        - Selected action
+        - MCTS policy target (visit count distribution)
+        - MCTS value target (root value estimate)
+
+        Args:
+            state: Observation (C, H, W) in [0, 255] range
+
+        Returns:
+            action: Selected action
+            policy: MCTS visit count distribution (num_actions,)
+            value: Root value estimate from MCTS
+        """
         # Import here to avoid circular imports
         from mario_rl.learners.muzero import run_mcts
 
@@ -355,8 +375,11 @@ class MuZeroAdapter:
 
         # Sample from policy (or take argmax if temperature is very low)
         if self.temperature < 0.1:
-            return int(np.argmax(policy))
-        return int(np.random.choice(len(policy), p=policy))
+            action = int(np.argmax(policy))
+        else:
+            action = int(np.random.choice(len(policy), p=policy))
+
+        return action, policy, value
 
     def get_action_probs(self, state: np.ndarray) -> np.ndarray:
         """

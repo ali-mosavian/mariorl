@@ -35,6 +35,18 @@ from mario_rl.models.muzero import MuZeroModel
 from mario_rl.models.muzero import info_nce_loss
 
 
+def scale_gradient(tensor: Tensor, scale: float) -> Tensor:
+    """Scale gradient during backpropagation.
+
+    Forward pass: returns tensor unchanged
+    Backward pass: multiplies gradient by scale
+
+    This is used in MuZero to scale gradients by 1/K at each unroll step,
+    ensuring equal contribution from each step in the trajectory.
+    """
+    return tensor * scale + tensor.detach() * (1 - scale)
+
+
 @dataclass(frozen=True)
 class MuZeroTrajectory:
     """A trajectory segment for MuZero training.
@@ -150,9 +162,16 @@ class MuZeroLearner:
         value_losses.append(value_loss_0)
 
         # Unroll K steps in latent space
+        # Gradient scaling factor: 1/K to give equal weight to each step
+        gradient_scale = 1.0 / K if K > 0 else 1.0
+
         for k in range(K):
+            # Apply gradient scaling to latent state (MuZero paper)
+            # This ensures each unroll step contributes equally to gradients
+            z_scaled = scale_gradient(z, gradient_scale)
+
             z_pred, r, policy_logits, v = self.model.recurrent_inference(
-                z, actions[:, k]
+                z_scaled, actions[:, k]
             )
 
             # Policy loss
@@ -532,3 +551,164 @@ def compute_value_target(
         targets.append(value_target)
 
     return targets
+
+
+# =============================================================================
+# Trajectory Collector for MuZero
+# =============================================================================
+
+
+@dataclass
+class MuZeroTrajectoryCollector:
+    """Collects trajectory data during episodes for MuZero training.
+
+    Accumulates observations, actions, rewards, MCTS policies, and MCTS values
+    during environment interaction. After each step, extracts trajectory segments
+    for storage in MuZeroReplayBuffer.
+
+    Usage:
+        collector = MuZeroTrajectoryCollector(...)
+        
+        # At start of episode
+        collector.start_episode(initial_obs)
+        
+        # After each step
+        collector.add_step(action, reward, next_obs, done, policy, value)
+        
+        # Get trajectory segments for storage
+        trajectories = collector.get_trajectories()
+    """
+
+    unroll_steps: int  # K
+    num_actions: int
+    td_steps: int = 10
+    discount: float = 0.997
+
+    # Episode data
+    _obs: list[np.ndarray] = field(init=False, default_factory=list)
+    _actions: list[int] = field(init=False, default_factory=list)
+    _rewards: list[float] = field(init=False, default_factory=list)
+    _policies: list[np.ndarray] = field(init=False, default_factory=list)
+    _values: list[float] = field(init=False, default_factory=list)
+    _dones: list[bool] = field(init=False, default_factory=list)
+
+    def start_episode(self, initial_obs: np.ndarray, initial_policy: np.ndarray, initial_value: float) -> None:
+        """Start a new episode with initial observation and MCTS results.
+
+        Args:
+            initial_obs: Initial observation (C, H, W)
+            initial_policy: MCTS policy from first MCTS run
+            initial_value: MCTS value from first MCTS run
+        """
+        self._obs = [initial_obs.copy()]
+        self._actions = []
+        self._rewards = []
+        self._policies = [initial_policy.copy()]
+        self._values = [initial_value]
+        self._dones = [False]
+
+    def add_step(
+        self,
+        action: int,
+        reward: float,
+        next_obs: np.ndarray,
+        done: bool,
+        next_policy: np.ndarray,
+        next_value: float,
+    ) -> None:
+        """Add a step's data to the trajectory.
+
+        Args:
+            action: Action taken
+            reward: Reward received
+            next_obs: Next observation
+            done: Whether episode ended
+            next_policy: MCTS policy at next state
+            next_value: MCTS value at next state
+        """
+        self._actions.append(action)
+        self._rewards.append(reward)
+        self._obs.append(next_obs.copy())
+        self._policies.append(next_policy.copy())
+        self._values.append(next_value)
+        self._dones.append(done)
+
+    def get_trajectories(self) -> list[dict[str, np.ndarray]]:
+        """Extract trajectory segments for storage in replay buffer.
+
+        Creates trajectory segments of length K (unroll_steps) from the
+        collected episode data. Each segment contains:
+        - Initial observation
+        - K actions
+        - K rewards  
+        - K+1 policy targets (from MCTS visit counts)
+        - K+1 value targets (computed from MCTS values using n-step returns)
+        - K next observations (for grounding losses)
+        - K+1 done flags
+
+        Returns:
+            List of trajectory dictionaries ready for MuZeroReplayBuffer.add()
+        """
+        K = self.unroll_steps
+        T = len(self._obs)  # Number of observations (including initial)
+
+        # Need at least K+1 observations to create one trajectory
+        if T < K + 1:
+            return []
+
+        # Compute value targets using n-step returns from MCTS values
+        value_targets = compute_value_target(
+            rewards=self._rewards,
+            values=self._values,
+            dones=self._dones,
+            discount=self.discount,
+            td_steps=self.td_steps,
+        )
+
+        trajectories = []
+
+        # Create trajectory segments starting at each timestep
+        for t in range(T - K):
+            # Check if we have enough data after this point
+            if t + K >= len(self._actions):
+                break
+
+            # Extract K-step trajectory segment
+            obs = self._obs[t]
+            actions = np.array(self._actions[t : t + K], dtype=np.int64)
+            rewards = np.array(self._rewards[t : t + K], dtype=np.float32)
+            
+            # K+1 policies and value targets
+            policies = np.stack(self._policies[t : t + K + 1], axis=0)
+            values = np.array(value_targets[t : t + K + 1], dtype=np.float32)
+            
+            # K next observations (for grounding)
+            next_obs = np.stack(self._obs[t + 1 : t + K + 1], axis=0)
+            
+            # K+1 done flags
+            dones = np.array(self._dones[t : t + K + 1], dtype=np.float32)
+
+            trajectories.append({
+                "obs": obs,
+                "actions": actions,
+                "rewards": rewards,
+                "policies": policies,
+                "values": values,
+                "next_obs": next_obs,
+                "dones": dones,
+            })
+
+        return trajectories
+
+    def reset(self) -> None:
+        """Clear collected data."""
+        self._obs = []
+        self._actions = []
+        self._rewards = []
+        self._policies = []
+        self._values = []
+        self._dones = []
+
+    def __len__(self) -> int:
+        """Number of steps collected."""
+        return len(self._actions)

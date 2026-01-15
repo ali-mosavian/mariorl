@@ -501,3 +501,174 @@ def test_repeated_sampling_gives_different_batches(replay_buffer, config: Buffer
 
     # Actions should differ (very unlikely to be identical)
     assert not torch.equal(batch1.actions, batch2.actions)
+
+
+# =============================================================================
+# MuZero Replay Buffer Tests
+# =============================================================================
+
+
+@dataclass(frozen=True)
+class MuZeroBufferTestConfig:
+    """Test configuration for MuZeroReplayBuffer."""
+
+    capacity: int = 100
+    obs_shape: tuple[int, ...] = (4, 84, 84)
+    num_actions: int = 7
+    unroll_steps: int = 5  # K
+    batch_size: int = 8
+
+
+@pytest.fixture
+def muzero_config() -> MuZeroBufferTestConfig:
+    """Default MuZero buffer test configuration."""
+    return MuZeroBufferTestConfig()
+
+
+@pytest.fixture
+def muzero_buffer(muzero_config: MuZeroBufferTestConfig):
+    """Create a MuZeroReplayBuffer for testing."""
+    from mario_rl.core.replay_buffer import MuZeroReplayBuffer
+
+    return MuZeroReplayBuffer(
+        capacity=muzero_config.capacity,
+        obs_shape=muzero_config.obs_shape,
+        num_actions=muzero_config.num_actions,
+        unroll_steps=muzero_config.unroll_steps,
+    )
+
+
+def make_trajectory(config: MuZeroBufferTestConfig) -> dict[str, np.ndarray]:
+    """Create a random trajectory segment for testing."""
+    K = config.unroll_steps
+    return {
+        "obs": np.random.randn(*config.obs_shape).astype(np.float32),
+        "actions": np.random.randint(0, config.num_actions, (K,)),
+        "rewards": np.random.randn(K).astype(np.float32),
+        "policies": np.random.rand(K + 1, config.num_actions).astype(np.float32),
+        "values": np.random.randn(K + 1).astype(np.float32),
+        "next_obs": np.random.randn(K, *config.obs_shape).astype(np.float32),
+        "dones": np.zeros(K + 1, dtype=np.float32),
+    }
+
+
+def test_muzero_buffer_starts_empty(muzero_buffer) -> None:
+    """Buffer should start with zero length."""
+    assert len(muzero_buffer) == 0
+
+
+def test_muzero_buffer_add_increases_length(muzero_buffer, muzero_config: MuZeroBufferTestConfig) -> None:
+    """Adding trajectory should increase buffer length."""
+    traj = make_trajectory(muzero_config)
+    muzero_buffer.add(**traj)
+
+    assert len(muzero_buffer) == 1
+
+
+def test_muzero_buffer_respects_capacity(muzero_config: MuZeroBufferTestConfig) -> None:
+    """Buffer should not exceed capacity."""
+    from mario_rl.core.replay_buffer import MuZeroReplayBuffer
+
+    small_buffer = MuZeroReplayBuffer(
+        capacity=10,
+        obs_shape=muzero_config.obs_shape,
+        num_actions=muzero_config.num_actions,
+        unroll_steps=muzero_config.unroll_steps,
+    )
+
+    for _ in range(20):
+        traj = make_trajectory(muzero_config)
+        small_buffer.add(**traj)
+
+    assert len(small_buffer) == 10
+
+
+def test_muzero_buffer_can_sample(muzero_buffer, muzero_config: MuZeroBufferTestConfig) -> None:
+    """Can sample when buffer has enough data."""
+    assert not muzero_buffer.can_sample(muzero_config.batch_size)
+
+    for _ in range(muzero_config.batch_size + 5):
+        traj = make_trajectory(muzero_config)
+        muzero_buffer.add(**traj)
+
+    assert muzero_buffer.can_sample(muzero_config.batch_size)
+
+
+def test_muzero_buffer_sample_shapes(muzero_buffer, muzero_config: MuZeroBufferTestConfig) -> None:
+    """Sampled batch has correct shapes."""
+    for _ in range(muzero_config.batch_size + 5):
+        traj = make_trajectory(muzero_config)
+        muzero_buffer.add(**traj)
+
+    batch = muzero_buffer.sample(muzero_config.batch_size)
+    K = muzero_config.unroll_steps
+    N = muzero_config.batch_size
+
+    assert batch.obs.shape == (N, *muzero_config.obs_shape)
+    assert batch.actions.shape == (N, K)
+    assert batch.rewards.shape == (N, K)
+    assert batch.target_policies.shape == (N, K + 1, muzero_config.num_actions)
+    assert batch.target_values.shape == (N, K + 1)
+    assert batch.next_obs.shape == (N, K, *muzero_config.obs_shape)
+    assert batch.dones.shape == (N, K + 1)
+
+
+def test_muzero_buffer_sample_returns_tensors(muzero_buffer, muzero_config: MuZeroBufferTestConfig) -> None:
+    """Sampled batch contains torch tensors."""
+    for _ in range(muzero_config.batch_size + 5):
+        traj = make_trajectory(muzero_config)
+        muzero_buffer.add(**traj)
+
+    batch = muzero_buffer.sample(muzero_config.batch_size)
+
+    assert isinstance(batch.obs, Tensor)
+    assert isinstance(batch.actions, Tensor)
+    assert isinstance(batch.rewards, Tensor)
+    assert isinstance(batch.target_policies, Tensor)
+    assert isinstance(batch.target_values, Tensor)
+    assert isinstance(batch.next_obs, Tensor)
+    assert isinstance(batch.dones, Tensor)
+
+
+def test_muzero_buffer_sample_device(muzero_buffer, muzero_config: MuZeroBufferTestConfig) -> None:
+    """Sampled batch can be placed on specified device."""
+    for _ in range(muzero_config.batch_size + 5):
+        traj = make_trajectory(muzero_config)
+        muzero_buffer.add(**traj)
+
+    batch = muzero_buffer.sample(muzero_config.batch_size, device="cpu")
+
+    assert batch.obs.device == torch.device("cpu")
+    assert batch.actions.device == torch.device("cpu")
+
+
+def test_muzero_buffer_reset(muzero_buffer, muzero_config: MuZeroBufferTestConfig) -> None:
+    """Reset clears the buffer."""
+    for _ in range(10):
+        traj = make_trajectory(muzero_config)
+        muzero_buffer.add(**traj)
+
+    assert len(muzero_buffer) == 10
+
+    muzero_buffer.reset()
+    assert len(muzero_buffer) == 0
+
+
+def test_muzero_buffer_sample_raises_when_empty(muzero_buffer, muzero_config: MuZeroBufferTestConfig) -> None:
+    """Sampling from empty buffer raises error."""
+    with pytest.raises(ValueError):
+        muzero_buffer.sample(muzero_config.batch_size)
+
+
+def test_muzero_buffer_has_indices_and_weights(muzero_buffer, muzero_config: MuZeroBufferTestConfig) -> None:
+    """Sampled batch includes indices and weights."""
+    for _ in range(muzero_config.batch_size + 5):
+        traj = make_trajectory(muzero_config)
+        muzero_buffer.add(**traj)
+
+    batch = muzero_buffer.sample(muzero_config.batch_size)
+
+    assert batch.indices is not None
+    assert batch.weights is not None
+    assert batch.indices.shape == (muzero_config.batch_size,)
+    assert batch.weights.shape == (muzero_config.batch_size,)

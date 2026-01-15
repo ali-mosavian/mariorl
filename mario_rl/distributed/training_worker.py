@@ -9,6 +9,7 @@ Combines:
 - Optional: MetricLogger for CSV/ZMQ metrics
 - Optional: LevelTracker for per-level stats
 - Optional: MCTS exploration for enhanced learning
+- MuZero trajectory collection with MCTS policy/value targets
 """
 
 import time
@@ -24,7 +25,9 @@ from torch import Tensor
 from mario_rl.core.types import Transition
 from mario_rl.core.env_runner import EnvRunner
 from mario_rl.core.replay_buffer import ReplayBuffer
+from mario_rl.core.replay_buffer import MuZeroReplayBuffer
 from mario_rl.learners.base import Learner
+from mario_rl.learners.muzero import MuZeroTrajectoryCollector
 
 # MCTS imports (optional)
 from mario_rl.mcts import MCTSExplorer, MCTSConfig
@@ -85,6 +88,10 @@ class TrainingWorker:
     mcts_periodic_interval: int = 10  # Use MCTS every N episodes
     mcts_sequence_length: int = 15  # Execute this many actions from best MCTS rollout
 
+    # MuZero-specific configuration
+    muzero_unroll_steps: int = 5  # K steps to unroll during training
+    muzero_td_steps: int = 10  # n-step returns for value targets
+
     # Internal state
     _buffer: ReplayBuffer = field(init=False, repr=False)
     _env_runner: EnvRunner = field(init=False, repr=False)
@@ -98,6 +105,12 @@ class TrainingWorker:
     _steps_without_x_progress: int = field(init=False, default=0)
     _last_best_x: int = field(init=False, default=0)
     _mcts_episodes_since_last: int = field(init=False, default=0)
+
+    # MuZero trajectory collection state
+    _muzero_buffer: MuZeroReplayBuffer | None = field(init=False, default=None)
+    _muzero_collector: MuZeroTrajectoryCollector | None = field(init=False, default=None)
+    _muzero_last_policy: np.ndarray | None = field(init=False, default=None)
+    _muzero_last_value: float = field(init=False, default=0.0)
 
     def __post_init__(self) -> None:
         """Initialize buffer and env runner."""
@@ -150,6 +163,23 @@ class TrainingWorker:
                 world_model=world_model,  # Dreamer can use imagined rollouts
             )
 
+        # Initialize MuZero trajectory buffer and collector if using MuZero
+        if self._use_muzero_mcts():
+            self._muzero_buffer = MuZeroReplayBuffer(
+                capacity=self.buffer_capacity,
+                obs_shape=obs_shape,
+                num_actions=self.model.num_actions,
+                unroll_steps=self.muzero_unroll_steps,
+                gamma=self.gamma,
+                td_steps=self.muzero_td_steps,
+            )
+            self._muzero_collector = MuZeroTrajectoryCollector(
+                unroll_steps=self.muzero_unroll_steps,
+                num_actions=self.model.num_actions,
+                td_steps=self.muzero_td_steps,
+                discount=self.gamma,
+            )
+
     @property
     def model(self):
         """Access the underlying model."""
@@ -179,8 +209,12 @@ class TrainingWorker:
         # Check if we have a MuZero adapter (latent-space MCTS)
         if self._use_muzero_mcts():
             # MuZero uses its own exploration via MCTS + Dirichlet noise
+            # Also stores MCTS policy/value targets for training
             state = self._preprocess_state(state)
-            action = self.learner.mcts_adapter.get_action(state)
+            action, policy, value = self.learner.mcts_adapter.get_action_with_targets(state)
+            # Store for trajectory collection
+            self._muzero_last_policy = policy
+            self._muzero_last_value = value
         else:
             # Standard epsilon-greedy for DDQN/Dreamer
             eps = self.epsilon_at(self.total_steps)
@@ -212,6 +246,132 @@ class TrainingWorker:
         """Get epsilon for given step count."""
         progress = min(1.0, steps / self.epsilon_decay_steps)
         return self.epsilon_start + progress * (self.epsilon_end - self.epsilon_start)
+
+    def collect_muzero(self, num_steps: int) -> dict[str, Any]:
+        """Collect experience for MuZero with MCTS policy/value targets.
+
+        This method handles MuZero's special requirements:
+        - Runs MCTS at each step to get policy and value targets
+        - Collects trajectory segments for K-step unrolling
+        - Stores trajectories in the MuZero replay buffer
+
+        Args:
+            num_steps: Number of environment steps to collect
+
+        Returns:
+            Collection info dict
+        """
+        if self._muzero_buffer is None or self._muzero_collector is None:
+            raise RuntimeError("MuZero buffer/collector not initialized")
+
+        collect_start = time.time()
+        steps_collected = 0
+        episodes_completed = 0
+        episode_rewards: list[float] = []
+        current_episode_reward = 0.0
+        trajectories_stored = 0
+
+        # Get initial observation
+        obs, _ = self.env.reset()
+        obs = self._preprocess_state(obs)
+
+        # Run initial MCTS to get first policy/value
+        action, policy, value = self.learner.mcts_adapter.get_action_with_targets(obs)
+        self._muzero_collector.start_episode(obs, policy, value)
+
+        while steps_collected < num_steps:
+            # Take action in environment
+            next_obs, reward, terminated, truncated, info = self.env.step(action)
+            done = terminated or truncated
+            next_obs = self._preprocess_state(next_obs)
+            current_episode_reward += reward
+
+            # Track action distribution
+            self._action_window.append(action)
+            if len(self._action_window) > self._action_window_size:
+                self._action_window.pop(0)
+
+            # Get MCTS policy/value for next state (if not done)
+            if not done:
+                next_action, next_policy, next_value = self.learner.mcts_adapter.get_action_with_targets(next_obs)
+            else:
+                # For terminal states, use uniform policy and zero value
+                next_policy = np.ones(self.model.num_actions) / self.model.num_actions
+                next_value = 0.0
+                next_action = 0  # Won't be used
+
+            # Add step to trajectory collector
+            self._muzero_collector.add_step(
+                action=action,
+                reward=reward,
+                next_obs=next_obs,
+                done=done,
+                next_policy=next_policy,
+                next_value=next_value,
+            )
+
+            steps_collected += 1
+
+            if done:
+                # Extract and store trajectory segments
+                trajectories = self._muzero_collector.get_trajectories()
+                for traj in trajectories:
+                    self._muzero_buffer.add(**traj)
+                    trajectories_stored += 1
+
+                # Track episode
+                episodes_completed += 1
+                episode_rewards.append(current_episode_reward)
+                current_episode_reward = 0.0
+
+                # Reset for next episode
+                obs, _ = self.env.reset()
+                obs = self._preprocess_state(obs)
+                action, policy, value = self.learner.mcts_adapter.get_action_with_targets(obs)
+                self._muzero_collector.start_episode(obs, policy, value)
+            else:
+                # Continue to next step
+                obs = next_obs
+                action = next_action
+
+        # Store partial trajectories from incomplete episode
+        trajectories = self._muzero_collector.get_trajectories()
+        for traj in trajectories:
+            self._muzero_buffer.add(**traj)
+            trajectories_stored += 1
+
+        self.total_steps += steps_collected
+        self.total_episodes += episodes_completed
+        self._steps_since_flush += steps_collected
+
+        # Calculate stats
+        collect_end = time.time()
+        elapsed = collect_end - collect_start
+        steps_per_sec = steps_collected / max(elapsed, 0.001)
+
+        # Update metrics if logger provided
+        if self.logger is not None:
+            self.logger.count("steps", n=steps_collected)
+            self.logger.count("episodes", n=episodes_completed)
+            self.logger.gauge("buffer_size", len(self._muzero_buffer))
+            self.logger.gauge("steps_per_sec", steps_per_sec)
+            self.logger.gauge("trajectories_stored", trajectories_stored)
+
+            for reward in episode_rewards:
+                self.logger.observe("reward", reward)
+            if episode_rewards:
+                self.logger.gauge("episode_reward", episode_rewards[-1])
+
+            if self._steps_since_flush >= self.flush_every:
+                self.logger.flush()
+                self._steps_since_flush = 0
+
+        return {
+            "steps": steps_collected,
+            "episodes_completed": episodes_completed,
+            "episode_rewards": episode_rewards,
+            "trajectories_stored": trajectories_stored,
+        }
 
     def collect(self, num_steps: int) -> dict[str, Any]:
         """Collect experience from environment.
@@ -501,6 +661,9 @@ class TrainingWorker:
 
     def can_train(self) -> bool:
         """Check if buffer has enough data for training."""
+        # Use MuZero trajectory buffer if applicable
+        if self._use_muzero_mcts() and self._muzero_buffer is not None:
+            return self._muzero_buffer.can_sample(self.batch_size)
         return self._buffer.can_sample(self.batch_size)
 
     def train_step(self) -> tuple[dict[str, Tensor], dict[str, Any]]:
@@ -517,11 +680,15 @@ class TrainingWorker:
                 f"Not enough data in buffer: {len(self._buffer)} < {self.batch_size}"
             )
 
-        # Sample batch and move to device
-        batch = self._buffer.sample(self.batch_size, device=str(self.device))
-
         # Zero gradients
         self.model.zero_grad()
+
+        # Use MuZero trajectory training if applicable
+        if self._use_muzero_mcts() and self._muzero_buffer is not None:
+            return self._train_step_muzero()
+
+        # Sample batch and move to device
+        batch = self._buffer.sample(self.batch_size, device=str(self.device))
 
         # Compute loss with importance sampling weights for PER bias correction
         loss, metrics = self.learner.compute_loss(
@@ -617,6 +784,66 @@ class TrainingWorker:
 
         return gradients, metrics
 
+    def _train_step_muzero(self) -> tuple[dict[str, Tensor], dict[str, Any]]:
+        """Compute gradients from MuZero trajectory batch.
+
+        Uses compute_trajectory_loss() with proper MCTS policy/value targets.
+
+        Returns:
+            (gradients, metrics) tuple
+        """
+        # Sample trajectory batch from MuZero buffer
+        batch = self._muzero_buffer.sample(self.batch_size, device=str(self.device))
+
+        # Compute loss using trajectory-based training
+        loss, metrics = self.learner.compute_trajectory_loss(
+            s=batch.obs,
+            actions=batch.actions,
+            rewards=batch.rewards,
+            target_policies=batch.target_policies,
+            target_values=batch.target_values,
+            next_states=batch.next_obs,
+            dones=batch.dones,
+            weights=batch.weights,
+        )
+
+        # Backprop
+        loss.backward()
+
+        # Collect gradients
+        gradients = {
+            name: param.grad.detach().clone()
+            for name, param in self.model.named_parameters()
+            if param.grad is not None
+        }
+
+        # Update priorities if using PER
+        if batch.indices is not None and hasattr(self._muzero_buffer, 'alpha') and self._muzero_buffer.alpha > 0:
+            # Use total loss as priority (simplified)
+            td_errors = np.full(len(batch.indices), metrics.get("loss", 1.0))
+            self._muzero_buffer.update_priorities(batch.indices, td_errors)
+
+        # Log MuZero-specific metrics
+        if self.logger is not None:
+            if "loss" in metrics:
+                self.logger.observe("loss", float(metrics["loss"]))
+            if "policy_loss" in metrics:
+                self.logger.observe("policy_loss", float(metrics["policy_loss"]))
+            if "value_loss" in metrics:
+                self.logger.observe("value_loss", float(metrics["value_loss"]))
+            if "reward_loss" in metrics:
+                self.logger.observe("reward_loss", float(metrics["reward_loss"]))
+            if "consistency_loss" in metrics:
+                self.logger.observe("consistency_loss", float(metrics["consistency_loss"]))
+            if "contrastive_loss" in metrics:
+                self.logger.observe("contrastive_loss", float(metrics["contrastive_loss"]))
+            if "value_pred_mean" in metrics:
+                self.logger.observe("value_pred_mean", float(metrics["value_pred_mean"]))
+            if "value_target_mean" in metrics:
+                self.logger.observe("value_target_mean", float(metrics["value_target_mean"]))
+
+        return gradients, metrics
+
     def sync_weights(self, weights_path: Path) -> bool:
         """Sync weights from file if changed.
 
@@ -658,8 +885,10 @@ class TrainingWorker:
         Returns:
             Cycle result with gradients and info
         """
-        # Collect (hybrid: MCTS or epsilon-greedy)
-        if self.should_use_mcts():
+        # Collect - use MuZero-specific collection if using MuZero
+        if self._use_muzero_mcts():
+            collection_info = self.collect_muzero(collect_steps)
+        elif self.should_use_mcts():
             collection_info = self.collect_with_mcts(collect_steps)
         else:
             collection_info = self.collect(collect_steps)

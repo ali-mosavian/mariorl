@@ -19,6 +19,8 @@ from mario_rl.core.config import SnapshotConfig
 from mario_rl.core.config import TrainingConfig
 from mario_rl.core.types import GradientMetrics
 from mario_rl.core.config import ExplorationConfig
+from mario_rl.core.replay_buffer import MuZeroReplayBuffer
+from mario_rl.core.replay_buffer import TrajectoryBatch
 
 __all__ = [
     # Config
@@ -42,4 +44,7 @@ __all__ = [
     "WorkerStatus",
     "GradientPacket",
     "GradientMetrics",
+    # MuZero replay buffer
+    "MuZeroReplayBuffer",
+    "TrajectoryBatch",
 ]

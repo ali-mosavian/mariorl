@@ -436,3 +436,230 @@ class ReplayBuffer:
 
     def __len__(self) -> int:
         return self._size
+
+
+# =============================================================================
+# MuZero Trajectory Replay Buffer
+# =============================================================================
+
+
+@dataclass(frozen=True, slots=True)
+class TrajectoryBatch:
+    """Sampled batch of trajectory segments for MuZero training."""
+
+    obs: Tensor  # (N, C, H, W) initial observations
+    actions: Tensor  # (N, K) action sequences
+    rewards: Tensor  # (N, K) reward sequences
+    target_policies: Tensor  # (N, K+1, num_actions) MCTS policy targets
+    target_values: Tensor  # (N, K+1) MCTS value targets
+    next_obs: Tensor  # (N, K, C, H, W) next observations for grounding
+    dones: Tensor  # (N, K+1) done flags
+    indices: Tensor | None = None
+    weights: Tensor | None = None
+
+
+@dataclass
+class MuZeroReplayBuffer:
+    """Replay buffer for MuZero that stores trajectory segments.
+
+    MuZero requires storing:
+    - Initial observation
+    - K consecutive actions
+    - K rewards
+    - K+1 MCTS policy targets (visit count distributions)
+    - K+1 MCTS value estimates (root values from MCTS)
+    - K+1 done flags
+    - K next observations (for latent grounding losses)
+
+    Unlike standard replay buffers that store (s, a, r, s', done) tuples,
+    this stores full trajectory segments for K-step unrolling during training.
+    """
+
+    capacity: int
+    obs_shape: tuple[int, ...]
+    num_actions: int
+    unroll_steps: int  # K
+    gamma: float = 0.997
+    td_steps: int = 10  # n-step returns for value targets
+    alpha: float = 0.0  # PER alpha (0 = uniform)
+    epsilon: float = 1e-6
+
+    # Storage arrays
+    _obs: np.ndarray = field(init=False, repr=False)
+    _actions: np.ndarray = field(init=False, repr=False)
+    _rewards: np.ndarray = field(init=False, repr=False)
+    _policies: np.ndarray = field(init=False, repr=False)
+    _values: np.ndarray = field(init=False, repr=False)
+    _next_obs: np.ndarray = field(init=False, repr=False)
+    _dones: np.ndarray = field(init=False, repr=False)
+
+    # PER support
+    _tree: SumTree | None = field(init=False, repr=False, default=None)
+    _max_priority: float = field(init=False, default=1.0)
+
+    # Tracking
+    _size: int = field(init=False, default=0)
+    _ptr: int = field(init=False, default=0)
+
+    def __post_init__(self) -> None:
+        """Initialize storage arrays."""
+        K = self.unroll_steps
+
+        # Preallocate arrays
+        self._obs = np.zeros((self.capacity, *self.obs_shape), dtype=np.float32)
+        self._actions = np.zeros((self.capacity, K), dtype=np.int64)
+        self._rewards = np.zeros((self.capacity, K), dtype=np.float32)
+        self._policies = np.zeros((self.capacity, K + 1, self.num_actions), dtype=np.float32)
+        self._values = np.zeros((self.capacity, K + 1), dtype=np.float32)
+        self._next_obs = np.zeros((self.capacity, K, *self.obs_shape), dtype=np.float32)
+        self._dones = np.zeros((self.capacity, K + 1), dtype=np.float32)
+
+        # PER tree (only if alpha > 0)
+        if self.alpha > 0:
+            self._tree = SumTree(capacity=self.capacity)
+
+    def add(
+        self,
+        obs: np.ndarray,
+        actions: np.ndarray,
+        rewards: np.ndarray,
+        policies: np.ndarray,
+        values: np.ndarray,
+        next_obs: np.ndarray,
+        dones: np.ndarray,
+    ) -> None:
+        """Add a trajectory segment to the buffer.
+
+        Args:
+            obs: Initial observation (C, H, W)
+            actions: K actions taken (K,)
+            rewards: K rewards received (K,)
+            policies: K+1 MCTS policy targets (K+1, num_actions)
+            values: K+1 MCTS value estimates (K+1,)
+            next_obs: K next observations (K, C, H, W)
+            dones: K+1 done flags (K+1,)
+        """
+        idx = self._ptr
+
+        self._obs[idx] = obs
+        self._actions[idx] = actions
+        self._rewards[idx] = rewards
+        self._policies[idx] = policies
+        self._values[idx] = values
+        self._next_obs[idx] = next_obs
+        self._dones[idx] = dones
+
+        # Update PER tree with max priority
+        if self._tree is not None:
+            priority = self._max_priority ** self.alpha
+            self._tree.add(priority)
+
+        # Update pointers
+        self._ptr = (self._ptr + 1) % self.capacity
+        self._size = min(self._size + 1, self.capacity)
+
+    def can_sample(self, batch_size: int) -> bool:
+        """Check if buffer has enough samples."""
+        return self._size >= batch_size
+
+    def sample(
+        self,
+        batch_size: int,
+        device: str = "cpu",
+    ) -> TrajectoryBatch:
+        """Sample a batch of trajectory segments.
+
+        Args:
+            batch_size: Number of trajectories to sample
+            device: Device for output tensors
+
+        Returns:
+            TrajectoryBatch with tensors ready for training
+        """
+        if not self.can_sample(batch_size):
+            raise ValueError(f"Not enough samples: {self._size} < {batch_size}")
+
+        if self._tree is not None and self.alpha > 0:
+            return self._sample_per(batch_size, device)
+        return self._sample_uniform(batch_size, device)
+
+    def _sample_uniform(self, batch_size: int, device: str) -> TrajectoryBatch:
+        """Sample uniformly from buffer."""
+        indices = np.random.randint(0, self._size, size=batch_size)
+
+        return TrajectoryBatch(
+            obs=torch.from_numpy(self._obs[indices]).to(device),
+            actions=torch.from_numpy(self._actions[indices]).to(device),
+            rewards=torch.from_numpy(self._rewards[indices]).to(device),
+            target_policies=torch.from_numpy(self._policies[indices]).to(device),
+            target_values=torch.from_numpy(self._values[indices]).to(device),
+            next_obs=torch.from_numpy(self._next_obs[indices]).to(device),
+            dones=torch.from_numpy(self._dones[indices]).to(device),
+            indices=torch.from_numpy(indices).to(device),
+            weights=torch.ones(batch_size, device=device),
+        )
+
+    def _sample_per(self, batch_size: int, device: str) -> TrajectoryBatch:
+        """Sample with prioritized experience replay."""
+        assert self._tree is not None
+
+        indices = np.zeros(batch_size, dtype=np.int64)
+        priorities = np.zeros(batch_size, dtype=np.float64)
+        data_indices = np.zeros(batch_size, dtype=np.int64)
+
+        total_priority = self._tree.total
+        segment_size = total_priority / batch_size
+
+        for i in range(batch_size):
+            low = segment_size * i
+            high = segment_size * (i + 1)
+            value = np.random.uniform(low, high)
+
+            node = self._tree.get(value)
+            indices[i] = node.leaf_idx
+            priorities[i] = node.priority
+            data_indices[i] = node.data_idx
+
+        # Importance sampling weights
+        probabilities = priorities / total_priority
+        weights = (self._size * probabilities) ** (-0.4)  # beta = 0.4
+        weights = weights / weights.max()
+
+        return TrajectoryBatch(
+            obs=torch.from_numpy(self._obs[data_indices]).to(device),
+            actions=torch.from_numpy(self._actions[data_indices]).to(device),
+            rewards=torch.from_numpy(self._rewards[data_indices]).to(device),
+            target_policies=torch.from_numpy(self._policies[data_indices]).to(device),
+            target_values=torch.from_numpy(self._values[data_indices]).to(device),
+            next_obs=torch.from_numpy(self._next_obs[data_indices]).to(device),
+            dones=torch.from_numpy(self._dones[data_indices]).to(device),
+            indices=torch.from_numpy(indices).to(device),
+            weights=torch.from_numpy(weights.astype(np.float32)).to(device),
+        )
+
+    def update_priorities(self, indices: np.ndarray | Tensor, td_errors: np.ndarray | Tensor) -> None:
+        """Update priorities based on TD errors."""
+        if self._tree is None:
+            return
+
+        if isinstance(indices, Tensor):
+            indices = indices.cpu().numpy()
+        if isinstance(td_errors, Tensor):
+            td_errors = td_errors.cpu().numpy()
+
+        for leaf_idx, td_error in zip(indices, td_errors, strict=False):
+            priority = (abs(td_error) + self.epsilon) ** self.alpha
+            self._tree.update(int(leaf_idx), priority)
+            self._max_priority = max(self._max_priority, abs(td_error) + self.epsilon)
+
+    def reset(self) -> None:
+        """Clear the buffer."""
+        self._size = 0
+        self._ptr = 0
+        self._max_priority = 1.0
+
+        if self._tree is not None:
+            self._tree = SumTree(capacity=self.capacity)
+
+    def __len__(self) -> int:
+        return self._size
