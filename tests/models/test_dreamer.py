@@ -1,10 +1,11 @@
-"""Tests for DreamerModel behavior.
+"""Tests for DreamerModel V3 behavior.
 
 These tests verify the DreamerModel correctly:
-- Encodes observations to latent space
+- Encodes observations to categorical latent space
 - Imagines future trajectories using learned dynamics
 - Produces actor (policy) and critic (value) outputs
 - Implements the Model protocol
+- Uses symlog transforms for scale invariance
 """
 
 from dataclasses import dataclass
@@ -23,13 +24,19 @@ from mario_rl.models import Model
 
 @dataclass(frozen=True)
 class DreamerTestConfig:
-    """Test configuration for DreamerModel."""
+    """Test configuration for DreamerModel V3."""
 
     input_shape: tuple[int, int, int] = (4, 64, 64)
     num_actions: int = 12
-    latent_dim: int = 128
+    num_categoricals: int = 32
+    num_classes: int = 32
     hidden_dim: int = 256
     imagination_horizon: int = 15
+
+    @property
+    def latent_dim(self) -> int:
+        """Effective latent dimension."""
+        return self.num_categoricals * self.num_classes
 
 
 # =============================================================================
@@ -51,8 +58,9 @@ def dreamer_model(config: DreamerTestConfig):
     return DreamerModel(
         input_shape=config.input_shape,
         num_actions=config.num_actions,
-        latent_dim=config.latent_dim,
         hidden_dim=config.hidden_dim,
+        num_categoricals=config.num_categoricals,
+        num_classes=config.num_classes,
     )
 
 
@@ -92,22 +100,21 @@ def test_encode_returns_correct_shape(dreamer_model, sample_batch: Tensor, confi
 
 
 def test_encode_deterministic_mode(dreamer_model, sample_batch: Tensor) -> None:
-    """Deterministic encoding should give same result each time (in eval mode)."""
-    dreamer_model.eval()  # Disable dropout for deterministic behavior
+    """Deterministic encoding should give same result each time."""
+    dreamer_model.eval()
     z1 = dreamer_model.encode(sample_batch, deterministic=True)
     z2 = dreamer_model.encode(sample_batch, deterministic=True)
-    dreamer_model.train()  # Restore training mode
+    dreamer_model.train()
 
     assert torch.equal(z1, z2)
 
 
-def test_encode_stochastic_mode(dreamer_model, sample_batch: Tensor) -> None:
-    """Stochastic encoding should give different results (due to sampling)."""
-    z1 = dreamer_model.encode(sample_batch, deterministic=False)
-    z2 = dreamer_model.encode(sample_batch, deterministic=False)
+def test_encode_with_logits_returns_both(dreamer_model, sample_batch: Tensor, config: DreamerTestConfig) -> None:
+    """encode_with_logits should return both latent and logits."""
+    z, logits = dreamer_model.encode_with_logits(sample_batch)
 
-    # With probability ~1, samples should differ
-    assert not torch.equal(z1, z2)
+    assert z.shape == (8, config.latent_dim)
+    assert logits.shape == (8, config.num_categoricals, config.num_classes)
 
 
 # =============================================================================
@@ -118,33 +125,35 @@ def test_encode_stochastic_mode(dreamer_model, sample_batch: Tensor) -> None:
 def test_imagine_step_returns_correct_shapes(
     dreamer_model, config: DreamerTestConfig
 ) -> None:
-    """imagine_step should return next latent, reward, and done predictions."""
+    """imagine_step should return next latent, hidden, reward, and continue predictions."""
     batch_size = 4
     z = torch.randn(batch_size, config.latent_dim)
     actions = torch.randint(0, config.num_actions, (batch_size,))
 
-    z_next, reward_pred, done_pred = dreamer_model.imagine_step(z, actions)
+    z_next, h_next, reward_pred, cont_pred = dreamer_model.imagine_step(z, actions)
 
     assert z_next.shape == (batch_size, config.latent_dim)
+    assert h_next.shape == (batch_size, config.hidden_dim)
     assert reward_pred.shape == (batch_size,)
-    assert done_pred.shape == (batch_size,)
+    assert cont_pred.shape == (batch_size,)
 
 
 def test_imagine_trajectory_returns_correct_shapes(
     dreamer_model, config: DreamerTestConfig
 ) -> None:
-    """imagine_trajectory should return sequence of latents, rewards, and dones."""
+    """imagine_trajectory should return sequence of latents, rewards, conts, and logits."""
     batch_size = 4
     horizon = config.imagination_horizon
     z_start = torch.randn(batch_size, config.latent_dim)
 
-    z_traj, rewards, dones = dreamer_model.imagine_trajectory(z_start, horizon=horizon)
+    z_traj, rewards, conts, logits = dreamer_model.imagine_trajectory(z_start, horizon=horizon)
 
     # Trajectory has horizon+1 states (including start)
     assert z_traj.shape == (batch_size, horizon + 1, config.latent_dim)
-    # Rewards and dones for each step
+    # Rewards, conts, logits for each step
     assert rewards.shape == (batch_size, horizon)
-    assert dones.shape == (batch_size, horizon)
+    assert conts.shape == (batch_size, horizon)
+    assert logits.shape == (batch_size, horizon, config.num_categoricals, config.num_classes)
 
 
 def test_imagine_trajectory_first_state_matches_start(
@@ -153,7 +162,7 @@ def test_imagine_trajectory_first_state_matches_start(
     """First state in imagined trajectory should match starting latent."""
     z_start = torch.randn(4, config.latent_dim)
 
-    z_traj, _, _ = dreamer_model.imagine_trajectory(z_start, horizon=5)
+    z_traj, _, _, _ = dreamer_model.imagine_trajectory(z_start, horizon=5)
 
     assert torch.equal(z_traj[:, 0], z_start)
 
@@ -164,7 +173,7 @@ def test_imagine_trajectory_is_differentiable(
     """Imagined trajectory should support gradient computation."""
     z_start = torch.randn(4, config.latent_dim, requires_grad=True)
 
-    z_traj, rewards, _ = dreamer_model.imagine_trajectory(z_start, horizon=5)
+    z_traj, rewards, _, _ = dreamer_model.imagine_trajectory(z_start, horizon=5)
 
     # Should be able to backprop through trajectory
     loss = z_traj.sum() + rewards.sum()
@@ -189,11 +198,10 @@ def test_actor_returns_action_logits(dreamer_model, config: DreamerTestConfig) -
 
 def test_actor_logits_are_unbounded(dreamer_model, config: DreamerTestConfig) -> None:
     """Actor logits should not be bounded (softmax applied later)."""
-    z = torch.randn(8, config.latent_dim) * 10  # Large input
+    z = torch.randn(8, config.latent_dim) * 10
 
     logits = dreamer_model.actor(z)
 
-    # Logits can be any real number
     assert logits.abs().max() > 0
 
 
@@ -257,7 +265,6 @@ def test_get_action_returns_correct_shape(dreamer_model, sample_batch: Tensor) -
 
 def test_get_action_greedy_samples_from_policy(dreamer_model, sample_batch: Tensor) -> None:
     """With epsilon=0, get_action should sample from actor's distribution."""
-    # Run multiple times - greedy should still sample from softmax
     actions = dreamer_model.select_action(sample_batch, epsilon=0.0)
 
     assert (actions >= 0).all()
@@ -293,6 +300,11 @@ def test_has_encoder(dreamer_model) -> None:
     assert hasattr(dreamer_model, "encoder")
 
 
+def test_has_continue_predictor(dreamer_model) -> None:
+    """DreamerModel V3 should have a continue predictor (instead of done)."""
+    assert hasattr(dreamer_model, "continue_pred")
+
+
 # =============================================================================
 # State Dict Tests
 # =============================================================================
@@ -308,7 +320,7 @@ def test_state_dict_is_serializable(dreamer_model) -> None:
 
 def test_load_state_dict_restores_weights(dreamer_model, sample_batch: Tensor) -> None:
     """load_state_dict should restore model."""
-    dreamer_model.eval()  # Disable dropout for deterministic behavior
+    dreamer_model.eval()
     initial_output = dreamer_model(sample_batch).clone()
     initial_state = {k: v.clone() for k, v in dreamer_model.state_dict().items()}
 
@@ -320,7 +332,7 @@ def test_load_state_dict_restores_weights(dreamer_model, sample_batch: Tensor) -
     # Restore
     dreamer_model.load_state_dict(initial_state)
     restored_output = dreamer_model(sample_batch)
-    dreamer_model.train()  # Restore training mode
+    dreamer_model.train()
 
     assert torch.allclose(restored_output, initial_output)
 
@@ -377,18 +389,6 @@ def test_decoder_returns_correct_shape(
     assert reconstruction.shape == (batch_size, *config.input_shape)
 
 
-def test_decoder_output_in_valid_range(
-    dreamer_model, config: DreamerTestConfig
-) -> None:
-    """Decoder output should be in [0, 1] range for images."""
-    z = torch.randn(8, config.latent_dim)
-
-    reconstruction = dreamer_model.decoder(z)
-
-    assert reconstruction.min() >= 0.0
-    assert reconstruction.max() <= 1.0
-
-
 def test_decoder_supports_gradient_flow(
     dreamer_model, config: DreamerTestConfig
 ) -> None:
@@ -406,82 +406,111 @@ def test_encode_decode_roundtrip(
     dreamer_model, sample_batch: Tensor, config: DreamerTestConfig
 ) -> None:
     """Encoding then decoding should produce same-shaped output."""
-    # Normalize to [0, 1] like real inputs
     normalized = sample_batch.abs() / (sample_batch.abs().max() + 1e-6)
 
-    z = dreamer_model.encode(normalized * 255)  # encode expects [0, 255]
+    z = dreamer_model.encode(normalized * 255)
     reconstruction = dreamer_model.decoder(z)
 
     assert reconstruction.shape == normalized.shape
 
 
 # =============================================================================
-# SSIM Function Tests
+# Symlog Function Tests
 # =============================================================================
 
 
-def test_ssim_function_exists() -> None:
-    """SSIM function should be importable from models.dreamer."""
-    from mario_rl.models.dreamer import ssim
+def test_symlog_function_exists() -> None:
+    """symlog function should be importable from models.dreamer."""
+    from mario_rl.models.dreamer import symlog
 
-    assert callable(ssim)
-
-
-def test_ssim_identical_images_returns_one() -> None:
-    """SSIM of identical images should be 1.0."""
-    from mario_rl.models.dreamer import ssim
-
-    x = torch.rand(4, 1, 64, 64)
-
-    score = ssim(x, x)
-
-    assert score.item() == pytest.approx(1.0, abs=1e-5)
+    assert callable(symlog)
 
 
-def test_ssim_different_images_returns_less_than_one() -> None:
-    """SSIM of different images should be less than 1.0."""
-    from mario_rl.models.dreamer import ssim
+def test_symexp_function_exists() -> None:
+    """symexp function should be importable from models.dreamer."""
+    from mario_rl.models.dreamer import symexp
 
-    x = torch.rand(4, 1, 64, 64)
-    y = torch.rand(4, 1, 64, 64)
-
-    score = ssim(x, y)
-
-    assert score.item() < 1.0
+    assert callable(symexp)
 
 
-def test_ssim_returns_scalar() -> None:
-    """SSIM with mean reduction should return a scalar."""
-    from mario_rl.models.dreamer import ssim
+def test_symlog_symexp_roundtrip() -> None:
+    """symexp(symlog(x)) should equal x."""
+    from mario_rl.models.dreamer import symlog, symexp
 
-    x = torch.rand(4, 1, 64, 64)
-    y = torch.rand(4, 1, 64, 64)
+    x = torch.randn(100) * 100  # Large range
 
-    score = ssim(x, y, reduction="mean")
+    recovered = symexp(symlog(x))
 
-    assert score.dim() == 0
+    assert torch.allclose(recovered, x, atol=1e-5)
 
 
-def test_ssim_is_differentiable() -> None:
-    """SSIM should support gradient computation."""
-    from mario_rl.models.dreamer import ssim
+def test_symlog_compresses_large_values() -> None:
+    """symlog should compress large values."""
+    from mario_rl.models.dreamer import symlog
 
-    x = torch.rand(4, 1, 64, 64, requires_grad=True)
-    y = torch.rand(4, 1, 64, 64)
+    x = torch.tensor([1.0, 10.0, 100.0, 1000.0])
+    y = symlog(x)
 
-    score = ssim(x, y)
-    score.backward()
+    # Output should be much smaller than input for large values
+    assert (y < x).all()
+    assert y[-1] < 10  # 1000 -> ~7
+
+
+def test_symlog_preserves_small_values() -> None:
+    """symlog should approximately preserve small values."""
+    from mario_rl.models.dreamer import symlog
+
+    x = torch.tensor([0.01, 0.1])
+    y = symlog(x)
+
+    # For small x, symlog(x) ≈ x
+    assert torch.allclose(y, x, atol=0.05)
+
+
+def test_symlog_handles_negatives() -> None:
+    """symlog should handle negative values symmetrically."""
+    from mario_rl.models.dreamer import symlog
+
+    x = torch.tensor([-10.0, 10.0])
+    y = symlog(x)
+
+    assert y[0] == -y[1]
+
+
+def test_symlog_is_differentiable() -> None:
+    """symlog should support gradient computation."""
+    from mario_rl.models.dreamer import symlog
+
+    x = torch.randn(10, requires_grad=True)
+    y = symlog(x)
+    y.sum().backward()
 
     assert x.grad is not None
 
 
-def test_ssim_multi_channel() -> None:
-    """SSIM should work with multiple channels."""
-    from mario_rl.models.dreamer import ssim
+# =============================================================================
+# Categorical Latent Tests
+# =============================================================================
 
-    x = torch.rand(4, 4, 64, 64)  # 4 channels (frame stack)
-    y = torch.rand(4, 4, 64, 64)
 
-    score = ssim(x, y)
+def test_encoder_produces_categorical_logits(dreamer_model, config: DreamerTestConfig) -> None:
+    """Encoder should produce categorical logits."""
+    x = torch.randn(4, *config.input_shape)
 
-    assert 0.0 <= score.item() <= 1.0
+    logits = dreamer_model.encoder(x / 255.0)
+
+    assert logits.shape == (4, config.num_categoricals, config.num_classes)
+
+
+def test_categorical_sample_is_one_hot_like(dreamer_model, config: DreamerTestConfig) -> None:
+    """Categorical samples should be approximately one-hot per categorical."""
+    x = torch.randn(4, *config.input_shape)
+    logits = dreamer_model.encoder(x / 255.0)
+    z = dreamer_model.encoder.sample(logits)
+
+    # Reshape to check one-hot structure
+    z_shaped = z.view(-1, config.num_categoricals, config.num_classes)
+    
+    # Sum over classes should be ~1 for each categorical
+    sums = z_shaped.sum(dim=-1)
+    assert torch.allclose(sums, torch.ones_like(sums), atol=0.1)

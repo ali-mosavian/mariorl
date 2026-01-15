@@ -1,10 +1,11 @@
-"""Tests for DreamerLearner behavior.
+"""Tests for DreamerLearner V3 behavior.
 
 These tests verify the DreamerLearner correctly:
 - Implements the Learner protocol
-- Computes world model loss (reconstruction, dynamics, reward)
+- Computes world model loss (reconstruction, dynamics, reward, continue)
 - Computes actor-critic loss on imagined trajectories
 - Returns proper training metrics
+- Uses V3-style symlog and categorical KL
 """
 
 from dataclasses import dataclass
@@ -24,15 +25,21 @@ from mario_rl.models import DreamerModel
 
 @dataclass(frozen=True)
 class LearnerTestConfig:
-    """Test configuration for DreamerLearner."""
+    """Test configuration for DreamerLearner V3."""
 
     input_shape: tuple[int, int, int] = (4, 64, 64)
     num_actions: int = 12
-    latent_dim: int = 128
+    num_categoricals: int = 32
+    num_classes: int = 32
     gamma: float = 0.99
     lambda_gae: float = 0.95
     imagination_horizon: int = 15
     batch_size: int = 8
+
+    @property
+    def latent_dim(self) -> int:
+        """Effective latent dimension."""
+        return self.num_categoricals * self.num_classes
 
 
 # =============================================================================
@@ -52,7 +59,8 @@ def dreamer_model(config: LearnerTestConfig) -> DreamerModel:
     return DreamerModel(
         input_shape=config.input_shape,
         num_actions=config.num_actions,
-        latent_dim=config.latent_dim,
+        num_categoricals=config.num_categoricals,
+        num_classes=config.num_classes,
     )
 
 
@@ -174,6 +182,7 @@ def test_compute_world_model_loss(
         actions=sample_batch["actions"],
         rewards=sample_batch["rewards"],
         next_states=sample_batch["next_states"],
+        dones=sample_batch["dones"],
     )
 
     assert isinstance(wm_loss, Tensor)
@@ -190,6 +199,7 @@ def test_world_model_loss_includes_dynamics(
         actions=sample_batch["actions"],
         rewards=sample_batch["rewards"],
         next_states=sample_batch["next_states"],
+        dones=sample_batch["dones"],
     )
 
     assert "dynamics_loss" in metrics
@@ -204,9 +214,25 @@ def test_world_model_loss_includes_reward(
         actions=sample_batch["actions"],
         rewards=sample_batch["rewards"],
         next_states=sample_batch["next_states"],
+        dones=sample_batch["dones"],
     )
 
     assert "reward_loss" in metrics
+
+
+def test_world_model_loss_includes_continue(
+    dreamer_learner, sample_batch: dict[str, Tensor]
+) -> None:
+    """World model loss metrics should include continue prediction loss."""
+    _, metrics = dreamer_learner.compute_world_model_loss(
+        states=sample_batch["states"],
+        actions=sample_batch["actions"],
+        rewards=sample_batch["rewards"],
+        next_states=sample_batch["next_states"],
+        dones=sample_batch["dones"],
+    )
+
+    assert "continue_loss" in metrics
 
 
 # =============================================================================
@@ -253,10 +279,8 @@ def test_behavior_loss_trains_on_imagination(
     """Behavior loss should be computed on imagined trajectories."""
     z_start = torch.randn(config.batch_size, config.latent_dim)
 
-    # Compute loss - internally this should use imagine_trajectory
     loss, metrics = dreamer_learner.compute_behavior_loss(z_start)
 
-    # Should have computed returns over imagination horizon
     assert loss.requires_grad
 
 
@@ -267,7 +291,6 @@ def test_behavior_loss_trains_on_imagination(
 
 def test_update_targets_is_callable(dreamer_learner) -> None:
     """update_targets should be callable (may be no-op for Dreamer)."""
-    # Dreamer may not have separate target networks
     dreamer_learner.update_targets(tau=0.005)
     dreamer_learner.update_targets(tau=1.0)
     # Should not raise
@@ -284,7 +307,6 @@ def test_metrics_include_world_model_metrics(
     """Total metrics should include world model components."""
     _, metrics = dreamer_learner.compute_loss(**sample_batch)
 
-    # Should have dynamics and reward losses
     assert any("dynamics" in k or "reward" in k for k in metrics.keys())
 
 
@@ -294,7 +316,6 @@ def test_metrics_include_behavior_metrics(
     """Total metrics should include actor-critic components."""
     _, metrics = dreamer_learner.compute_loss(**sample_batch)
 
-    # Should have actor and critic losses
     assert any("actor" in k or "critic" in k for k in metrics.keys())
 
 
@@ -370,26 +391,11 @@ def test_world_model_loss_includes_reconstruction(
         actions=sample_batch["actions"],
         rewards=sample_batch["rewards"],
         next_states=sample_batch["next_states"],
+        dones=sample_batch["dones"],
     )
 
     assert "recon_loss" in metrics
     assert isinstance(metrics["recon_loss"], float)
-
-
-def test_world_model_loss_includes_ssim(
-    dreamer_learner, sample_batch: dict[str, Tensor]
-) -> None:
-    """World model loss metrics should include SSIM score."""
-    _, metrics = dreamer_learner.compute_world_model_loss(
-        states=sample_batch["states"],
-        actions=sample_batch["actions"],
-        rewards=sample_batch["rewards"],
-        next_states=sample_batch["next_states"],
-    )
-
-    assert "ssim" in metrics
-    assert isinstance(metrics["ssim"], float)
-    assert 0.0 <= metrics["ssim"] <= 1.0
 
 
 def test_world_model_loss_includes_kl(
@@ -401,6 +407,7 @@ def test_world_model_loss_includes_kl(
         actions=sample_batch["actions"],
         rewards=sample_batch["rewards"],
         next_states=sample_batch["next_states"],
+        dones=sample_batch["dones"],
     )
 
     assert "kl_loss" in metrics
@@ -408,24 +415,24 @@ def test_world_model_loss_includes_kl(
     assert metrics["kl_loss"] >= 0.0  # KL is non-negative
 
 
-def test_reconstruction_loss_decreases_with_identical_inputs(
+def test_reconstruction_loss_is_finite(
     dreamer_learner, config: LearnerTestConfig
 ) -> None:
-    """Reconstruction loss should be lower when states are similar."""
-    # Create a batch where states and next_states are identical
+    """Reconstruction loss should be finite for valid inputs."""
     states = torch.randn(config.batch_size, *config.input_shape).abs()
     next_states = states.clone()
     actions = torch.randint(0, config.num_actions, (config.batch_size,))
     rewards = torch.zeros(config.batch_size)
+    dones = torch.zeros(config.batch_size)
 
     _, metrics = dreamer_learner.compute_world_model_loss(
         states=states,
         actions=actions,
         rewards=rewards,
         next_states=next_states,
+        dones=dones,
     )
 
-    # Loss should still be finite and non-negative
     assert metrics["recon_loss"] >= 0.0
     assert not torch.isnan(torch.tensor(metrics["recon_loss"]))
 
@@ -433,11 +440,10 @@ def test_reconstruction_loss_decreases_with_identical_inputs(
 def test_total_metrics_include_reconstruction_metrics(
     dreamer_learner, sample_batch: dict[str, Tensor]
 ) -> None:
-    """Total compute_loss metrics should include reconstruction and SSIM."""
+    """Total compute_loss metrics should include reconstruction."""
     _, metrics = dreamer_learner.compute_loss(**sample_batch)
 
     assert "recon_loss" in metrics
-    assert "ssim" in metrics
 
 
 # =============================================================================
@@ -457,18 +463,6 @@ def test_learner_has_recon_scale_parameter(dreamer_model: DreamerModel) -> None:
     assert learner.recon_scale == 0.5
 
 
-def test_learner_has_ssim_scale_parameter(dreamer_model: DreamerModel) -> None:
-    """DreamerLearner should accept ssim_scale parameter."""
-    from mario_rl.learners.dreamer import DreamerLearner
-
-    learner = DreamerLearner(
-        model=dreamer_model,
-        ssim_scale=0.1,
-    )
-
-    assert learner.ssim_scale == 0.1
-
-
 def test_learner_has_kl_scale_parameter(dreamer_model: DreamerModel) -> None:
     """DreamerLearner should accept kl_scale parameter."""
     from mario_rl.learners.dreamer import DreamerLearner
@@ -479,3 +473,70 @@ def test_learner_has_kl_scale_parameter(dreamer_model: DreamerModel) -> None:
     )
 
     assert learner.kl_scale == 0.1
+
+
+def test_learner_has_free_bits_parameter(dreamer_model: DreamerModel) -> None:
+    """DreamerLearner V3 should accept free_bits parameter."""
+    from mario_rl.learners.dreamer import DreamerLearner
+
+    learner = DreamerLearner(
+        model=dreamer_model,
+        free_bits=2.0,
+    )
+
+    assert learner.free_bits == 2.0
+
+
+# =============================================================================
+# V3 Specific Tests
+# =============================================================================
+
+
+def test_categorical_kl_loss_function_exists() -> None:
+    """categorical_kl_loss should be importable from learner module."""
+    from mario_rl.learners.dreamer import categorical_kl_loss
+
+    assert callable(categorical_kl_loss)
+
+
+def test_categorical_kl_with_uniform_prior() -> None:
+    """categorical_kl with uniform prior should be non-negative."""
+    from mario_rl.learners.dreamer import categorical_kl_loss
+
+    logits = torch.randn(8, 32, 32)
+    kl = categorical_kl_loss(logits, None, free_bits=0.0)
+
+    assert kl >= 0.0
+
+
+def test_categorical_kl_with_free_bits() -> None:
+    """Free bits should lower-bound KL per categorical."""
+    from mario_rl.learners.dreamer import categorical_kl_loss
+
+    # Uniform posterior -> KL = 0 without free bits
+    logits = torch.zeros(8, 32, 32)  # Uniform
+    
+    kl_no_free = categorical_kl_loss(logits, None, free_bits=0.0)
+    kl_with_free = categorical_kl_loss(logits, None, free_bits=1.0)
+
+    # With free bits, KL should be at least free_bits (averaged over categoricals)
+    assert kl_with_free >= kl_no_free
+
+
+def test_percentile_normalize_function_exists() -> None:
+    """percentile_normalize should be importable."""
+    from mario_rl.learners.dreamer import percentile_normalize
+
+    assert callable(percentile_normalize)
+
+
+def test_percentile_normalize_output_range() -> None:
+    """percentile_normalize should produce roughly [0, 1] range."""
+    from mario_rl.learners.dreamer import percentile_normalize
+
+    x = torch.randn(1000)
+    y = percentile_normalize(x)
+
+    # Most values should be in [0, 1] after percentile normalization
+    in_range = ((y >= 0) & (y <= 1)).float().mean()
+    assert in_range >= 0.9  # 90% should be in range

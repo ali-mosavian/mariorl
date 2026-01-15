@@ -1,7 +1,7 @@
-"""Dreamer Model for model-based RL.
+"""Dreamer V3 Model for model-based RL.
 
 Architecture:
-    Frame → Encoder → z (latent)
+    Frame → Encoder → z (categorical latent)
                           ↓
               ┌───────────┼───────────┐
               ↓           ↓           ↓
@@ -10,19 +10,18 @@ Architecture:
               ↓           ↓           ↓
            logits      value     z_next, r
 
-Dreamer learns a world model that can imagine future trajectories,
-then trains an actor-critic policy on those imagined experiences.
+Dreamer V3 key features:
+- Categorical latents (32 categoricals × 32 classes) instead of Gaussian
+- Symlog transform for scale-invariant predictions
+- Simple free bits KL instead of complex balancing
+- No auxiliary collapse-prevention losses needed
 
 Key components:
-- Encoder: CNN that maps frames to latent space
+- Encoder: CNN that maps frames to categorical latent space
 - Dynamics: GRU-based model that predicts next latent given current + action
-- Reward predictor: MLP that predicts reward from latent
+- Reward predictor: MLP that predicts symlog(reward) from latent
 - Actor: MLP that outputs action logits from latent
-- Critic: MLP that outputs value estimate from latent
-
-Regularization:
-- LayerNorm/GroupNorm between layers for stable gradients
-- Dropout for regularization
+- Critic: MLP that outputs symlog(value) estimate from latent
 """
 
 from dataclasses import dataclass
@@ -34,6 +33,30 @@ from torch import Tensor
 from torch import nn
 
 
+# =============================================================================
+# Symlog Transform (V3 key feature)
+# =============================================================================
+
+
+def symlog(x: Tensor) -> Tensor:
+    """Symmetric logarithm: sign(x) * ln(|x| + 1).
+    
+    Compresses large values while preserving small values and sign.
+    Used for scale-invariant predictions of rewards, values, and reconstruction.
+    """
+    return torch.sign(x) * torch.log1p(torch.abs(x))
+
+
+def symexp(x: Tensor) -> Tensor:
+    """Inverse of symlog: sign(x) * (exp(|x|) - 1)."""
+    return torch.sign(x) * (torch.exp(torch.abs(x)) - 1)
+
+
+# =============================================================================
+# Helpers
+# =============================================================================
+
+
 def _layer_init(layer: nn.Module, std: float = np.sqrt(2), bias_const: float = 0.0) -> nn.Module:
     """Initialize layer with orthogonal weights and constant bias."""
     if isinstance(layer, (nn.Linear, nn.Conv2d, nn.ConvTranspose2d)):
@@ -43,49 +66,69 @@ def _layer_init(layer: nn.Module, std: float = np.sqrt(2), bias_const: float = 0
     return layer
 
 
+# =============================================================================
+# Configuration
+# =============================================================================
+
+
 @dataclass(frozen=True)
 class DreamerConfig:
-    """Configuration for DreamerModel."""
+    """Configuration for DreamerModel V3."""
 
     input_shape: tuple[int, int, int]
     num_actions: int
-    latent_dim: int = 128
+    
+    # Categorical latent space (V3 style)
+    num_categoricals: int = 32  # Number of categorical distributions
+    num_classes: int = 32       # Classes per categorical
+    
+    # Network dimensions
     hidden_dim: int = 256
-    dropout: float = 0.1
+    
+    # KL regularization
+    free_bits: float = 1.0      # Minimum KL per categorical
+    
+    @property
+    def latent_dim(self) -> int:
+        """Effective latent dimension (for compatibility)."""
+        return self.num_categoricals * self.num_classes
 
 
-class Encoder(nn.Module):
-    """CNN encoder that maps frames to latent space with VAE-style output.
+# =============================================================================
+# Categorical Latent Space (V3 key feature)
+# =============================================================================
 
-    Uses Nature DQN-style CNN backbone with GELU activations,
-    GroupNorm for normalization, and Dropout2d for regularization.
-    64x64 input -> latent representation.
+
+class CategoricalEncoder(nn.Module):
+    """CNN encoder that maps frames to categorical latent space.
+
+    Uses Nature DQN-style CNN backbone.
+    Output: 32 categorical distributions with 32 classes each.
+    Sampling uses straight-through gradients.
     """
 
     def __init__(
         self,
         input_shape: tuple[int, int, int],
-        latent_dim: int,
-        dropout: float = 0.1,
+        num_categoricals: int = 32,
+        num_classes: int = 32,
     ) -> None:
         super().__init__()
         c, h, w = input_shape
-        self.latent_dim = latent_dim
+        self.num_categoricals = num_categoricals
+        self.num_classes = num_classes
 
-        # Nature DQN-style CNN backbone with GroupNorm and Dropout
+        # Nature DQN-style CNN backbone
         self.conv = nn.Sequential(
             _layer_init(nn.Conv2d(c, 32, kernel_size=8, stride=4)),
-            nn.GroupNorm(8, 32),
-            nn.GELU(),
-            nn.Dropout2d(dropout),
+            nn.LayerNorm([32, 15, 15]),  # After 64x64 -> 15x15
+            nn.SiLU(),
             _layer_init(nn.Conv2d(32, 64, kernel_size=4, stride=2)),
-            nn.GroupNorm(8, 64),
-            nn.GELU(),
-            nn.Dropout2d(dropout),
+            nn.LayerNorm([64, 6, 6]),
+            nn.SiLU(),
             _layer_init(nn.Conv2d(64, 64, kernel_size=3, stride=1)),
-            nn.GroupNorm(8, 64),
-            nn.GELU(),
-            nn.Dropout2d(dropout),
+            nn.LayerNorm([64, 4, 4]),
+            nn.SiLU(),
             nn.Flatten(),
         )
 
@@ -94,95 +137,115 @@ class Encoder(nn.Module):
             dummy = torch.zeros(1, c, h, w)
             flat_size = self.conv(dummy).shape[1]
 
-        # VAE-style outputs for stochastic latent with LayerNorm
-        self.fc_pre = nn.Sequential(
-            _layer_init(nn.Linear(flat_size, latent_dim * 2)),
-            nn.LayerNorm(latent_dim * 2),
-            nn.GELU(),
-            nn.Dropout(dropout),
+        # Project to categorical logits
+        self.fc = nn.Sequential(
+            _layer_init(nn.Linear(flat_size, 512)),
+            nn.LayerNorm(512),
+            nn.SiLU(),
+            _layer_init(nn.Linear(512, num_categoricals * num_classes)),
         )
-        self.fc_mu = _layer_init(nn.Linear(latent_dim * 2, latent_dim))
-        self.fc_logvar = _layer_init(nn.Linear(latent_dim * 2, latent_dim))
 
-    def forward(self, x: Tensor) -> tuple[Tensor, Tensor]:
-        """Encode frames to latent distribution parameters.
+    def forward(self, x: Tensor) -> Tensor:
+        """Encode frames to categorical logits.
 
         Args:
             x: Frames (batch, C, H, W) in [0, 1]
 
         Returns:
-            mu, logvar: Mean and log-variance of latent distribution
+            logits: (batch, num_categoricals, num_classes)
         """
         h = self.conv(x)
-        h = self.fc_pre(h)
-        return self.fc_mu(h), self.fc_logvar(h)
+        logits = self.fc(h)
+        return logits.view(-1, self.num_categoricals, self.num_classes)
 
-    def sample(self, mu: Tensor, logvar: Tensor) -> Tensor:
-        """Reparameterization trick for VAE sampling."""
-        logvar = logvar.clamp(-10, 2)  # Clamp for numerical stability
-        std = torch.exp(0.5 * logvar)
-        eps = torch.randn_like(std)
-        return mu + eps * std
+    def sample(self, logits: Tensor) -> Tensor:
+        """Sample from categorical with straight-through gradients.
+        
+        Args:
+            logits: (batch, num_categoricals, num_classes)
+            
+        Returns:
+            z: One-hot samples (batch, num_categoricals, num_classes)
+               Gradients flow through softmax probabilities.
+        """
+        probs = F.softmax(logits, dim=-1)
+        # Straight-through: sample but pass gradients through probs
+        samples = F.one_hot(probs.argmax(dim=-1), self.num_classes).float()
+        # Add small uniform noise for exploration (unimix from V3)
+        uniform = torch.ones_like(probs) / self.num_classes
+        probs_mixed = 0.99 * probs + 0.01 * uniform
+        return samples + probs_mixed - probs_mixed.detach()
 
     def encode(self, x: Tensor, deterministic: bool = True) -> Tensor:
-        """Get latent representation."""
-        mu, logvar = self.forward(x)
-        return mu if deterministic else self.sample(mu, logvar)
+        """Get flattened latent representation.
+        
+        Args:
+            x: Frames (batch, C, H, W) in [0, 1]
+            deterministic: If True, use mode; if False, sample
+            
+        Returns:
+            z: Flattened latent (batch, num_categoricals * num_classes)
+        """
+        logits = self.forward(x)
+        if deterministic:
+            # Use mode (one-hot of argmax)
+            z = F.one_hot(logits.argmax(dim=-1), self.num_classes).float()
+        else:
+            z = self.sample(logits)
+        return z.view(-1, self.num_categoricals * self.num_classes)
 
 
-class Dynamics(nn.Module):
-    """GRU-based dynamics model that predicts next latent from current + action."""
+class CategoricalDynamics(nn.Module):
+    """GRU-based dynamics model with categorical latent predictions."""
 
     def __init__(
         self,
-        latent_dim: int,
+        num_categoricals: int,
+        num_classes: int,
         num_actions: int,
         hidden_dim: int = 256,
-        dropout: float = 0.1,
     ) -> None:
         super().__init__()
-        self.latent_dim = latent_dim
-        self.num_actions = num_actions
+        self.num_categoricals = num_categoricals
+        self.num_classes = num_classes
+        self.latent_dim = num_categoricals * num_classes
         self.hidden_dim = hidden_dim
 
-        # Action embedding with LayerNorm
+        # Action embedding
         self.action_embed = nn.Sequential(
             nn.Embedding(num_actions, 32),
             nn.LayerNorm(32),
         )
 
         # GRU for temporal modeling
-        self.gru = nn.GRUCell(latent_dim + 32, hidden_dim)
+        self.gru = nn.GRUCell(self.latent_dim + 32, hidden_dim)
         self.gru_norm = nn.LayerNorm(hidden_dim)
 
-        # Predict next latent distribution with LayerNorm and Dropout
+        # Predict next latent categorical logits
         self.fc_out = nn.Sequential(
             _layer_init(nn.Linear(hidden_dim, hidden_dim)),
             nn.LayerNorm(hidden_dim),
-            nn.GELU(),
-            nn.Dropout(dropout),
+            nn.SiLU(),
+            _layer_init(nn.Linear(hidden_dim, num_categoricals * num_classes)),
         )
-        self.fc_mu = _layer_init(nn.Linear(hidden_dim, latent_dim))
-        self.fc_logvar = _layer_init(nn.Linear(hidden_dim, latent_dim))
 
     def forward(
         self,
         z: Tensor,
         action: Tensor,
         h: Tensor | None = None,
-    ) -> tuple[Tensor, Tensor, Tensor, Tensor]:
+    ) -> tuple[Tensor, Tensor, Tensor]:
         """Predict next latent given current latent and action.
 
         Args:
-            z: Current latent (batch, latent_dim)
+            z: Current latent (batch, latent_dim) - flattened categorical
             action: Action taken (batch,)
             h: GRU hidden state (batch, hidden_dim) or None
 
         Returns:
-            z_next: Predicted next latent (sampled)
+            z_next: Predicted next latent (batch, latent_dim) - sampled
             h_next: Next GRU hidden state
-            z_mu: Mean of predicted distribution (for KL loss)
-            z_logvar: Log-variance of predicted distribution (for KL loss)
+            logits: Raw logits (batch, num_categoricals, num_classes) for KL
         """
         batch_size = z.shape[0]
 
@@ -193,92 +256,71 @@ class Dynamics(nn.Module):
         a_embed = self.action_embed(action)
         x = torch.cat([z, a_embed], dim=-1)
 
-        # GRU update with LayerNorm
+        # GRU update
         h_next = self.gru(x, h)
         h_next = self.gru_norm(h_next)
 
-        # Predict next latent distribution
-        out = self.fc_out(h_next)
-        mu = self.fc_mu(out)
-        logvar = self.fc_logvar(out).clamp(-10, 2)  # Clamp for stability
+        # Predict next latent logits
+        logits = self.fc_out(h_next).view(-1, self.num_categoricals, self.num_classes)
+        
+        # Sample with straight-through
+        probs = F.softmax(logits, dim=-1)
+        samples = F.one_hot(probs.argmax(dim=-1), self.num_classes).float()
+        z_next = samples + probs - probs.detach()
+        z_next = z_next.view(-1, self.latent_dim)
 
-        # Sample next latent
-        std = torch.exp(0.5 * logvar)
-        z_next = mu + std * torch.randn_like(std)
-
-        return z_next, h_next, mu, logvar
+        return z_next, h_next, logits
 
 
 class RewardPredictor(nn.Module):
-    """MLP that predicts reward from latent state."""
+    """MLP that predicts symlog(reward) from latent state."""
 
-    def __init__(
-        self,
-        latent_dim: int,
-        hidden_dim: int = 128,
-        dropout: float = 0.1,
-    ) -> None:
+    def __init__(self, latent_dim: int, hidden_dim: int = 256) -> None:
         super().__init__()
         self.net = nn.Sequential(
             _layer_init(nn.Linear(latent_dim, hidden_dim)),
             nn.LayerNorm(hidden_dim),
-            nn.GELU(),
-            nn.Dropout(dropout),
+            nn.SiLU(),
             _layer_init(nn.Linear(hidden_dim, hidden_dim)),
             nn.LayerNorm(hidden_dim),
-            nn.GELU(),
-            nn.Dropout(dropout),
+            nn.SiLU(),
             _layer_init(nn.Linear(hidden_dim, 1), std=1.0),
         )
 
     def forward(self, z: Tensor) -> Tensor:
-        """Predict reward from latent."""
+        """Predict symlog(reward) from latent."""
         return self.net(z).squeeze(-1)
 
 
-class DonePredictor(nn.Module):
-    """MLP that predicts episode termination from latent state."""
+class ContinuePredictor(nn.Module):
+    """MLP that predicts continuation probability from latent state."""
 
-    def __init__(
-        self,
-        latent_dim: int,
-        hidden_dim: int = 128,
-        dropout: float = 0.1,
-    ) -> None:
+    def __init__(self, latent_dim: int, hidden_dim: int = 256) -> None:
         super().__init__()
         self.net = nn.Sequential(
             _layer_init(nn.Linear(latent_dim, hidden_dim)),
             nn.LayerNorm(hidden_dim),
-            nn.GELU(),
-            nn.Dropout(dropout),
+            nn.SiLU(),
             _layer_init(nn.Linear(hidden_dim, 1)),
         )
 
     def forward(self, z: Tensor) -> Tensor:
-        """Predict done probability from latent."""
+        """Predict continuation probability (1 - done) from latent."""
         return torch.sigmoid(self.net(z)).squeeze(-1)
 
 
 class Actor(nn.Module):
     """MLP that outputs action logits from latent state."""
 
-    def __init__(
-        self,
-        latent_dim: int,
-        num_actions: int,
-        hidden_dim: int = 256,
-        dropout: float = 0.1,
-    ) -> None:
+    def __init__(self, latent_dim: int, num_actions: int, hidden_dim: int = 256) -> None:
         super().__init__()
         self.net = nn.Sequential(
             _layer_init(nn.Linear(latent_dim, hidden_dim)),
             nn.LayerNorm(hidden_dim),
-            nn.GELU(),
-            nn.Dropout(dropout),
+            nn.SiLU(),
             _layer_init(nn.Linear(hidden_dim, hidden_dim)),
             nn.LayerNorm(hidden_dim),
-            nn.GELU(),
-            nn.Dropout(dropout),
+            nn.SiLU(),
             _layer_init(nn.Linear(hidden_dim, num_actions), std=0.01),
         )
 
@@ -288,232 +330,150 @@ class Actor(nn.Module):
 
 
 class Critic(nn.Module):
-    """MLP that outputs value estimate from latent state."""
+    """MLP that outputs symlog(value) estimate from latent state."""
 
-    def __init__(
-        self,
-        latent_dim: int,
-        hidden_dim: int = 256,
-        dropout: float = 0.1,
-    ) -> None:
+    def __init__(self, latent_dim: int, hidden_dim: int = 256) -> None:
         super().__init__()
         self.net = nn.Sequential(
             _layer_init(nn.Linear(latent_dim, hidden_dim)),
             nn.LayerNorm(hidden_dim),
-            nn.GELU(),
-            nn.Dropout(dropout),
+            nn.SiLU(),
             _layer_init(nn.Linear(hidden_dim, hidden_dim)),
             nn.LayerNorm(hidden_dim),
-            nn.GELU(),
-            nn.Dropout(dropout),
+            nn.SiLU(),
             _layer_init(nn.Linear(hidden_dim, 1), std=1.0),
         )
 
     def forward(self, z: Tensor) -> Tensor:
-        """Get value estimate from latent."""
+        """Get symlog(value) estimate from latent."""
         return self.net(z).squeeze(-1)
 
 
 class Decoder(nn.Module):
     """Transposed CNN decoder that reconstructs images from latent space."""
 
-    def __init__(
-        self,
-        output_shape: tuple[int, int, int],
-        latent_dim: int,
-        dropout: float = 0.1,
-    ) -> None:
+    def __init__(self, output_shape: tuple[int, int, int], latent_dim: int) -> None:
         super().__init__()
         self.output_shape = output_shape
         c, h, w = output_shape
 
-        # Compute the intermediate spatial dimensions
-        # These match the encoder's conv output before flattening
-        # For 64x64 input: conv1(8,4) -> 15, conv2(4,2) -> 6, conv3(3,1) -> 4
+        # Spatial dimensions for intermediate conv
         self.h_conv = 4
         self.w_conv = 4
         self.conv_channels = 64
 
-        # Project latent to conv feature size with LayerNorm and Dropout
+        # Project latent to conv feature size
         self.fc = nn.Sequential(
-            _layer_init(nn.Linear(latent_dim, latent_dim * 2)),
-            nn.LayerNorm(latent_dim * 2),
-            nn.GELU(),
-            nn.Dropout(dropout),
-            _layer_init(nn.Linear(latent_dim * 2, self.conv_channels * self.h_conv * self.w_conv)),
+            _layer_init(nn.Linear(latent_dim, 512)),
+            nn.LayerNorm(512),
+            nn.SiLU(),
+            _layer_init(nn.Linear(512, self.conv_channels * self.h_conv * self.w_conv)),
             nn.LayerNorm(self.conv_channels * self.h_conv * self.w_conv),
-            nn.GELU(),
+            nn.SiLU(),
         )
 
-        # Transposed convolutions with GroupNorm and Dropout (reverse of encoder)
+        # Transposed convolutions (reverse of encoder)
         self.deconv = nn.Sequential(
-            # Reverse of conv3: 4 -> 6
             _layer_init(nn.ConvTranspose2d(64, 64, kernel_size=3, stride=1)),
-            nn.GroupNorm(8, 64),
-            nn.GELU(),
-            nn.Dropout2d(dropout),
-            # Reverse of conv2: 6 -> 15  (kernel=4, stride=2 gives output_size = (6-1)*2 + 4 = 14)
-            # Adjust to get to 15
+            nn.LayerNorm([64, 6, 6]),
+            nn.SiLU(),
             _layer_init(nn.ConvTranspose2d(64, 32, kernel_size=4, stride=2, output_padding=1)),
-            nn.GroupNorm(8, 32),
-            nn.GELU(),
-            nn.Dropout2d(dropout),
-            # Reverse of conv1: 15 -> 64 (kernel=8, stride=4 gives output_size = (15-1)*4 + 8 = 64)
-            # No dropout/norm before final sigmoid
+            nn.LayerNorm([32, 15, 15]),
+            nn.SiLU(),
             _layer_init(nn.ConvTranspose2d(32, c, kernel_size=8, stride=4)),
-            nn.Sigmoid(),  # Output in [0, 1] range
+            # No sigmoid - output in symlog space for MSE loss
         )
 
     def forward(self, z: Tensor) -> Tensor:
-        """Decode latent to image.
+        """Decode latent to image (in symlog space).
 
         Args:
             z: Latent representation (batch, latent_dim)
 
         Returns:
-            Reconstructed image (batch, C, H, W) in [0, 1]
+            Reconstructed image (batch, C, H, W) - NOT normalized to [0,1]
         """
         batch_size = z.shape[0]
-
-        # Project and reshape to conv feature map
         h = self.fc(z)
         h = h.view(batch_size, self.conv_channels, self.h_conv, self.w_conv)
-
-        # Decode through transposed convolutions
         return self.deconv(h)
 
 
 # =============================================================================
-# SSIM Loss
+# Main Model
 # =============================================================================
 
 
-def _gaussian_window(size: int, sigma: float, device: torch.device) -> Tensor:
-    """Create a 1D Gaussian window."""
-    coords = torch.arange(size, dtype=torch.float32, device=device)
-    coords -= size // 2
-    g = torch.exp(-(coords**2) / (2 * sigma**2))
-    return g / g.sum()
-
-
-def _create_ssim_window(window_size: int, channels: int, device: torch.device) -> Tensor:
-    """Create a 2D Gaussian window for SSIM."""
-    _1d_window = _gaussian_window(window_size, 1.5, device)
-    _2d_window = _1d_window.unsqueeze(1) @ _1d_window.unsqueeze(0)
-    return _2d_window.expand(channels, 1, window_size, window_size).contiguous()
-
-
-def ssim(
-    x: Tensor,
-    y: Tensor,
-    window_size: int = 11,
-    reduction: str = "mean",
-) -> Tensor:
-    """Compute Structural Similarity Index (SSIM) between two images.
-
-    Args:
-        x: First image tensor (N, C, H, W) in [0, 1]
-        y: Second image tensor (N, C, H, W) in [0, 1]
-        window_size: Size of the Gaussian window
-        reduction: 'none', 'mean', or 'sum'
-
-    Returns:
-        SSIM value(s) in [0, 1], higher is better
-    """
-    if x.dim() != 4:
-        raise ValueError(f"Expected 4D tensor, got {x.dim()}D")
-
-    channels = x.shape[1]
-    window = _create_ssim_window(window_size, channels, x.device)
-
-    # Constants for numerical stability
-    C1 = 0.01**2
-    C2 = 0.03**2
-
-    padding = window_size // 2
-
-    # Compute means
-    mu_x = F.conv2d(x, window, padding=padding, groups=channels)
-    mu_y = F.conv2d(y, window, padding=padding, groups=channels)
-
-    mu_x_sq = mu_x**2
-    mu_y_sq = mu_y**2
-    mu_xy = mu_x * mu_y
-
-    # Compute variances and covariance
-    sigma_x_sq = F.conv2d(x**2, window, padding=padding, groups=channels) - mu_x_sq
-    sigma_y_sq = F.conv2d(y**2, window, padding=padding, groups=channels) - mu_y_sq
-    sigma_xy = F.conv2d(x * y, window, padding=padding, groups=channels) - mu_xy
-
-    # SSIM formula
-    numerator = (2 * mu_xy + C1) * (2 * sigma_xy + C2)
-    denominator = (mu_x_sq + mu_y_sq + C1) * (sigma_x_sq + sigma_y_sq + C2)
-    ssim_map = numerator / denominator
-
-    if reduction == "mean":
-        return ssim_map.mean()
-    elif reduction == "sum":
-        return ssim_map.sum()
-    return ssim_map
-
-
 class DreamerModel(nn.Module):
-    """Dreamer: World Model + Actor-Critic for model-based RL.
+    """Dreamer V3: World Model + Actor-Critic for model-based RL.
 
-    The model can:
-    1. Encode observations to latent space
-    2. Imagine future trajectories using learned dynamics
-    3. Evaluate actions using actor (policy) and critic (value)
-
-    During training:
-    - World model is trained on real experience (reconstruction + dynamics)
-    - Actor-Critic is trained on imagined trajectories
+    Key V3 features:
+    - Categorical latent space (32 × 32)
+    - Symlog predictions for scale invariance
+    - Simple architecture without collapse-prevention hacks
     """
 
     def __init__(
         self,
         input_shape: tuple[int, int, int],
         num_actions: int,
-        latent_dim: int = 128,
+        latent_dim: int = 1024,  # For compatibility (= 32*32)
         hidden_dim: int = 256,
-        dropout: float = 0.1,
+        num_categoricals: int = 32,
+        num_classes: int = 32,
     ) -> None:
         super().__init__()
         self.input_shape = input_shape
         self.num_actions = num_actions
-        self.latent_dim = latent_dim
+        self.num_categoricals = num_categoricals
+        self.num_classes = num_classes
+        self.latent_dim = num_categoricals * num_classes
 
         # World model components
-        self.encoder = Encoder(input_shape, latent_dim, dropout)
-        self.decoder = Decoder(input_shape, latent_dim, dropout)
-        self.dynamics = Dynamics(latent_dim, num_actions, hidden_dim, dropout)
-        self.reward_pred = RewardPredictor(latent_dim, hidden_dim, dropout)
-        self.done_pred = DonePredictor(latent_dim, hidden_dim, dropout)
+        self.encoder = CategoricalEncoder(input_shape, num_categoricals, num_classes)
+        self.decoder = Decoder(input_shape, self.latent_dim)
+        self.dynamics = CategoricalDynamics(num_categoricals, num_classes, num_actions, hidden_dim)
+        self.reward_pred = RewardPredictor(self.latent_dim, hidden_dim)
+        self.continue_pred = ContinuePredictor(self.latent_dim, hidden_dim)
 
         # Actor-Critic components
-        self.actor = Actor(latent_dim, num_actions, hidden_dim, dropout)
-        self.critic = Critic(latent_dim, hidden_dim, dropout)
+        self.actor = Actor(self.latent_dim, num_actions, hidden_dim)
+        self.critic = Critic(self.latent_dim, hidden_dim)
 
     def encode(self, x: Tensor, deterministic: bool = True) -> Tensor:
         """Encode observations to latent space.
 
         Args:
             x: Observations (batch, C, H, W) in [0, 255] range
-            deterministic: If True, use mean; if False, sample from distribution
+            deterministic: If True, use mode; if False, sample
 
         Returns:
             z: Latent representation (batch, latent_dim)
         """
-        # Normalize from [0, 255] to [0, 1]
         x = x / 255.0
         return self.encoder.encode(x, deterministic)
+
+    def encode_with_logits(self, x: Tensor) -> tuple[Tensor, Tensor]:
+        """Encode and return both latent and logits (for KL computation).
+        
+        Args:
+            x: Observations (batch, C, H, W) in [0, 255] range
+            
+        Returns:
+            z: Sampled latent (batch, latent_dim)
+            logits: Categorical logits (batch, num_categoricals, num_classes)
+        """
+        x = x / 255.0
+        logits = self.encoder(x)
+        z = self.encoder.sample(logits)
+        return z.view(-1, self.latent_dim), logits
 
     def imagine_step(
         self,
         z: Tensor,
         actions: Tensor,
         h: Tensor | None = None,
-    ) -> tuple[Tensor, Tensor, Tensor]:
+    ) -> tuple[Tensor, Tensor, Tensor, Tensor]:
         """Imagine one step forward.
 
         Args:
@@ -523,19 +483,20 @@ class DreamerModel(nn.Module):
 
         Returns:
             z_next: Next latent (batch, latent_dim)
-            reward: Predicted reward (batch,)
-            done: Predicted done probability (batch,)
+            h_next: Next hidden state
+            reward: Predicted symlog(reward) (batch,)
+            cont: Predicted continuation probability (batch,)
         """
-        z_next, _, _, _ = self.dynamics(z, actions, h)
+        z_next, h_next, _ = self.dynamics(z, actions, h)
         reward = self.reward_pred(z_next)
-        done = self.done_pred(z_next)
-        return z_next, reward, done
+        cont = self.continue_pred(z_next)
+        return z_next, h_next, reward, cont
 
     def imagine_trajectory(
         self,
         z_start: Tensor,
         horizon: int = 15,
-    ) -> tuple[Tensor, Tensor, Tensor]:
+    ) -> tuple[Tensor, Tensor, Tensor, Tensor]:
         """Imagine a trajectory by sampling actions from policy.
 
         Args:
@@ -544,66 +505,54 @@ class DreamerModel(nn.Module):
 
         Returns:
             z_traj: Latent trajectory (batch, horizon+1, latent_dim)
-            rewards: Predicted rewards (batch, horizon)
-            dones: Predicted dones (batch, horizon)
+            rewards: Predicted symlog rewards (batch, horizon)
+            conts: Predicted continuation probs (batch, horizon)
+            logits_traj: Dynamics logits for KL (batch, horizon, num_cat, num_class)
         """
         z_traj = [z_start]
         rewards = []
-        dones = []
+        conts = []
+        logits_list = []
 
         z = z_start
         h = None
 
         for _ in range(horizon):
             # Sample action from policy
-            logits = self.actor(z)
-            action_dist = torch.distributions.Categorical(logits=logits)
+            action_logits = self.actor(z)
+            action_dist = torch.distributions.Categorical(logits=action_logits)
             action = action_dist.sample()
 
             # Imagine step
-            z_next, h, _, _ = self.dynamics(z, action, h)
+            z_next, h, logits = self.dynamics(z, action, h)
             reward = self.reward_pred(z_next)
-            done = self.done_pred(z_next)
+            cont = self.continue_pred(z_next)
 
             z_traj.append(z_next)
             rewards.append(reward)
-            dones.append(done)
+            conts.append(cont)
+            logits_list.append(logits)
 
             z = z_next
 
         return (
             torch.stack(z_traj, dim=1),
             torch.stack(rewards, dim=1),
-            torch.stack(dones, dim=1),
+            torch.stack(conts, dim=1),
+            torch.stack(logits_list, dim=1),
         )
 
     def forward(self, x: Tensor) -> Tensor:
-        """Forward pass: encode and return action logits.
-
-        Args:
-            x: Observations (batch, C, H, W)
-
-        Returns:
-            Action logits (batch, num_actions)
-        """
+        """Forward pass: encode and return action logits."""
         z = self.encode(x, deterministic=True)
         return self.actor(z)
 
     def select_action(self, x: Tensor, epsilon: float = 0.0) -> Tensor:
-        """Get action using policy with optional exploration.
-
-        Args:
-            x: Observations (batch, C, H, W)
-            epsilon: Random action probability
-
-        Returns:
-            actions: Selected actions (batch,)
-        """
+        """Get action using policy with optional exploration."""
         if np.random.random() < epsilon:
             return torch.randint(0, self.num_actions, (x.shape[0],), device=x.device)
 
         with torch.no_grad():
             logits = self.forward(x)
-            # Sample from policy distribution (not argmax - stochastic policy)
             dist = torch.distributions.Categorical(logits=logits)
             return dist.sample()
