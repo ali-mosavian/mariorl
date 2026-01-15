@@ -78,7 +78,12 @@ class Config:
     target_update_interval: int = 1  # Update target every step like working script
     checkpoint_interval: int = 10_000
 
-    # MCTS exploration (optional)
+    # MuZero specific
+    muzero_num_simulations: int = 50  # MCTS simulations per action
+    muzero_unroll_steps: int = 5  # K steps to unroll during training
+    muzero_td_steps: int = 10  # n-step returns for value targets
+
+    # MCTS exploration (optional, for DDQN/Dreamer)
     mcts_enabled: bool = False
     mcts_num_simulations: int = 50
     mcts_max_depth: int = 20
@@ -129,7 +134,44 @@ def create_model_and_learner(
             entropy_coef=config.entropy_coef,
             mcts_adapter=mcts_adapter,
         )
-    else:
+
+    elif config.model == "muzero":
+        from mario_rl.models.muzero import MuZeroModel, MuZeroConfig
+        from mario_rl.learners.muzero import MuZeroLearner
+        from mario_rl.mcts import MuZeroAdapter
+
+        cfg = MuZeroConfig(
+            input_shape=(4, 64, 64),
+            num_actions=7,  # SIMPLE_MOVEMENT
+            latent_dim=config.latent_dim,
+            num_simulations=config.muzero_num_simulations,
+            discount=config.gamma,
+            unroll_steps=config.muzero_unroll_steps,
+            td_steps=config.muzero_td_steps,
+        )
+        model = MuZeroModel(cfg)
+        if device:
+            model = model.to(device)
+
+        # MuZero always uses its own MCTS for action selection
+        mcts_adapter = None
+        if device:
+            mcts_adapter = MuZeroAdapter(
+                model=model,
+                device=device,
+                num_simulations=config.muzero_num_simulations,
+                temperature=1.0,
+                add_noise=True,
+            )
+
+        learner = MuZeroLearner(
+            model=model,
+            unroll_steps=config.muzero_unroll_steps,
+        )
+        # Inject adapter for action selection
+        learner.mcts_adapter = mcts_adapter
+
+    else:  # dreamer
         from mario_rl.models.dreamer import DreamerModel, DreamerConfig
         from mario_rl.learners.dreamer import DreamerLearner
 
@@ -216,6 +258,7 @@ def run_worker(
         from mario_rl.distributed.shm_heartbeat import SharedHeartbeat
         from mario_rl.training.shared_gradient_tensor import attach_tensor_buffer
         from mario_rl.metrics import MetricLogger, DDQNMetrics, DreamerMetrics
+        from mario_rl.metrics.schema import MuZeroMetrics
 
         device = torch.device(device_str)
         events.log(f"Starting on {device}...")
@@ -237,7 +280,12 @@ def run_worker(
         _, learner = create_model_and_learner(config, device)
 
         # Create metrics logger for this worker
-        schema = DDQNMetrics if config.model == "ddqn" else DreamerMetrics
+        if config.model == "ddqn":
+            schema = DDQNMetrics
+        elif config.model == "muzero":
+            schema = MuZeroMetrics
+        else:
+            schema = DreamerMetrics
         csv_path = run_dir / f"worker_{worker_id}.csv"
         logger = MetricLogger(
             source_id=f"worker.{worker_id}",
@@ -631,7 +679,7 @@ def start_monitor_thread(
 
 
 @click.command()
-@click.option("--model", type=click.Choice(["ddqn", "dreamer"]), default="ddqn", help="Model type")
+@click.option("--model", type=click.Choice(["ddqn", "dreamer", "muzero"]), default="ddqn", help="Model type")
 @click.option("--workers", "-w", default=4, help="Number of workers")
 @click.option("--level", "-l", default="random", help="Level: 'random', 'sequential', or 'W,S' (e.g. '1,1')")
 @click.option("--save-dir", default="checkpoints", help="Directory for checkpoints")
@@ -656,6 +704,10 @@ def start_monitor_thread(
 @click.option("--weight-decay", default=1e-4, help="L2 regularization")
 # Dreamer specific
 @click.option("--latent-dim", default=128, help="Latent dimension for Dreamer")
+# MuZero specific
+@click.option("--muzero-sims", default=50, help="MCTS simulations per action (MuZero)")
+@click.option("--muzero-unroll", default=5, help="Unroll steps for training (MuZero)")
+@click.option("--muzero-td-steps", default=10, help="TD steps for value targets (MuZero)")
 # MCTS exploration
 @click.option("--mcts/--no-mcts", default=False, help="Enable MCTS exploration (hybrid mode)")
 @click.option("--mcts-sims", default=50, help="MCTS simulations per exploration")
@@ -686,6 +738,9 @@ def main(
     max_grad_norm: float,
     weight_decay: float,
     latent_dim: int,
+    muzero_sims: int,
+    muzero_unroll: int,
+    muzero_td_steps: int,
     mcts: bool,
     mcts_sims: int,
     mcts_depth: int,
@@ -708,6 +763,8 @@ def main(
     print(f"  Accumulate grads: {accumulate_grads}")
     print(f"  Epsilon: {eps_base}^(1+i/N), decay: {eps_decay_steps:,}")
     print(f"  Max grad norm: {max_grad_norm}")
+    if model == "muzero":
+        print(f"  MuZero: {muzero_sims} sims, unroll={muzero_unroll}, td_steps={muzero_td_steps}")
     if mcts:
         print(f"  MCTS: {mcts_sims} sims, depth={mcts_depth}, seq_len={mcts_seq_len}, stuck={mcts_stuck}, periodic={mcts_periodic}")
     
@@ -736,6 +793,9 @@ def main(
         eps_base=eps_base,
         epsilon_decay_steps=eps_decay_steps,
         latent_dim=latent_dim,
+        muzero_num_simulations=muzero_sims,
+        muzero_unroll_steps=muzero_unroll,
+        muzero_td_steps=muzero_td_steps,
         mcts_enabled=mcts,
         mcts_num_simulations=mcts_sims,
         mcts_max_depth=mcts_depth,
@@ -943,7 +1003,8 @@ def main(
                 break
             
             # Poll events from ZMQ (non-blocking)
-            for event in event_sub.poll(timeout_ms=50):
+            events_received = event_sub.poll(timeout_ms=50)
+            for event in events_received:
                 msg_type = event.get("msg_type", "")
                 
                 # Update aggregator with metrics events
@@ -980,8 +1041,9 @@ def main(
                         ui_msg = event_to_ui_message(event)
                         if ui_msg is not None:
                             ui_queue.put_nowait(ui_msg)
-                    except Exception:
-                        pass
+                    except Exception as e:
+                        # Log errors instead of silently swallowing them
+                        print(f"UI queue error: {e}", flush=True)
                 else:
                     # Print to stdout
                     text = format_event(event)

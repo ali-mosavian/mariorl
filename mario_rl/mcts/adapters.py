@@ -305,6 +305,123 @@ class RandomAdapter:
         return 0.0
 
 
+@dataclass
+class MuZeroAdapter:
+    """
+    Adapter for using MuZero with latent-space MCTS.
+
+    Unlike DDQN/Dreamer adapters that work with environment-based MCTS,
+    MuZero performs MCTS in the learned latent space using its dynamics model.
+
+    This adapter provides policy/value from the learned prediction network,
+    and action selection uses the full MuZero MCTS in latent space.
+
+    Attributes:
+        model: MuZeroModel (has online, target networks)
+        device: Torch device for inference
+        num_simulations: MCTS simulations per action selection
+        temperature: Temperature for final policy selection
+        add_noise: Whether to add Dirichlet noise at root
+    """
+
+    model: "MuZeroModel"  # Forward reference
+    device: torch.device
+    num_simulations: int = 50
+    temperature: float = 1.0
+    add_noise: bool = True
+
+    def get_action(self, state: np.ndarray) -> int:
+        """
+        Get action using MuZero's latent-space MCTS.
+
+        Args:
+            state: Observation (C, H, W) in [0, 255] range
+
+        Returns:
+            Best action from MCTS
+        """
+        # Import here to avoid circular imports
+        from mario_rl.learners.muzero import run_mcts
+
+        state_t = self._prepare_state(state)
+
+        policy, value, root = run_mcts(
+            model=self.model,
+            s=state_t,
+            num_simulations=self.num_simulations,
+            temperature=self.temperature,
+            add_noise=self.add_noise,
+        )
+
+        # Sample from policy (or take argmax if temperature is very low)
+        if self.temperature < 0.1:
+            return int(np.argmax(policy))
+        return int(np.random.choice(len(policy), p=policy))
+
+    def get_action_probs(self, state: np.ndarray) -> np.ndarray:
+        """
+        Get MCTS policy from latent-space planning.
+
+        Args:
+            state: Observation
+
+        Returns:
+            Action probability distribution from MCTS visit counts
+        """
+        from mario_rl.learners.muzero import run_mcts
+
+        state_t = self._prepare_state(state)
+
+        policy, value, root = run_mcts(
+            model=self.model,
+            s=state_t,
+            num_simulations=self.num_simulations,
+            temperature=self.temperature,
+            add_noise=self.add_noise,
+        )
+
+        return policy
+
+    def get_value(self, state: np.ndarray) -> float:
+        """
+        Get value estimate from prediction network.
+
+        Args:
+            state: Observation
+
+        Returns:
+            Value estimate
+        """
+        with torch.no_grad():
+            state_t = self._prepare_state(state)
+            _, _, value = self.model.initial_inference(state_t)
+            return float(value.item())
+
+    def get_action_fast(self, state: np.ndarray) -> int:
+        """
+        Get action without full MCTS (fast, for evaluation).
+
+        Uses only the policy network prediction without MCTS search.
+
+        Args:
+            state: Observation
+
+        Returns:
+            Action from policy network
+        """
+        with torch.no_grad():
+            state_t = self._prepare_state(state)
+            _, policy_logits, _ = self.model.initial_inference(state_t)
+            policy = F.softmax(policy_logits / self.temperature, dim=-1)
+            return int(torch.multinomial(policy, num_samples=1).item())
+
+    def _prepare_state(self, state: np.ndarray) -> torch.Tensor:
+        """Convert numpy state to batched tensor on device."""
+        if state.ndim == 3:
+            state = state[np.newaxis, ...]
+        return torch.from_numpy(state).float().to(self.device)
+
+
 @dataclass 
 class MarioRolloutAdapter:
     """

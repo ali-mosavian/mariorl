@@ -124,7 +124,7 @@ class MCTSExplorer:
 
         # Create root node and mark as visited
         root = MCTSNode(
-            state_snapshot=root_snapshot,
+            state=root_snapshot,
             obs=root_obs.copy(),
         )
         self._visited_states.add(_hash_obs(root_obs))
@@ -253,7 +253,7 @@ class MCTSExplorer:
 
         # Create root node (no snapshot needed for imagined MCTS)
         root = MCTSNode(
-            state_snapshot=np.array([]),  # Not used
+            state=np.array([]),  # Not used
             obs=obs.copy(),
         )
         root_latent = latent
@@ -290,7 +290,7 @@ class MCTSExplorer:
                         next_obs = obs  # Fallback
 
                     child = MCTSNode(
-                        state_snapshot=np.array([]),
+                        state=np.array([]),
                         obs=next_obs,
                         parent=node,
                         action=action,
@@ -331,7 +331,7 @@ class MCTSExplorer:
 
             # Replay action in environment
             assert best_child.action is not None, "Child node must have an action"
-            env.unwrapped.load_state(node.state_snapshot)
+            env.unwrapped.load_state(node.state)
             next_obs, reward, done, truncated, info = env.step(best_child.action)
 
             # Get proper observation if needed
@@ -378,7 +378,7 @@ class MCTSExplorer:
         action = self._select_expansion_action(node, untried)
 
         # Take action in environment
-        env.unwrapped.load_state(node.state_snapshot)
+        env.unwrapped.load_state(node.state)
         next_obs, reward, done, truncated, info = env.step(action)
 
         # Get proper observation
@@ -407,7 +407,7 @@ class MCTSExplorer:
 
         # Create child node
         child = MCTSNode(
-            state_snapshot=env.unwrapped.dump_state(),
+            state=env.unwrapped.dump_state(),
             obs=obs_for_hash,
             parent=node,
             action=action,
@@ -464,7 +464,7 @@ class MCTSExplorer:
         discount = 1.0
 
         current_obs = node.obs
-        env.unwrapped.load_state(node.state_snapshot)
+        env.unwrapped.load_state(node.state)
 
         done = False
         truncated = False

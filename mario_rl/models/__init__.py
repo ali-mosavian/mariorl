@@ -5,6 +5,10 @@ from mario_rl.models.ddqn import DDQNConfig
 from mario_rl.models.ddqn import DoubleDQN
 from mario_rl.models.dreamer import DreamerConfig
 from mario_rl.models.dreamer import DreamerModel
+from mario_rl.models.muzero import MuZeroConfig
+from mario_rl.models.muzero import MuZeroModel
+from mario_rl.models.muzero import MuZeroNetwork
+from mario_rl.models.muzero import info_nce_loss
 
 __all__ = [
     "DDQNConfig",
@@ -12,4 +16,8 @@ __all__ = [
     "DreamerConfig",
     "DreamerModel",
     "Model",
+    "MuZeroConfig",
+    "MuZeroModel",
+    "MuZeroNetwork",
+    "info_nce_loss",
 ]

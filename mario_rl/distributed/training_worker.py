@@ -175,23 +175,38 @@ class TrainingWorker:
         return state
 
     def _get_action(self, state: np.ndarray) -> int:
-        """Get action using epsilon-greedy policy."""
-        eps = self.epsilon_at(self.total_steps)
-
-        if np.random.random() < eps:
-            action = int(np.random.randint(0, self.model.num_actions))
-        else:
+        """Get action using epsilon-greedy policy or MuZero MCTS."""
+        # Check if we have a MuZero adapter (latent-space MCTS)
+        if self._use_muzero_mcts():
+            # MuZero uses its own exploration via MCTS + Dirichlet noise
             state = self._preprocess_state(state)
-            with torch.no_grad():
-                state_t = torch.from_numpy(state).unsqueeze(0).float().to(self.device)
-                q_values = self.model(state_t)
-                action = int(q_values.argmax(dim=1).item())
+            action = self.learner.mcts_adapter.get_action(state)
+        else:
+            # Standard epsilon-greedy for DDQN/Dreamer
+            eps = self.epsilon_at(self.total_steps)
+
+            if np.random.random() < eps:
+                action = int(np.random.randint(0, self.model.num_actions))
+            else:
+                state = self._preprocess_state(state)
+                with torch.no_grad():
+                    state_t = torch.from_numpy(state).unsqueeze(0).float().to(self.device)
+                    q_values = self.model(state_t)
+                    action = int(q_values.argmax(dim=1).item())
 
         # Track action distribution (rolling window for recent distribution)
         self._action_window.append(action)
         if len(self._action_window) > self._action_window_size:
             self._action_window.pop(0)
         return action
+
+    def _use_muzero_mcts(self) -> bool:
+        """Check if we should use MuZero's latent-space MCTS for action selection."""
+        if not hasattr(self.learner, "mcts_adapter") or self.learner.mcts_adapter is None:
+            return False
+        # Check if it's a MuZero adapter (has run latent MCTS)
+        adapter = self.learner.mcts_adapter
+        return hasattr(adapter, "model") and hasattr(adapter.model, "initial_inference")
 
     def epsilon_at(self, steps: int) -> float:
         """Get epsilon for given step count."""
@@ -585,6 +600,20 @@ class TrainingWorker:
                 self.logger.observe("value_mean", float(metrics["value_mean"]))
             if "return_mean" in metrics:
                 self.logger.observe("return_mean", float(metrics["return_mean"]))
+
+            # MuZero-specific metrics
+            if "policy_loss" in metrics:
+                self.logger.observe("policy_loss", float(metrics["policy_loss"]))
+            if "value_loss" in metrics:
+                self.logger.observe("value_loss", float(metrics["value_loss"]))
+            if "consistency_loss" in metrics:
+                self.logger.observe("consistency_loss", float(metrics["consistency_loss"]))
+            if "contrastive_loss" in metrics:
+                self.logger.observe("contrastive_loss", float(metrics["contrastive_loss"]))
+            if "value_pred_mean" in metrics:
+                self.logger.observe("value_pred_mean", float(metrics["value_pred_mean"]))
+            if "value_target_mean" in metrics:
+                self.logger.observe("value_target_mean", float(metrics["value_target_mean"]))
 
         return gradients, metrics
 

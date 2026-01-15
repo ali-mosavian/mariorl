@@ -431,7 +431,7 @@ class DreamerLearner:
         )
 
         # 3. Dynamics loss
-        z_next_pred, _, z_next_mu = self.model.dynamics(z, actions)
+        z_next_pred, _, z_next_mu, _ = self.model.dynamics(z, actions)
         dynamics_loss = F.mse_loss(z_next_mu, z_next_target)
 
         # 4. Reward prediction loss
@@ -540,9 +540,6 @@ class DreamerLearner:
             dones: Predicted dones (batch, horizon)
             kl_imagination: KL divergence of imagined latents vs prior
         """
-        batch_size = z_start.shape[0]
-        device = z_start.device
-        
         z_traj = [z_start]
         rewards = []
         dones = []
@@ -557,32 +554,9 @@ class DreamerLearner:
             action_dist = torch.distributions.Categorical(logits=logits)
             action = action_dist.sample()
             
-            # Imagine step - get both sampled latent and distribution params
-            # We need to access dynamics forward to get mu and logvar
-            if h is None:
-                h = torch.zeros(batch_size, self.model.dynamics.hidden_dim, device=device)
-            
-            # Embed action and get dynamics prediction
-            a_embed = self.model.dynamics.action_embed(action)
-            x = torch.cat([z, a_embed], dim=-1)
-            
-            # Project through pre_gru before GRU (matches Dynamics.forward)
-            x = self.model.dynamics.pre_gru(x)
-            h = self.model.dynamics.gru(x, h)
-            h = self.model.dynamics.gru_norm(h)
-            
-            # Residual connection around GRU
-            h = h + x
-            
-            # Post-GRU processing
-            out = self.model.dynamics.post_gru(h)
-            mu = self.model.dynamics.fc_mu(out)
-            logvar = self.model.dynamics.fc_logvar(out).clamp(-10, 2)
-            
-            # Sample next latent with residual from current z
-            std = torch.exp(0.5 * logvar)
-            z_delta = mu + std * torch.randn_like(std)
-            z_next = self.model.dynamics.z_skip(z) + z_delta
+            # Imagine step using the dynamics model's forward method
+            # Returns: z_next, h_next, mu, logvar
+            z_next, h, mu, logvar = self.model.dynamics(z, action, h)
             
             # Compute KL divergence: KL(N(mu, sigma^2) || N(0, 1))
             # KL = 0.5 * (sigma^2 + mu^2 - 1 - log(sigma^2))

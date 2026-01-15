@@ -92,9 +92,11 @@ def test_encode_returns_correct_shape(dreamer_model, sample_batch: Tensor, confi
 
 
 def test_encode_deterministic_mode(dreamer_model, sample_batch: Tensor) -> None:
-    """Deterministic encoding should give same result each time."""
+    """Deterministic encoding should give same result each time (in eval mode)."""
+    dreamer_model.eval()  # Disable dropout for deterministic behavior
     z1 = dreamer_model.encode(sample_batch, deterministic=True)
     z2 = dreamer_model.encode(sample_batch, deterministic=True)
+    dreamer_model.train()  # Restore training mode
 
     assert torch.equal(z1, z2)
 
@@ -306,6 +308,7 @@ def test_state_dict_is_serializable(dreamer_model) -> None:
 
 def test_load_state_dict_restores_weights(dreamer_model, sample_batch: Tensor) -> None:
     """load_state_dict should restore model."""
+    dreamer_model.eval()  # Disable dropout for deterministic behavior
     initial_output = dreamer_model(sample_batch).clone()
     initial_state = {k: v.clone() for k, v in dreamer_model.state_dict().items()}
 
@@ -317,6 +320,7 @@ def test_load_state_dict_restores_weights(dreamer_model, sample_batch: Tensor) -
     # Restore
     dreamer_model.load_state_dict(initial_state)
     restored_output = dreamer_model(sample_batch)
+    dreamer_model.train()  # Restore training mode
 
     assert torch.allclose(restored_output, initial_output)
 

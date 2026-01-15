@@ -13,7 +13,9 @@ from mario_rl.dashboard.chart_helpers import (
     make_dual_axis_chart,
 )
 from mario_rl.dashboard.aggregators import (
+    DeathDistPoint,
     LevelStats,
+    aggregate_death_distribution,
     aggregate_level_stats,
     aggregate_action_distribution,
     aggregate_rate_data,
@@ -37,8 +39,9 @@ def render_levels_tab(
     level_stats = aggregate_level_stats(workers)
     action_data = aggregate_action_distribution(workers)
     rate_data = aggregate_rate_data(workers)
+    death_dist_data = aggregate_death_distribution(workers)
     
-    # Get death hotspots from CSV if not provided
+    # Get death hotspots from CSV if not provided (for summary table)
     if death_hotspots is None or len(death_hotspots) == 0:
         death_hotspots = aggregate_death_hotspots_from_csv(workers)
     
@@ -57,7 +60,7 @@ def render_levels_tab(
     # Per-level analysis section
     st.divider()
     st.subheader("🎮 Per-Level Analysis: Actions & Deaths")
-    _render_per_level_analysis(level_stats, action_data, rate_data, death_hotspots)
+    _render_per_level_analysis(level_stats, action_data, rate_data, death_dist_data, death_hotspots)
     
     # Global death hotspots table
     if death_hotspots:
@@ -223,6 +226,7 @@ def _render_per_level_analysis(
     level_stats: dict[str, LevelStats],
     action_data: dict[str, list],
     rate_data: dict[str, list],
+    death_dist_data: dict[str, list[DeathDistPoint]],
     death_hotspots: dict[str, dict[int, int]] | None,
 ) -> None:
     """Render per-level analysis with actions, deaths, and rates side by side."""
@@ -232,6 +236,7 @@ def _render_per_level_analysis(
     all_levels.update(level_stats.keys())
     all_levels.update(action_data.keys())
     all_levels.update(rate_data.keys())
+    all_levels.update(death_dist_data.keys())
     if death_hotspots:
         all_levels.update(death_hotspots.keys())
     
@@ -261,7 +266,7 @@ def _render_per_level_analysis(
             _render_level_action_heatmap(level, action_data)
         
         with col_deaths:
-            _render_level_death_chart(level, death_hotspots)
+            _render_level_death_heatmap(level, death_dist_data, death_hotspots)
         
         with col_rates:
             _render_level_rate_chart(level, rate_data)
@@ -299,9 +304,65 @@ def _render_level_action_heatmap(level: str, action_data: dict[str, list]) -> No
         st.info("⏳ Not enough action data")
 
 
-def _render_level_death_chart(level: str, death_hotspots: dict[str, dict[int, int]] | None) -> None:
-    """Render death position chart for a single level."""
-    if death_hotspots and level in death_hotspots and death_hotspots[level]:
+def _render_level_death_heatmap(
+    level: str,
+    death_dist_data: dict[str, list[DeathDistPoint]],
+    death_hotspots: dict[str, dict[int, int]] | None,
+) -> None:
+    """Render death position heatmap over time for a single level."""
+    if level in death_dist_data and len(death_dist_data[level]) >= 2:
+        level_data = sorted(death_dist_data[level], key=lambda x: x.steps)
+        sampled = sample_data(level_data, max_points=30)
+        
+        # Collect all position buckets across all time points
+        all_positions: set[int] = set()
+        for point in sampled:
+            all_positions.update(point.position_counts.keys())
+        
+        if not all_positions:
+            st.info("⏳ No death position data")
+            return
+        
+        # Sort positions and create labels
+        sorted_positions = sorted(all_positions)
+        y_labels = [f"{pos}" for pos in sorted_positions]
+        x_labels = [f"{int(d.steps // 1000)}k" for d in sampled]
+        
+        # Build heatmap matrix: rows=positions, cols=time points
+        z_data = []
+        for pos in sorted_positions:
+            row = [point.position_counts.get(pos, 0) for point in sampled]
+            z_data.append(row)
+        
+        fig = make_heatmap(
+            z_data=z_data,
+            x_labels=x_labels,
+            y_labels=y_labels,
+            title="💀 Deaths Over Time",
+            height=250,
+            colorscale="Reds",
+        )
+        fig.update_layout(
+            xaxis=dict(title="Steps"),
+            yaxis=dict(title="X Position"),
+        )
+        st.plotly_chart(fig, use_container_width=True, key=f"deaths_{level}")
+        
+        # Death stats from hotspots (total counts)
+        if death_hotspots and level in death_hotspots:
+            buckets = death_hotspots[level]
+            total_level_deaths = sum(buckets.values())
+            if buckets:
+                hottest_pos = max(buckets.items(), key=lambda x: x[1])
+                st.caption(f"💀 Total: {total_level_deaths} | Hotspot: x={hottest_pos[0]}")
+            else:
+                st.caption(f"💀 Total: {total_level_deaths}")
+        else:
+            # Count from distribution data
+            total = sum(sum(p.position_counts.values()) for p in level_data)
+            st.caption(f"💀 Total: {total}")
+    elif death_hotspots and level in death_hotspots and death_hotspots[level]:
+        # Fallback to bar chart if not enough time-series data
         buckets = death_hotspots[level]
         sorted_buckets = sorted(buckets.items(), key=lambda x: x[0])
         
@@ -320,7 +381,6 @@ def _render_level_death_chart(level: str, death_hotspots: dict[str, dict[int, in
         )
         st.plotly_chart(fig, use_container_width=True, key=f"deaths_{level}")
         
-        # Death stats
         total_level_deaths = sum(counts)
         hottest_pos = max(buckets.items(), key=lambda x: x[1])
         st.caption(f"💀 Total: {total_level_deaths} | Hotspot: x={hottest_pos[0]}")

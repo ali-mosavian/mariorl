@@ -20,20 +20,18 @@ Key components:
 - Actor: MLP that outputs action logits from latent
 - Critic: MLP that outputs value estimate from latent
 
-Architecture improvements:
-- Dropout everywhere for regularization
-- LayerNorm between layers for stable gradients
-- Residual connections for gradient flow
-- Deeper CNN with smaller kernels (3x3) and MaxPool
+Regularization:
+- LayerNorm/GroupNorm between layers for stable gradients
+- Dropout for regularization
 """
 
 from dataclasses import dataclass
 
-import torch
 import numpy as np
-from torch import nn
-from torch import Tensor
+import torch
 import torch.nn.functional as F
+from torch import Tensor
+from torch import nn
 
 
 def _layer_init(layer: nn.Module, std: float = np.sqrt(2), bias_const: float = 0.0) -> nn.Module:
@@ -43,188 +41,6 @@ def _layer_init(layer: nn.Module, std: float = np.sqrt(2), bias_const: float = 0
         if layer.bias is not None:
             nn.init.constant_(layer.bias, bias_const)
     return layer
-
-
-# =============================================================================
-# ResNet Building Blocks
-# =============================================================================
-
-
-class ResidualMLPBlock(nn.Module):
-    """Residual MLP block with LayerNorm and Dropout."""
-
-    def __init__(self, dim: int, dropout: float = 0.1) -> None:
-        super().__init__()
-        self.net = nn.Sequential(
-            nn.LayerNorm(dim),
-            _layer_init(nn.Linear(dim, dim)),
-            nn.GELU(),
-            nn.Dropout(dropout),
-            _layer_init(nn.Linear(dim, dim)),
-            nn.Dropout(dropout),
-        )
-
-    def forward(self, x: Tensor) -> Tensor:
-        return x + self.net(x)
-
-
-class ResNetBasicBlock(nn.Module):
-    """ResNet BasicBlock: two 3x3 convs with skip connection and dropout.
-
-    Pre-activation style (GroupNorm -> GELU -> Dropout -> Conv) for better gradient flow.
-    """
-
-    expansion = 1
-
-    def __init__(
-        self,
-        in_channels: int,
-        out_channels: int,
-        stride: int = 1,
-        dropout: float = 0.1,
-    ) -> None:
-        super().__init__()
-
-        # Main path with dropout after each activation
-        self.norm1 = nn.GroupNorm(min(8, in_channels), in_channels)
-        self.drop1 = nn.Dropout2d(dropout)
-        self.conv1 = _layer_init(
-            nn.Conv2d(in_channels, out_channels, kernel_size=3, stride=stride, padding=1, bias=False)
-        )
-        self.norm2 = nn.GroupNorm(min(8, out_channels), out_channels)
-        self.drop2 = nn.Dropout2d(dropout)
-        self.conv2 = _layer_init(
-            nn.Conv2d(out_channels, out_channels, kernel_size=3, stride=1, padding=1, bias=False)
-        )
-
-        # Skip connection (identity or projection)
-        self.skip = nn.Identity()
-        if stride != 1 or in_channels != out_channels:
-            self.skip = _layer_init(
-                nn.Conv2d(in_channels, out_channels, kernel_size=1, stride=stride, bias=False)
-            )
-
-    def forward(self, x: Tensor) -> Tensor:
-        identity = self.skip(x)
-
-        out = self.norm1(x)
-        out = F.gelu(out)
-        out = self.drop1(out)
-        out = self.conv1(out)
-
-        out = self.norm2(out)
-        out = F.gelu(out)
-        out = self.drop2(out)
-        out = self.conv2(out)
-
-        return out + identity
-
-
-class ResNetBottleneck(nn.Module):
-    """ResNet Bottleneck: 1x1 -> 3x3 -> 1x1 with skip connection and dropout.
-
-    Pre-activation style for better gradient flow.
-    """
-
-    expansion = 4
-
-    def __init__(
-        self,
-        in_channels: int,
-        mid_channels: int,
-        stride: int = 1,
-        dropout: float = 0.1,
-    ) -> None:
-        super().__init__()
-        out_channels = mid_channels * self.expansion
-
-        # Main path: 1x1 reduce -> 3x3 -> 1x1 expand with dropout
-        self.norm1 = nn.GroupNorm(min(8, in_channels), in_channels)
-        self.drop1 = nn.Dropout2d(dropout)
-        self.conv1 = _layer_init(nn.Conv2d(in_channels, mid_channels, kernel_size=1, bias=False))
-
-        self.norm2 = nn.GroupNorm(min(8, mid_channels), mid_channels)
-        self.drop2 = nn.Dropout2d(dropout)
-        self.conv2 = _layer_init(
-            nn.Conv2d(mid_channels, mid_channels, kernel_size=3, stride=stride, padding=1, bias=False)
-        )
-
-        self.norm3 = nn.GroupNorm(min(8, mid_channels), mid_channels)
-        self.drop3 = nn.Dropout2d(dropout)
-        self.conv3 = _layer_init(nn.Conv2d(mid_channels, out_channels, kernel_size=1, bias=False))
-
-        # Skip connection
-        self.skip = nn.Identity()
-        if stride != 1 or in_channels != out_channels:
-            self.skip = _layer_init(
-                nn.Conv2d(in_channels, out_channels, kernel_size=1, stride=stride, bias=False)
-            )
-
-    def forward(self, x: Tensor) -> Tensor:
-        identity = self.skip(x)
-
-        out = self.norm1(x)
-        out = F.gelu(out)
-        out = self.drop1(out)
-        out = self.conv1(out)
-
-        out = self.norm2(out)
-        out = F.gelu(out)
-        out = self.drop2(out)
-        out = self.conv2(out)
-
-        out = self.norm3(out)
-        out = F.gelu(out)
-        out = self.drop3(out)
-        out = self.conv3(out)
-
-        return out + identity
-
-
-class ResNetUpsampleBlock(nn.Module):
-    """ResNet block for decoder with upsampling and dropout."""
-
-    def __init__(
-        self,
-        in_channels: int,
-        out_channels: int,
-        upsample: bool = True,
-        dropout: float = 0.1,
-    ) -> None:
-        super().__init__()
-
-        # Upsample first if needed
-        self.upsample = nn.Upsample(scale_factor=2, mode="nearest") if upsample else nn.Identity()
-
-        # Main path with dropout after each activation
-        self.norm1 = nn.GroupNorm(min(8, in_channels), in_channels)
-        self.drop1 = nn.Dropout2d(dropout)
-        self.conv1 = _layer_init(nn.Conv2d(in_channels, out_channels, kernel_size=3, padding=1, bias=False))
-
-        self.norm2 = nn.GroupNorm(min(8, out_channels), out_channels)
-        self.drop2 = nn.Dropout2d(dropout)
-        self.conv2 = _layer_init(nn.Conv2d(out_channels, out_channels, kernel_size=3, padding=1, bias=False))
-
-        # Skip connection with channel adjustment
-        self.skip = nn.Identity()
-        if in_channels != out_channels:
-            self.skip = _layer_init(nn.Conv2d(in_channels, out_channels, kernel_size=1, bias=False))
-
-    def forward(self, x: Tensor) -> Tensor:
-        x = self.upsample(x)
-        identity = self.skip(x)
-
-        out = self.norm1(x)
-        out = F.gelu(out)
-        out = self.drop1(out)
-        out = self.conv1(out)
-
-        out = self.norm2(out)
-        out = F.gelu(out)
-        out = self.drop2(out)
-        out = self.conv2(out)
-
-        return out + identity
 
 
 @dataclass(frozen=True)
@@ -239,13 +55,11 @@ class DreamerConfig:
 
 
 class Encoder(nn.Module):
-    """ResNet-style encoder that stops at 16x16 spatial resolution.
+    """CNN encoder that maps frames to latent space with VAE-style output.
 
-    Architecture: ResNet blocks with stride-2 downsampling to 16x16.
-    Uses pre-activation (GroupNorm -> GELU -> Dropout -> Conv) for gradient flow.
-    Reduced channels for efficiency.
-
-    64x64 input -> 32x32 -> 16x16 (with 64 channels) -> flatten -> latent
+    Uses Nature DQN-style CNN backbone with GELU activations,
+    GroupNorm for normalization, and Dropout2d for regularization.
+    64x64 input -> latent representation.
     """
 
     def __init__(
@@ -258,49 +72,35 @@ class Encoder(nn.Module):
         c, h, w = input_shape
         self.latent_dim = latent_dim
 
-        # Stem: 64x64, C -> 32 channels
-        self.stem = nn.Sequential(
-            _layer_init(nn.Conv2d(c, 32, kernel_size=3, stride=1, padding=1, bias=False)),
+        # Nature DQN-style CNN backbone with GroupNorm and Dropout
+        self.conv = nn.Sequential(
+            _layer_init(nn.Conv2d(c, 32, kernel_size=8, stride=4)),
             nn.GroupNorm(8, 32),
             nn.GELU(),
             nn.Dropout2d(dropout),
+            _layer_init(nn.Conv2d(32, 64, kernel_size=4, stride=2)),
+            nn.GroupNorm(8, 64),
+            nn.GELU(),
+            nn.Dropout2d(dropout),
+            _layer_init(nn.Conv2d(64, 64, kernel_size=3, stride=1)),
+            nn.GroupNorm(8, 64),
+            nn.GELU(),
+            nn.Dropout2d(dropout),
+            nn.Flatten(),
         )
 
-        # Stage 1: 64x64 -> 32x32, 32 -> 32 channels
-        self.stage1 = nn.Sequential(
-            ResNetBasicBlock(32, 32, stride=2, dropout=dropout),  # downsample
-            ResNetBasicBlock(32, 32, stride=1, dropout=dropout),
-        )
-
-        # Stage 2: 32x32 -> 16x16, 32 -> 64 channels
-        self.stage2 = nn.Sequential(
-            ResNetBasicBlock(32, 64, stride=2, dropout=dropout),  # downsample + expand
-            ResNetBasicBlock(64, 64, stride=1, dropout=dropout),
-        )
-
-        # Final norm before flatten
-        self.final_norm = nn.GroupNorm(8, 64)
-
-        # Compute flattened size (should be 64 * 16 * 16 = 16384 for 64x64 input)
+        # Compute flattened size
         with torch.no_grad():
             dummy = torch.zeros(1, c, h, w)
-            x = self.stem(dummy)
-            x = self.stage1(x)
-            x = self.stage2(x)
-            x = self.final_norm(x)
-            self.spatial_size = x.shape[2]  # Should be 16
-            flat_size = x.flatten(1).shape[1]
+            flat_size = self.conv(dummy).shape[1]
 
-        # Project to latent with residual MLP
+        # VAE-style outputs for stochastic latent with LayerNorm
         self.fc_pre = nn.Sequential(
             _layer_init(nn.Linear(flat_size, latent_dim * 2)),
             nn.LayerNorm(latent_dim * 2),
             nn.GELU(),
             nn.Dropout(dropout),
-            ResidualMLPBlock(latent_dim * 2, dropout),
         )
-
-        # VAE-style outputs for stochastic latent
         self.fc_mu = _layer_init(nn.Linear(latent_dim * 2, latent_dim))
         self.fc_logvar = _layer_init(nn.Linear(latent_dim * 2, latent_dim))
 
@@ -313,12 +113,7 @@ class Encoder(nn.Module):
         Returns:
             mu, logvar: Mean and log-variance of latent distribution
         """
-        h = self.stem(x)
-        h = self.stage1(h)
-        h = self.stage2(h)
-        h = self.final_norm(h)
-        h = F.gelu(h)
-        h = h.flatten(1)
+        h = self.conv(x)
         h = self.fc_pre(h)
         return self.fc_mu(h), self.fc_logvar(h)
 
@@ -336,11 +131,7 @@ class Encoder(nn.Module):
 
 
 class Dynamics(nn.Module):
-    """GRU-based dynamics model with residual connections and LayerNorm.
-
-    Predicts next latent from current latent + action using a GRU with
-    residual MLPs for better gradient flow.
-    """
+    """GRU-based dynamics model that predicts next latent from current + action."""
 
     def __init__(
         self,
@@ -356,44 +147,30 @@ class Dynamics(nn.Module):
 
         # Action embedding with LayerNorm
         self.action_embed = nn.Sequential(
-            nn.Embedding(num_actions, 64),
-            nn.LayerNorm(64),
+            nn.Embedding(num_actions, 32),
+            nn.LayerNorm(32),
         )
 
-        # Pre-GRU projection with residual
-        self.pre_gru = nn.Sequential(
-            _layer_init(nn.Linear(latent_dim + 64, hidden_dim)),
+        # GRU for temporal modeling
+        self.gru = nn.GRUCell(latent_dim + 32, hidden_dim)
+        self.gru_norm = nn.LayerNorm(hidden_dim)
+
+        # Predict next latent distribution with LayerNorm and Dropout
+        self.fc_out = nn.Sequential(
+            _layer_init(nn.Linear(hidden_dim, hidden_dim)),
             nn.LayerNorm(hidden_dim),
             nn.GELU(),
             nn.Dropout(dropout),
         )
-
-        # GRU for temporal modeling
-        self.gru = nn.GRUCell(hidden_dim, hidden_dim)
-        self.gru_norm = nn.LayerNorm(hidden_dim)
-
-        # Post-GRU residual MLP
-        self.post_gru = nn.Sequential(
-            ResidualMLPBlock(hidden_dim, dropout),
-            ResidualMLPBlock(hidden_dim, dropout),
-        )
-
-        # Predict next latent distribution
         self.fc_mu = _layer_init(nn.Linear(hidden_dim, latent_dim))
         self.fc_logvar = _layer_init(nn.Linear(hidden_dim, latent_dim))
-
-        # Residual skip: project z to match output for residual connection
-        self.z_skip = nn.Sequential(
-            _layer_init(nn.Linear(latent_dim, latent_dim)),
-            nn.LayerNorm(latent_dim),
-        )
 
     def forward(
         self,
         z: Tensor,
         action: Tensor,
         h: Tensor | None = None,
-    ) -> tuple[Tensor, Tensor, Tensor]:
+    ) -> tuple[Tensor, Tensor, Tensor, Tensor]:
         """Predict next latent given current latent and action.
 
         Args:
@@ -405,6 +182,7 @@ class Dynamics(nn.Module):
             z_next: Predicted next latent (sampled)
             h_next: Next GRU hidden state
             z_mu: Mean of predicted distribution (for KL loss)
+            z_logvar: Log-variance of predicted distribution (for KL loss)
         """
         batch_size = z.shape[0]
 
@@ -415,80 +193,74 @@ class Dynamics(nn.Module):
         a_embed = self.action_embed(action)
         x = torch.cat([z, a_embed], dim=-1)
 
-        # Project to GRU hidden dim
-        x = self.pre_gru(x)
-
         # GRU update with LayerNorm
         h_next = self.gru(x, h)
         h_next = self.gru_norm(h_next)
 
-        # Residual connection around GRU
-        h_next = h_next + x
-
-        # Post-GRU residual processing
-        out = self.post_gru(h_next)
-
         # Predict next latent distribution
+        out = self.fc_out(h_next)
         mu = self.fc_mu(out)
         logvar = self.fc_logvar(out).clamp(-10, 2)  # Clamp for stability
 
-        # Sample next latent with residual from current z
+        # Sample next latent
         std = torch.exp(0.5 * logvar)
-        z_delta = mu + std * torch.randn_like(std)
+        z_next = mu + std * torch.randn_like(std)
 
-        # Residual connection: z_next = z + delta (helps learn incremental changes)
-        z_next = self.z_skip(z) + z_delta
-
-        return z_next, h_next, mu
+        return z_next, h_next, mu, logvar
 
 
 class RewardPredictor(nn.Module):
-    """MLP that predicts reward from latent state with residual connections."""
+    """MLP that predicts reward from latent state."""
 
-    def __init__(self, latent_dim: int, hidden_dim: int = 128, dropout: float = 0.1) -> None:
+    def __init__(
+        self,
+        latent_dim: int,
+        hidden_dim: int = 128,
+        dropout: float = 0.1,
+    ) -> None:
         super().__init__()
-        self.input_proj = nn.Sequential(
+        self.net = nn.Sequential(
             _layer_init(nn.Linear(latent_dim, hidden_dim)),
             nn.LayerNorm(hidden_dim),
             nn.GELU(),
             nn.Dropout(dropout),
+            _layer_init(nn.Linear(hidden_dim, hidden_dim)),
+            nn.LayerNorm(hidden_dim),
+            nn.GELU(),
+            nn.Dropout(dropout),
+            _layer_init(nn.Linear(hidden_dim, 1), std=1.0),
         )
-        self.residual = nn.Sequential(
-            ResidualMLPBlock(hidden_dim, dropout),
-            ResidualMLPBlock(hidden_dim, dropout),
-        )
-        self.output = _layer_init(nn.Linear(hidden_dim, 1), std=1.0)
 
     def forward(self, z: Tensor) -> Tensor:
         """Predict reward from latent."""
-        h = self.input_proj(z)
-        h = self.residual(h)
-        return self.output(h).squeeze(-1)
+        return self.net(z).squeeze(-1)
 
 
 class DonePredictor(nn.Module):
     """MLP that predicts episode termination from latent state."""
 
-    def __init__(self, latent_dim: int, hidden_dim: int = 128, dropout: float = 0.1) -> None:
+    def __init__(
+        self,
+        latent_dim: int,
+        hidden_dim: int = 128,
+        dropout: float = 0.1,
+    ) -> None:
         super().__init__()
-        self.input_proj = nn.Sequential(
+        self.net = nn.Sequential(
             _layer_init(nn.Linear(latent_dim, hidden_dim)),
             nn.LayerNorm(hidden_dim),
             nn.GELU(),
             nn.Dropout(dropout),
+            _layer_init(nn.Linear(hidden_dim, 1)),
         )
-        self.residual = ResidualMLPBlock(hidden_dim, dropout)
-        self.output = _layer_init(nn.Linear(hidden_dim, 1))
 
     def forward(self, z: Tensor) -> Tensor:
         """Predict done probability from latent."""
-        h = self.input_proj(z)
-        h = self.residual(h)
-        return torch.sigmoid(self.output(h)).squeeze(-1)
+        return torch.sigmoid(self.net(z)).squeeze(-1)
 
 
 class Actor(nn.Module):
-    """MLP that outputs action logits from latent state with residual connections."""
+    """MLP that outputs action logits from latent state."""
 
     def __init__(
         self,
@@ -498,60 +270,52 @@ class Actor(nn.Module):
         dropout: float = 0.1,
     ) -> None:
         super().__init__()
-        self.input_proj = nn.Sequential(
+        self.net = nn.Sequential(
             _layer_init(nn.Linear(latent_dim, hidden_dim)),
             nn.LayerNorm(hidden_dim),
             nn.GELU(),
             nn.Dropout(dropout),
+            _layer_init(nn.Linear(hidden_dim, hidden_dim)),
+            nn.LayerNorm(hidden_dim),
+            nn.GELU(),
+            nn.Dropout(dropout),
+            _layer_init(nn.Linear(hidden_dim, num_actions), std=0.01),
         )
-        self.residual = nn.Sequential(
-            ResidualMLPBlock(hidden_dim, dropout),
-            ResidualMLPBlock(hidden_dim, dropout),
-            ResidualMLPBlock(hidden_dim, dropout),
-        )
-        self.output = _layer_init(nn.Linear(hidden_dim, num_actions), std=0.01)
 
     def forward(self, z: Tensor) -> Tensor:
         """Get action logits from latent."""
-        h = self.input_proj(z)
-        h = self.residual(h)
-        return self.output(h)
+        return self.net(z)
 
 
 class Critic(nn.Module):
-    """MLP that outputs value estimate from latent state with residual connections."""
+    """MLP that outputs value estimate from latent state."""
 
-    def __init__(self, latent_dim: int, hidden_dim: int = 256, dropout: float = 0.1) -> None:
+    def __init__(
+        self,
+        latent_dim: int,
+        hidden_dim: int = 256,
+        dropout: float = 0.1,
+    ) -> None:
         super().__init__()
-        self.input_proj = nn.Sequential(
+        self.net = nn.Sequential(
             _layer_init(nn.Linear(latent_dim, hidden_dim)),
             nn.LayerNorm(hidden_dim),
             nn.GELU(),
             nn.Dropout(dropout),
+            _layer_init(nn.Linear(hidden_dim, hidden_dim)),
+            nn.LayerNorm(hidden_dim),
+            nn.GELU(),
+            nn.Dropout(dropout),
+            _layer_init(nn.Linear(hidden_dim, 1), std=1.0),
         )
-        self.residual = nn.Sequential(
-            ResidualMLPBlock(hidden_dim, dropout),
-            ResidualMLPBlock(hidden_dim, dropout),
-            ResidualMLPBlock(hidden_dim, dropout),
-        )
-        self.output = _layer_init(nn.Linear(hidden_dim, 1), std=1.0)
 
     def forward(self, z: Tensor) -> Tensor:
         """Get value estimate from latent."""
-        h = self.input_proj(z)
-        h = self.residual(h)
-        return self.output(h).squeeze(-1)
+        return self.net(z).squeeze(-1)
 
 
 class Decoder(nn.Module):
-    """ResNet-style decoder that starts from 16x16 spatial resolution.
-
-    Architecture mirrors the Encoder: starts at 16x16, upsamples to 64x64.
-    Uses ResNet upsample blocks with dropout for gradient flow.
-    Reduced channels for efficiency.
-
-    latent -> 16x16 (64 channels) -> 32x32 -> 64x64 -> output
-    """
+    """Transposed CNN decoder that reconstructs images from latent space."""
 
     def __init__(
         self,
@@ -563,44 +327,40 @@ class Decoder(nn.Module):
         self.output_shape = output_shape
         c, h, w = output_shape
 
-        # Start from 16x16 spatial size (matches encoder output)
-        self.h_conv = 16
-        self.w_conv = 16
-        self.conv_channels = 64  # Match encoder output channels
+        # Compute the intermediate spatial dimensions
+        # These match the encoder's conv output before flattening
+        # For 64x64 input: conv1(8,4) -> 15, conv2(4,2) -> 6, conv3(3,1) -> 4
+        self.h_conv = 4
+        self.w_conv = 4
+        self.conv_channels = 64
 
-        # Project latent to conv feature size with residual MLP
-        flat_size = self.conv_channels * self.h_conv * self.w_conv  # 64 * 16 * 16 = 16384
+        # Project latent to conv feature size with LayerNorm and Dropout
         self.fc = nn.Sequential(
             _layer_init(nn.Linear(latent_dim, latent_dim * 2)),
             nn.LayerNorm(latent_dim * 2),
             nn.GELU(),
             nn.Dropout(dropout),
-            ResidualMLPBlock(latent_dim * 2, dropout),
-            _layer_init(nn.Linear(latent_dim * 2, flat_size)),
-            nn.LayerNorm(flat_size),
+            _layer_init(nn.Linear(latent_dim * 2, self.conv_channels * self.h_conv * self.w_conv)),
+            nn.LayerNorm(self.conv_channels * self.h_conv * self.w_conv),
             nn.GELU(),
         )
 
-        # Stage 1: 16x16 -> 32x32, 64 -> 64 channels
-        self.stage1 = nn.Sequential(
-            ResNetUpsampleBlock(64, 64, upsample=True, dropout=dropout),  # upsample
-            ResNetUpsampleBlock(64, 64, upsample=False, dropout=dropout),
-        )
-
-        # Stage 2: 32x32 -> 64x64, 64 -> 32 channels
-        self.stage2 = nn.Sequential(
-            ResNetUpsampleBlock(64, 32, upsample=True, dropout=dropout),  # upsample
-            ResNetUpsampleBlock(32, 32, upsample=False, dropout=dropout),
-        )
-
-        # Final output: 64x64, 32 -> C channels
-        self.final_norm = nn.GroupNorm(8, 32)
-        self.output = nn.Sequential(
-            _layer_init(nn.Conv2d(32, 32, kernel_size=3, padding=1)),
+        # Transposed convolutions with GroupNorm and Dropout (reverse of encoder)
+        self.deconv = nn.Sequential(
+            # Reverse of conv3: 4 -> 6
+            _layer_init(nn.ConvTranspose2d(64, 64, kernel_size=3, stride=1)),
+            nn.GroupNorm(8, 64),
+            nn.GELU(),
+            nn.Dropout2d(dropout),
+            # Reverse of conv2: 6 -> 15  (kernel=4, stride=2 gives output_size = (6-1)*2 + 4 = 14)
+            # Adjust to get to 15
+            _layer_init(nn.ConvTranspose2d(64, 32, kernel_size=4, stride=2, output_padding=1)),
             nn.GroupNorm(8, 32),
             nn.GELU(),
             nn.Dropout2d(dropout),
-            _layer_init(nn.Conv2d(32, c, kernel_size=3, padding=1)),
+            # Reverse of conv1: 15 -> 64 (kernel=8, stride=4 gives output_size = (15-1)*4 + 8 = 64)
+            # No dropout/norm before final sigmoid
+            _layer_init(nn.ConvTranspose2d(32, c, kernel_size=8, stride=4)),
             nn.Sigmoid(),  # Output in [0, 1] range
         )
 
@@ -619,14 +379,8 @@ class Decoder(nn.Module):
         h = self.fc(z)
         h = h.view(batch_size, self.conv_channels, self.h_conv, self.w_conv)
 
-        # Decode through ResNet stages
-        h = self.stage1(h)
-        h = self.stage2(h)
-
-        # Final output
-        h = self.final_norm(h)
-        h = F.gelu(h)
-        return self.output(h)
+        # Decode through transposed convolutions
+        return self.deconv(h)
 
 
 # =============================================================================
@@ -714,12 +468,6 @@ class DreamerModel(nn.Module):
     During training:
     - World model is trained on real experience (reconstruction + dynamics)
     - Actor-Critic is trained on imagined trajectories
-
-    Architecture improvements:
-    - Dropout everywhere for regularization
-    - LayerNorm/GroupNorm for stable gradients
-    - Residual connections for gradient flow
-    - Deeper CNN with 3x3 kernels and MaxPool
     """
 
     def __init__(
@@ -778,7 +526,7 @@ class DreamerModel(nn.Module):
             reward: Predicted reward (batch,)
             done: Predicted done probability (batch,)
         """
-        z_next, _, _ = self.dynamics(z, actions, h)
+        z_next, _, _, _ = self.dynamics(z, actions, h)
         reward = self.reward_pred(z_next)
         done = self.done_pred(z_next)
         return z_next, reward, done
@@ -799,9 +547,6 @@ class DreamerModel(nn.Module):
             rewards: Predicted rewards (batch, horizon)
             dones: Predicted dones (batch, horizon)
         """
-        batch_size = z_start.shape[0]
-        device = z_start.device
-
         z_traj = [z_start]
         rewards = []
         dones = []
@@ -816,7 +561,7 @@ class DreamerModel(nn.Module):
             action = action_dist.sample()
 
             # Imagine step
-            z_next, h, _ = self.dynamics(z, action, h)
+            z_next, h, _, _ = self.dynamics(z, action, h)
             reward = self.reward_pred(z_next)
             done = self.done_pred(z_next)
 

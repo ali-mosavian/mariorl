@@ -201,6 +201,61 @@ class DreamerMetrics(CommonMetrics):
 
 
 # =============================================================================
+# MuZero-Specific Metrics
+# =============================================================================
+
+
+class MuZeroMetrics(CommonMetrics):
+    """MuZero-specific metrics (extends CommonMetrics)."""
+
+    # Total loss
+    LOSS = MetricDef("loss", MetricType.ROLLING)
+    GRAD_NORM = MetricDef("grad_norm", MetricType.ROLLING)
+
+    # MuZero loss components
+    POLICY_LOSS = MetricDef("policy_loss", MetricType.ROLLING)
+    VALUE_LOSS = MetricDef("value_loss", MetricType.ROLLING)
+    REWARD_LOSS = MetricDef("reward_loss", MetricType.ROLLING)
+
+    # Latent grounding losses
+    CONSISTENCY_LOSS = MetricDef("consistency_loss", MetricType.ROLLING)
+    CONTRASTIVE_LOSS = MetricDef("contrastive_loss", MetricType.ROLLING)
+
+    # Value estimates
+    VALUE_PRED_MEAN = MetricDef("value_pred_mean", MetricType.ROLLING)
+    VALUE_TARGET_MEAN = MetricDef("value_target_mean", MetricType.ROLLING)
+
+    # Entropy (for action selection)
+    ENTROPY = MetricDef("entropy", MetricType.ROLLING)
+
+    # Action tracking
+    ACTION_ENTROPY = MetricDef("action_entropy", MetricType.GAUGE)
+    ACTION_DIST = MetricDef("action_dist", MetricType.TEXT)
+
+    # Buffer
+    BUFFER_SIZE = MetricDef("buffer_size", MetricType.GAUGE)
+
+    @classmethod
+    def definitions(cls) -> list[MetricDef]:
+        """Return list of all MuZero metric definitions."""
+        return super().definitions() + [
+            cls.LOSS,
+            cls.GRAD_NORM,
+            cls.POLICY_LOSS,
+            cls.VALUE_LOSS,
+            cls.REWARD_LOSS,
+            cls.CONSISTENCY_LOSS,
+            cls.CONTRASTIVE_LOSS,
+            cls.VALUE_PRED_MEAN,
+            cls.VALUE_TARGET_MEAN,
+            cls.ENTROPY,
+            cls.ACTION_ENTROPY,
+            cls.ACTION_DIST,
+            cls.BUFFER_SIZE,
+        ]
+
+
+# =============================================================================
 # Coordinator Metrics
 # =============================================================================
 

@@ -63,6 +63,14 @@ class RatePoint:
         return (self.flags / self.episodes * 100) if self.episodes > 0 else 0
 
 
+@dataclass
+class DeathDistPoint:
+    """Death distribution by position at a single time point."""
+
+    steps: int
+    position_counts: dict[int, int]  # bucket -> count
+
+
 def level_sort_key(level: str) -> tuple[int, int]:
     """Sort key for level names like '1-1', '2-3', etc."""
     try:
@@ -101,8 +109,10 @@ def aggregate_level_stats_direct(checkpoint_dir: str) -> dict[str, LevelStats]:
     flags_expr = "SUM(COALESCE(flags, 0))" if "flags" in columns else "0"
     speed_expr = "speed" if "speed" in columns else "0"
 
-    # Build best_x expression dynamically from available columns
-    best_x_cols = [c for c in ["best_x_ever", "best_x", "x_pos"] if c in columns]
+    # Build best_x expression - prefer x_pos (episode-specific) over best_x_ever (global cumulative)
+    # x_pos is the X position at end of episode, which is level-specific
+    # best_x_ever is a running max across ALL levels, so not useful for per-level stats
+    best_x_cols = [c for c in ["x_pos", "best_x"] if c in columns]
     if best_x_cols:
         coalesce_expr = f"COALESCE({', '.join(best_x_cols)}, 0)"
         best_x_expr = f"MAX(CASE WHEN {coalesce_expr} <= {MAX_VALID_X_POS} THEN {coalesce_expr} ELSE 0 END)"
@@ -381,6 +391,161 @@ def aggregate_death_hotspots_direct(checkpoint_dir: str) -> dict[str, dict[int, 
     return hotspots
 
 
+def aggregate_death_distribution_direct(
+    checkpoint_dir: str,
+    step_bucket_size: int = 50000,
+    pos_bucket_size: int = 100,
+) -> dict[str, list[DeathDistPoint]]:
+    """Aggregate death position distribution over time directly from files.
+    
+    Args:
+        checkpoint_dir: Path to checkpoint directory.
+        step_bucket_size: Size of time buckets in steps.
+        pos_bucket_size: Size of position buckets in pixels.
+    
+    Returns:
+        Dict mapping level to list of DeathDistPoint (sorted by steps).
+    """
+    try:
+        columns = query_workers(checkpoint_dir, "SELECT * FROM workers LIMIT 0").columns
+    except Exception:
+        return {}
+
+    if "death_positions" not in columns:
+        return {}
+
+    try:
+        result = query_workers(
+            checkpoint_dir,
+            f"""
+            WITH parsed AS (
+                SELECT 
+                    split_part(CAST(death_positions AS VARCHAR), ':', 1) AS level,
+                    split_part(CAST(death_positions AS VARCHAR), ':', 2) AS positions_str,
+                    (steps // {step_bucket_size}) * {step_bucket_size} AS step_bucket
+                FROM workers
+                WHERE death_positions IS NOT NULL 
+                  AND CAST(death_positions AS VARCHAR) != ''
+                  AND CAST(death_positions AS VARCHAR) LIKE '%:%'
+            ),
+            exploded AS (
+                SELECT 
+                    level,
+                    step_bucket,
+                    CAST(TRIM(unnest(string_split(positions_str, ','))) AS INTEGER) AS pos
+                FROM parsed
+                WHERE positions_str IS NOT NULL AND positions_str != ''
+            )
+            SELECT 
+                level,
+                step_bucket,
+                (pos // {pos_bucket_size}) * {pos_bucket_size} AS pos_bucket,
+                COUNT(*) AS count
+            FROM exploded
+            WHERE pos IS NOT NULL 
+              AND pos > 0 
+              AND pos <= {MAX_VALID_X_POS}
+            GROUP BY level, step_bucket, pos_bucket
+            ORDER BY level, step_bucket, pos_bucket
+        """,
+        ).df()
+    except Exception:
+        return {}
+
+    # Group by level and step_bucket to create DeathDistPoints
+    death_data: dict[str, list[DeathDistPoint]] = {}
+    
+    for level in result["level"].unique():
+        level_df = result[result["level"] == level]
+        level = str(level)
+        death_data[level] = []
+        
+        for step_bucket in sorted(level_df["step_bucket"].unique()):
+            bucket_df = level_df[level_df["step_bucket"] == step_bucket]
+            position_counts = dict(zip(
+                bucket_df["pos_bucket"].astype(int),
+                bucket_df["count"].astype(int),
+            ))
+            death_data[level].append(DeathDistPoint(
+                steps=int(step_bucket),
+                position_counts=position_counts,
+            ))
+
+    return death_data
+
+
+def aggregate_death_distribution(
+    workers: dict[int, pd.DataFrame],
+    step_bucket_size: int = 50000,
+    pos_bucket_size: int = 100,
+) -> dict[str, list[DeathDistPoint]]:
+    """Aggregate death position distribution over time from DataFrames."""
+    if not workers:
+        return {}
+
+    all_dfs = [df for df in workers.values() if len(df) > 0 and "death_positions" in df.columns]
+    if not all_dfs:
+        return {}
+
+    combined = pd.concat(all_dfs, ignore_index=True)
+
+    if "death_positions" not in combined.columns:
+        return {}
+
+    result = duckdb.sql(f"""
+        WITH parsed AS (
+            SELECT 
+                split_part(CAST(death_positions AS VARCHAR), ':', 1) AS level,
+                split_part(CAST(death_positions AS VARCHAR), ':', 2) AS positions_str,
+                (steps // {step_bucket_size}) * {step_bucket_size} AS step_bucket
+            FROM combined
+            WHERE death_positions IS NOT NULL 
+              AND CAST(death_positions AS VARCHAR) != ''
+              AND CAST(death_positions AS VARCHAR) LIKE '%:%'
+        ),
+        exploded AS (
+            SELECT 
+                level,
+                step_bucket,
+                CAST(TRIM(unnest(string_split(positions_str, ','))) AS INTEGER) AS pos
+            FROM parsed
+            WHERE positions_str IS NOT NULL AND positions_str != ''
+        )
+        SELECT 
+            level,
+            step_bucket,
+            (pos // {pos_bucket_size}) * {pos_bucket_size} AS pos_bucket,
+            COUNT(*) AS count
+        FROM exploded
+        WHERE pos IS NOT NULL 
+          AND pos > 0 
+          AND pos <= {MAX_VALID_X_POS}
+        GROUP BY level, step_bucket, pos_bucket
+        ORDER BY level, step_bucket, pos_bucket
+    """).df()
+
+    # Group by level and step_bucket to create DeathDistPoints
+    death_data: dict[str, list[DeathDistPoint]] = {}
+    
+    for level in result["level"].unique():
+        level_df = result[result["level"] == level]
+        level = str(level)
+        death_data[level] = []
+        
+        for step_bucket in sorted(level_df["step_bucket"].unique()):
+            bucket_df = level_df[level_df["step_bucket"] == step_bucket]
+            position_counts = dict(zip(
+                bucket_df["pos_bucket"].astype(int),
+                bucket_df["count"].astype(int),
+            ))
+            death_data[level].append(DeathDistPoint(
+                steps=int(step_bucket),
+                position_counts=position_counts,
+            ))
+
+    return death_data
+
+
 def sample_data(data: list, max_points: int = 30) -> list:
     """Sample data points evenly for visualization."""
     if len(data) <= max_points:
@@ -414,8 +579,10 @@ def aggregate_level_stats(workers: dict[int, pd.DataFrame]) -> dict[str, LevelSt
     flags_expr = "SUM(COALESCE(flags, 0))" if "flags" in columns else "0"
     speed_expr = "speed" if "speed" in columns else "0"
 
-    # Build best_x expression dynamically from available columns
-    best_x_cols = [c for c in ["best_x_ever", "best_x", "x_pos"] if c in columns]
+    # Build best_x expression - prefer x_pos (episode-specific) over best_x_ever (global cumulative)
+    # x_pos is the X position at end of episode, which is level-specific
+    # best_x_ever is a running max across ALL levels, so not useful for per-level stats
+    best_x_cols = [c for c in ["x_pos", "best_x"] if c in columns]
     if best_x_cols:
         coalesce_expr = f"COALESCE({', '.join(best_x_cols)}, 0)"
         best_x_expr = f"MAX(CASE WHEN {coalesce_expr} <= {MAX_VALID_X_POS} THEN {coalesce_expr} ELSE 0 END)"

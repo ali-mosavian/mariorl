@@ -202,6 +202,9 @@ class TrainingUI:
                     if "last_heartbeat" in old_data and "last_heartbeat" not in new_data:
                         new_data["last_heartbeat"] = old_data["last_heartbeat"]
                     self.worker_statuses[msg.source_id] = new_data
+                    # Debug: log when worker status is received
+                    if "x_pos" in new_data:
+                        self._add_log(f"[DEBUG] W{msg.source_id} x={new_data.get('x_pos', 0)}")
 
                     # Track global convergence metrics when episode ends
                     # Support both old (episode) and new (episodes) field names
