@@ -60,7 +60,8 @@ def load_coordinator_metrics(checkpoint_dir: str) -> pd.DataFrame | None:
             start_time = df["timestamp"].iloc[0]
             df["elapsed_min"] = (df["timestamp"] - start_time) / 60.0
         return df
-    except Exception:
+    except Exception as e:
+        st.error(f"Error loading coordinator metrics: {e}")
         return None
 
 
@@ -114,7 +115,8 @@ def load_worker_metrics(checkpoint_dir: str) -> dict[int, pd.DataFrame]:
                 workers[int(worker_id)] = worker_df
 
         return workers
-    except Exception:
+    except Exception as e:
+        st.error(f"Error loading worker metrics: {e}")
         return {}
 
 

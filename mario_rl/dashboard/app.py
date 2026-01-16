@@ -49,7 +49,14 @@ def render_sidebar() -> tuple[str, int]:
     with st.sidebar:
         st.header("Settings")
 
-        checkpoints = list_checkpoints()
+        # Base directory for checkpoints
+        base_dir = st.text_input(
+            "Checkpoints folder",
+            value="checkpoints",
+            help="Base directory containing checkpoint folders",
+        )
+
+        checkpoints = list_checkpoints(base_dir)
         if checkpoints:
             # Format display names: show just the directory name for cleaner UI
             display_names = [Path(cp).name for cp in checkpoints]
@@ -62,12 +69,8 @@ def render_sidebar() -> tuple[str, int]:
             )
             checkpoint_dir = checkpoints[selected_idx]
         else:
-            # Fallback to text input if no checkpoints found
-            checkpoint_dir = st.text_input(
-                "Checkpoint",
-                value="checkpoints/",
-                help="No checkpoints found. Enter path manually.",
-            )
+            st.warning(f"No checkpoints found in {base_dir}")
+            checkpoint_dir = base_dir
 
         refresh_sec = st.slider("Refresh interval (sec)", 2, 30, 5)
 

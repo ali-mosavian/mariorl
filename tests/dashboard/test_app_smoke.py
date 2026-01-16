@@ -83,11 +83,11 @@ class TestDashboardImports:
     def test_import_data_loaders(self) -> None:
         """Data loaders module should import successfully."""
         from mario_rl.dashboard.data_loaders import (
-            find_latest_checkpoint,
+            list_checkpoints,
             load_coordinator_metrics,
             load_worker_metrics,
         )
-        assert find_latest_checkpoint is not None
+        assert list_checkpoints is not None
         assert load_coordinator_metrics is not None
         assert load_worker_metrics is not None
 
@@ -127,8 +127,8 @@ class TestDashboardAppTest:
     def test_dashboard_loads_without_checkpoint(self) -> None:
         """Dashboard should load and show 'no checkpoint' message."""
         with patch(
-            "mario_rl.dashboard.data_loaders.find_latest_checkpoint",
-            return_value=None,
+            "mario_rl.dashboard.data_loaders.list_checkpoints",
+            return_value=[],
         ):
             at = AppTest.from_file("scripts/training_dashboard.py", default_timeout=10)
             at.run()
@@ -143,8 +143,8 @@ class TestDashboardAppTest:
     ) -> None:
         """Dashboard should load successfully with mock data."""
         with patch(
-            "mario_rl.dashboard.data_loaders.find_latest_checkpoint",
-            return_value="/mock/checkpoint",
+            "mario_rl.dashboard.data_loaders.list_checkpoints",
+            return_value=["/mock/checkpoint"],
         ), patch(
             "mario_rl.dashboard.data_loaders.load_worker_metrics",
             return_value=mock_worker_data,
@@ -168,8 +168,8 @@ class TestDashboardAppTest:
     ) -> None:
         """Dashboard should have multiple tabs."""
         with patch(
-            "mario_rl.dashboard.data_loaders.find_latest_checkpoint",
-            return_value="/mock/checkpoint",
+            "mario_rl.dashboard.data_loaders.list_checkpoints",
+            return_value=["/mock/checkpoint"],
         ), patch(
             "mario_rl.dashboard.data_loaders.load_worker_metrics",
             return_value=mock_worker_data,
@@ -199,8 +199,8 @@ class TestErrorHandling:
     def test_handles_empty_worker_data(self) -> None:
         """Dashboard should handle empty worker data without crashing."""
         with patch(
-            "mario_rl.dashboard.data_loaders.find_latest_checkpoint",
-            return_value="/mock/checkpoint",
+            "mario_rl.dashboard.data_loaders.list_checkpoints",
+            return_value=["/mock/checkpoint"],
         ), patch(
             "mario_rl.dashboard.data_loaders.load_worker_metrics",
             return_value={},
@@ -228,8 +228,8 @@ class TestErrorHandling:
         }
         
         with patch(
-            "mario_rl.dashboard.data_loaders.find_latest_checkpoint",
-            return_value="/mock/checkpoint",
+            "mario_rl.dashboard.data_loaders.list_checkpoints",
+            return_value=["/mock/checkpoint"],
         ), patch(
             "mario_rl.dashboard.data_loaders.load_worker_metrics",
             return_value=minimal_data,
