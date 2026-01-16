@@ -24,6 +24,8 @@ dependencies = [
     "pyzmq>=25.0.0", # ZeroMQ for non-blocking event messaging
     "msgpack>=1.0.0", # Fast binary serialization for events
     "duckdb>=1.4.3",
+    "scikit-learn>=1.8.0",
+    "opencv-python>=4.11.0.86",
 ]
 
 [project.optional-dependencies]
