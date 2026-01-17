@@ -153,12 +153,12 @@ def render_dashboard_content(checkpoint_dir: str, refresh_sec: int) -> None:
     with tab3:
         @st.fragment(run_every=refresh_sec)
         def levels_fragment():
-            load_worker_metrics.clear()
+            # Levels tab uses cached direct queries (TTL=5s), so just let cache expire
+            # Clear death hotspots JSON loader
             load_death_hotspots.clear()
-            workers = load_worker_metrics(checkpoint_dir)
             death_hotspots = load_death_hotspots(checkpoint_dir)
             st.caption(f"🔄 {datetime.now().strftime('%H:%M:%S')}")
-            render_levels_tab(workers, death_hotspots)
+            render_levels_tab(checkpoint_dir, death_hotspots)
         levels_fragment()
 
     with tab4:

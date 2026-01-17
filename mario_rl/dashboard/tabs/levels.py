@@ -15,11 +15,11 @@ from mario_rl.dashboard.chart_helpers import (
 from mario_rl.dashboard.aggregators import (
     DeathDistPoint,
     LevelStats,
-    aggregate_death_distribution,
-    aggregate_level_stats,
-    aggregate_action_distribution,
-    aggregate_rate_data,
-    aggregate_death_hotspots_from_csv,
+    aggregate_level_stats_direct,
+    aggregate_action_distribution_direct,
+    aggregate_rate_data_direct,
+    aggregate_death_distribution_direct,
+    aggregate_death_hotspots_direct,
     level_sort_key,
     sample_data,
 )
@@ -29,21 +29,49 @@ from mario_rl.dashboard.aggregators import (
 ACTION_NAMES = ["NOOP", "→", "→A", "→B", "→AB", "A", "←"]
 
 
+# Cached aggregation functions - query files directly via DuckDB
+@st.cache_data(ttl=5)
+def _cached_level_stats(checkpoint_dir: str) -> dict[str, LevelStats]:
+    return aggregate_level_stats_direct(checkpoint_dir)
+
+
+@st.cache_data(ttl=5)
+def _cached_action_distribution(checkpoint_dir: str) -> dict[str, list]:
+    return aggregate_action_distribution_direct(checkpoint_dir)
+
+
+@st.cache_data(ttl=5)
+def _cached_rate_data(checkpoint_dir: str) -> dict[str, list]:
+    return aggregate_rate_data_direct(checkpoint_dir)
+
+
+@st.cache_data(ttl=5)
+def _cached_death_distribution(checkpoint_dir: str) -> dict[str, list[DeathDistPoint]]:
+    return aggregate_death_distribution_direct(checkpoint_dir)
+
+
+@st.cache_data(ttl=5)
+def _cached_death_hotspots(checkpoint_dir: str) -> dict[str, dict[int, int]]:
+    return aggregate_death_hotspots_direct(checkpoint_dir)
+
+
 def render_levels_tab(
-    workers: dict[int, pd.DataFrame],
+    checkpoint_dir: str,
     death_hotspots: dict[str, dict[int, int]] | None,
 ) -> None:
-    """Render levels tab with death hotspot visualization."""
+    """Render levels tab with death hotspot visualization.
     
-    # Aggregate all data
-    level_stats = aggregate_level_stats(workers)
-    action_data = aggregate_action_distribution(workers)
-    rate_data = aggregate_rate_data(workers)
-    death_dist_data = aggregate_death_distribution(workers)
+    Uses cached direct queries to DuckDB for optimal performance.
+    """
+    # Aggregate all data using cached direct queries
+    level_stats = _cached_level_stats(checkpoint_dir)
+    action_data = _cached_action_distribution(checkpoint_dir)
+    rate_data = _cached_rate_data(checkpoint_dir)
+    death_dist_data = _cached_death_distribution(checkpoint_dir)
     
     # Get death hotspots from CSV if not provided (for summary table)
     if death_hotspots is None or len(death_hotspots) == 0:
-        death_hotspots = aggregate_death_hotspots_from_csv(workers)
+        death_hotspots = _cached_death_hotspots(checkpoint_dir)
     
     if not level_stats:
         st.info("⏳ Waiting for level data...")

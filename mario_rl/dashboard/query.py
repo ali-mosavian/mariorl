@@ -122,7 +122,15 @@ def query_workers(checkpoint_dir: str, sql: str) -> duckdb.DuckDBPyRelation:
     union_query = " UNION ALL ".join(sources)
     
     # Wrap user query with workers CTE
-    full_query = f"WITH workers AS ({union_query})\n{sql}"
+    # Handle case where user query also starts with WITH (merge CTEs)
+    sql_stripped = sql.strip()
+    if sql_stripped.upper().startswith("WITH "):
+        # Merge CTEs: WITH workers AS (...), user_ctes ... user_query
+        # Find the part after "WITH " in the user query
+        user_ctes = sql_stripped[5:]  # Remove "WITH "
+        full_query = f"WITH workers AS ({union_query}),\n{user_ctes}"
+    else:
+        full_query = f"WITH workers AS ({union_query})\n{sql}"
     
     return duckdb.sql(full_query)
 
