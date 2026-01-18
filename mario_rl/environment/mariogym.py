@@ -6,7 +6,7 @@ Uses the reward shaping from our forked gym-super-mario-bros:
 - progress:       +0.5/pixel  Bonus for new forward progress
 - momentum:       scales      Bonus for sustained speed
 - powerup_loss:   -15.0       Penalty for losing powerup
-- death:          -50.0       Heavy penalty
+- death:          -500.0      Heavy penalty (increased from -25 to improve death learning)
 - flag:           +100.0      Ultimate goal
 """
 from typing import List
