@@ -205,14 +205,24 @@ class SnapshotMarioEnvironment:
             self.env.base_env.env._done = False
             # Record the death position for hotspot learning (even though we restored)
             info["death_position"] = info.get("x_pos", 0)
+            # CRITICAL: Mark this as an actual death for the learner's TD target calculation
+            # Even though the episode continues (done=False), the learner should treat this
+            # transition as terminal for Q-value computation
+            info["actual_death"] = True
             return result.observation, reward, False, False, info
 
         if result.episode_ended:
             # Handler decided to end episode (too many failed restores)
             self._current_obs = obs
+            # Mark as actual death for TD target calculation
+            info["actual_death"] = True
             return obs, reward, True, False, info
 
-        # Normal step
+        # Normal step - check if this was a death
+        if terminated and reward < 0:
+            # Normal death without snapshot restore - mark for TD target
+            info["actual_death"] = True
+        
         self._current_obs = obs
         return obs, reward, terminated, truncated, info
 

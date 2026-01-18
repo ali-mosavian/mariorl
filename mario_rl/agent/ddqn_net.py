@@ -76,10 +76,9 @@ class DDQNBackbone(nn.Module):
     - LayerNorm after flatten (stabilizes training)
     - Orthogonal initialization
     
-    Optional action history input:
-    - If action_history_dim > 0, expects flattened action history as second input
-    - Action history is concatenated with visual features before the final FC layer
-    - This helps the network understand action effects (e.g., "I pressed jump last frame")
+    Optional auxiliary inputs:
+    - action_history: Flattened one-hot previous actions (temporal context)
+    These are concatenated with visual features before the final FC layer.
     """
 
     def __init__(
@@ -110,7 +109,7 @@ class DDQNBackbone(nn.Module):
         self.layer_norm = nn.LayerNorm(flat_size)
 
         # Feature projection with orthogonal init
-        # If action history is used, concatenate it before the FC layer
+        # Auxiliary inputs (action_history) are concatenated before FC
         fc_input_dim = flat_size + action_history_dim
         self.fc = layer_init(nn.Linear(fc_input_dim, feature_dim))
         self.feature_dim = feature_dim
@@ -120,7 +119,11 @@ class DDQNBackbone(nn.Module):
         self.conv_dropout = nn.Dropout2d(dropout) if dropout > 0 else nn.Identity()
         self.fc_dropout = nn.Dropout(dropout) if dropout > 0 else nn.Identity()
 
-    def forward(self, x: torch.Tensor, action_history: torch.Tensor | None = None) -> torch.Tensor:
+    def forward(
+        self,
+        x: torch.Tensor,
+        action_history: torch.Tensor | None = None,
+    ) -> torch.Tensor:
         x = torch.nn.functional.gelu(self.conv1(x))
         x = self.conv_dropout(x)
         x = torch.nn.functional.gelu(self.conv2(x))
@@ -132,15 +135,12 @@ class DDQNBackbone(nn.Module):
         
         # Concatenate action history if provided
         if action_history is not None:
-            # Flatten action history: (N, history_len, num_actions) -> (N, history_len * num_actions)
+            # Flatten: (N, history_len, num_actions) -> (N, history_len * num_actions)
             if action_history.dim() == 3:
                 action_history = action_history.flatten(1)
             x = torch.cat([x, action_history], dim=1)
         elif self.action_history_dim > 0:
-            # If network expects action history but none provided, use zeros
-            batch_size = x.shape[0]
-            zeros = torch.zeros(batch_size, self.action_history_dim, device=x.device)
-            x = torch.cat([x, zeros], dim=1)
+            x = torch.cat([x, torch.zeros(x.shape[0], self.action_history_dim, device=x.device)], dim=1)
         
         x = torch.nn.functional.gelu(self.fc(x))
         return x
@@ -193,6 +193,7 @@ class DDQNNet(nn.Module):
     - GELU activation, LayerNorm, Dropout, Orthogonal init
     - Raw linear Q-value output (unbounded)
     - Optional action history input for temporal context
+    - Optional auxiliary danger prediction head
     """
 
     def __init__(
@@ -203,6 +204,7 @@ class DDQNNet(nn.Module):
         hidden_dim: int = 256,
         dropout: float = 0.1,
         action_history_len: int = 4,
+        danger_prediction_bins: int = 16,
     ):
         """
         Args:
@@ -214,22 +216,38 @@ class DDQNNet(nn.Module):
             action_history_len: Length of action history to use (0 = disabled).
                                When enabled, expects action_history tensor of shape
                                (N, action_history_len, num_actions) as second input.
+            danger_prediction_bins: Number of bins for danger prediction auxiliary task (0 = disabled).
+                                   When enabled, network predicts danger probability for each bin.
         """
         super().__init__()
         self.action_history_len = action_history_len
+        self.danger_prediction_bins = danger_prediction_bins
         self.num_actions = num_actions
         
         # Calculate action history dimension (flattened one-hot)
         action_history_dim = action_history_len * num_actions if action_history_len > 0 else 0
         
-        self.backbone = DDQNBackbone(input_shape, feature_dim, dropout, action_history_dim)
+        self.backbone = DDQNBackbone(
+            input_shape, feature_dim, dropout, action_history_dim
+        )
         self.head = DuelingHead(feature_dim, num_actions, hidden_dim)
+        
+        # Auxiliary danger prediction head (predicts danger probability per distance bin)
+        if danger_prediction_bins > 0:
+            self.danger_head = nn.Sequential(
+                layer_init(nn.Linear(feature_dim, hidden_dim)),
+                nn.GELU(),
+                layer_init(nn.Linear(hidden_dim, danger_prediction_bins), std=0.01),
+            )
+        else:
+            self.danger_head = None
 
     def forward(
         self,
         x: torch.Tensor,
         action_history: torch.Tensor | None = None,
-    ) -> torch.Tensor:
+        return_danger: bool = False,
+    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         """
         Forward pass returning Q-values for all actions.
 
@@ -237,14 +255,19 @@ class DDQNNet(nn.Module):
             x: Observation tensor (N, C, H, W) where C is frame stack
             action_history: Optional action history tensor (N, history_len, num_actions)
                            One-hot encoded previous actions.
+            return_danger: If True, also return danger predictions.
 
         Returns:
             q_values: Q-values for each action (N, num_actions)
+            danger_pred: (if return_danger=True) Danger predictions (N, danger_bins)
         """
         features = self.backbone(x, action_history)
         q_values = self.head(features)
 
-        # Raw linear output (no activation)
+        if return_danger and self.danger_head is not None:
+            danger_pred = torch.sigmoid(self.danger_head(features))
+            return q_values, danger_pred
+        
         return q_values
 
     def get_action(
@@ -292,6 +315,7 @@ class DoubleDQN(nn.Module):
     Features:
     - Raw linear Q-value output (unbounded)
     - Optional action history input for temporal context
+    - Optional auxiliary danger prediction head
     """
 
     def __init__(
@@ -302,16 +326,20 @@ class DoubleDQN(nn.Module):
         hidden_dim: int = 256,
         dropout: float = 0.1,
         action_history_len: int = 4,
+        danger_prediction_bins: int = 16,
     ):
         super().__init__()
         self.online = DDQNNet(
-            input_shape, num_actions, feature_dim, hidden_dim, dropout, action_history_len
+            input_shape, num_actions, feature_dim, hidden_dim, dropout,
+            action_history_len, danger_prediction_bins
         )
         self.target = DDQNNet(
-            input_shape, num_actions, feature_dim, hidden_dim, dropout, action_history_len
+            input_shape, num_actions, feature_dim, hidden_dim, dropout,
+            action_history_len, danger_prediction_bins
         )
         self.num_actions = num_actions
         self.action_history_len = action_history_len
+        self.danger_prediction_bins = danger_prediction_bins
 
         # Copy online weights to target and freeze target
         self.sync_target()
@@ -321,7 +349,8 @@ class DoubleDQN(nn.Module):
         x: torch.Tensor,
         network: str = "online",
         action_history: torch.Tensor | None = None,
-    ) -> torch.Tensor:
+        return_danger: bool = False,
+    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         """
         Forward pass through specified network.
 
@@ -329,14 +358,16 @@ class DoubleDQN(nn.Module):
             x: Observation tensor (N, C, H, W)
             network: "online" or "target"
             action_history: Optional action history tensor (N, history_len, num_actions)
+            return_danger: If True, also return danger predictions (online only)
 
         Returns:
             q_values: Q-values for each action (N, num_actions)
+            danger_pred: (if return_danger=True) Danger predictions (N, danger_bins)
         """
         if network == "online":
-            return self.online(x, action_history)
+            return self.online(x, action_history, return_danger)
         elif network == "target":
-            return self.target(x, action_history)
+            return self.target(x, action_history, return_danger=False)
         raise ValueError(f"Unknown network: {network}")
 
     def get_action(

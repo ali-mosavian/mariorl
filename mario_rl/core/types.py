@@ -27,6 +27,8 @@ class Transition:
         max_x: Maximum X position reached (for quality scoring).
         action_history: One-hot encoded previous actions (history_len, num_actions).
         next_action_history: Action history for next state.
+        danger_target: Target for auxiliary danger prediction (num_bins,).
+                      Built from death positions relative to current x_pos.
     """
 
     state: np.ndarray
@@ -38,6 +40,7 @@ class Transition:
     max_x: int = 0
     action_history: np.ndarray | None = None
     next_action_history: np.ndarray | None = None
+    danger_target: np.ndarray | None = None
 
 
 @dataclass(frozen=True, slots=True)

@@ -35,6 +35,7 @@ class FrameData:
     chosen_action: int
     reward: float
     processed_frame: np.ndarray  # Single frame (64x64)
+    danger_pred: np.ndarray = field(default_factory=lambda: np.zeros(16))  # Danger predictions
     raw_frame: np.ndarray = field(default_factory=lambda: np.zeros((240, 256, 3), dtype=np.uint8))
 
 
@@ -68,15 +69,26 @@ def load_model(checkpoint_path: Path, device: str = "cuda") -> tuple[torch.nn.Mo
         # Expected flat_size for 64x64 input is 1024
         flat_size = 1024 if input_size == 64 else 3136
         extra = fc_input - flat_size
-        action_history_len = extra // 7 if extra > 0 else 0
+        
+        # action_history_len=4 with 7 actions -> extra=28
+        if extra >= 28:
+            action_history_len = 4
+        elif extra > 0 and extra % 7 == 0:
+            action_history_len = extra // 7
+    
+    # Detect danger_prediction_bins from danger_head
+    danger_key = "online.danger_head.2.weight"
+    danger_prediction_bins = 16 if danger_key in state_dict else 0
     
     print(f"  Input size: {input_size}x{input_size}")
     print(f"  Action history len: {action_history_len}")
+    print(f"  Danger prediction bins: {danger_prediction_bins}")
     
     model = DoubleDQN(
         input_shape=(4, input_size, input_size), 
         num_actions=7,
-        action_history_len=action_history_len
+        action_history_len=action_history_len,
+        danger_prediction_bins=danger_prediction_bins,
     )
     model.load_state_dict(state_dict)
     model.to(device)
@@ -107,7 +119,7 @@ def create_sequence_image(
     n_show = min(n_frames, 10)
     frames_to_show = frames[-n_show:]
     
-    fig = plt.figure(figsize=(20, 12))
+    fig = plt.figure(figsize=(20, 16))
     
     # Title
     last = frames_to_show[-1]
@@ -118,12 +130,14 @@ def create_sequence_image(
         fontsize=16, fontweight="bold", color=color
     )
     
-    # Grid: 3 rows
+    # Grid: 5 rows
     # Row 1: Processed frames
     # Row 2: Q-value bars for each frame
-    # Row 3: Q-value timeseries + action timeline
+    # Row 3: Danger predictions for each frame
+    # Row 4: Action timeline
+    # Row 5: Q-value timeseries
     
-    gs = gridspec.GridSpec(4, n_show, figure=fig, height_ratios=[1, 1.2, 0.3, 1], hspace=0.4, wspace=0.1)
+    gs = gridspec.GridSpec(5, n_show, figure=fig, height_ratios=[1, 1.2, 0.8, 0.3, 1], hspace=0.4, wspace=0.1)
     
     # Row 1: Processed frames
     for i, frame in enumerate(frames_to_show):
@@ -162,8 +176,42 @@ def create_sequence_image(
         q_range = frame.q_values.max() - frame.q_values.min()
         ax.set_xlabel(f"Q-range: {q_range:.2f}", fontsize=8)
     
-    # Row 3: Action timeline
-    ax_timeline = fig.add_subplot(gs[2, :])
+    # Row 3: Danger predictions for each frame
+    for i, frame in enumerate(frames_to_show):
+        ax = fig.add_subplot(gs[2, i])
+        
+        # Danger predictions: 4 bins behind (left), 12 bins ahead (right)
+        # Create bar plot with color based on danger level
+        bins = len(frame.danger_pred)
+        behind_bins = bins // 4
+        
+        colors = plt.cm.Reds(frame.danger_pred)
+        bars = ax.bar(range(bins), frame.danger_pred, color=colors, edgecolor="black", linewidth=0.5)
+        
+        # Mark the "current position" divider
+        ax.axvline(x=behind_bins - 0.5, color="blue", linestyle="--", linewidth=2, alpha=0.7)
+        
+        ax.set_ylim(0, 1)
+        ax.set_xlim(-0.5, bins - 0.5)
+        
+        if i == 0:
+            ax.set_ylabel("Danger", fontsize=9)
+            ax.set_yticks([0, 0.5, 1])
+        else:
+            ax.set_yticklabels([])
+            ax.set_yticks([])
+        
+        ax.set_xticks([])
+        
+        # Show max danger value
+        max_danger = frame.danger_pred.max()
+        ax.set_xlabel(f"max={max_danger:.2f}", fontsize=8)
+        
+        if i == n_show // 2:
+            ax.set_title("← Behind | Ahead →", fontsize=8)
+    
+    # Row 4: Action timeline
+    ax_timeline = fig.add_subplot(gs[3, :])
     for i, frame in enumerate(frames_to_show):
         ax_timeline.scatter(i, 0, c=[ACTION_COLORS[frame.chosen_action]], s=200, marker="s")
         ax_timeline.annotate(
@@ -178,8 +226,8 @@ def create_sequence_image(
     ax_timeline.set_yticks([])
     ax_timeline.set_title("Action Sequence", fontsize=10, fontweight="bold")
     
-    # Row 4: Q-value time series for all actions
-    ax_ts = fig.add_subplot(gs[3, :])
+    # Row 5: Q-value time series for all actions
+    ax_ts = fig.add_subplot(gs[4, :])
     steps = list(range(n_show))
     
     for action_idx in range(7):
@@ -227,7 +275,11 @@ def run_analysis(
     model, input_size, action_history_len = load_model(checkpoint_path, device)
     
     print(f"Creating environment for level {level[0]}-{level[1]}...")
-    mario_env = create_mario_env(level=level, render_frames=False, action_history_len=action_history_len)
+    mario_env = create_mario_env(
+        level=level, 
+        render_frames=False, 
+        action_history_len=action_history_len,
+    )
     env = mario_env.env
     
     all_events = []
@@ -253,15 +305,25 @@ def run_analysis(
         visited_stuck_positions: set[int] = set()  # Track where we've been stuck (rounded to 50)
         
         while step < max_steps:
-            # Get Q-values
+            # Get Q-values and danger predictions
             state_np = np.array(state) if hasattr(state, "__array__") else state
             with torch.no_grad():
                 state_t = torch.from_numpy(state_np.copy()).float().unsqueeze(0).to(device) / 255.0
+                
+                action_hist = None
+                
                 if action_history_len > 0 and "action_history" in info:
                     action_hist = torch.from_numpy(info["action_history"]).float().unsqueeze(0).to(device)
-                    q_values = model.online(state_t, action_hist).cpu().numpy()[0]
+                
+                # Get Q-values and danger predictions
+                result = model.online(state_t, action_hist, return_danger=True)
+                if isinstance(result, tuple):
+                    q_values, danger_pred = result
+                    q_values = q_values.cpu().numpy()[0]
+                    danger_pred = danger_pred.cpu().numpy()[0]
                 else:
-                    q_values = model.online(state_t).cpu().numpy()[0]
+                    q_values = result.cpu().numpy()[0]
+                    danger_pred = np.zeros(16)
             
             x_pos = info.get("x_pos", 0)
             y_pos = info.get("y_pos", 0)
@@ -297,6 +359,7 @@ def run_analysis(
                     chosen_action=action,
                     reward=0,
                     processed_frame=state_np.copy(),
+                    danger_pred=danger_pred.copy(),
                 )
                 frame_history.append(frame_data)
                 x_history.append(x_pos)

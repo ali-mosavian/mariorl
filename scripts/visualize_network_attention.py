@@ -46,12 +46,26 @@ def load_model(checkpoint_path: Path, device: str = "cuda"):
         fc_input = state_dict[fc_key].shape[1]
         flat_size = 1024 if input_size == 64 else 3136
         extra = fc_input - flat_size
-        action_history_len = extra // 7 if extra > 0 else 0
+        
+        # action_history_len=4 with 7 actions -> extra=28
+        if extra >= 28:
+            action_history_len = 4
+        elif extra > 0 and extra % 7 == 0:
+            action_history_len = extra // 7
+    
+    # Detect danger_prediction_bins from danger_head
+    danger_key = "online.danger_head.2.weight"
+    danger_prediction_bins = 16 if danger_key in state_dict else 0
+    
+    print(f"  Input size: {input_size}x{input_size}")
+    print(f"  Action history len: {action_history_len}")
+    print(f"  Danger prediction bins: {danger_prediction_bins}")
     
     model = DoubleDQN(
         input_shape=(4, input_size, input_size), 
         num_actions=7,
-        action_history_len=action_history_len
+        action_history_len=action_history_len,
+        danger_prediction_bins=danger_prediction_bins,
     )
     model.load_state_dict(state_dict)
     model.to(device)
@@ -63,10 +77,7 @@ def compute_saliency(model, state_tensor, action_idx, device, action_hist=None):
     """Compute saliency map: gradient of Q[action] w.r.t. input pixels."""
     state_tensor = state_tensor.clone().requires_grad_(True)
     
-    if action_hist is not None:
-        q_values = model.online(state_tensor, action_hist)
-    else:
-        q_values = model.online(state_tensor)
+    q_values = model.online(state_tensor, action_hist)
     q_action = q_values[0, action_idx]
     
     q_action.backward()
@@ -83,10 +94,7 @@ def compute_saliency_all_actions(model, state_tensor, device, action_hist=None):
     saliencies = []
     for action_idx in range(7):
         state_tensor = state_tensor.clone().detach().requires_grad_(True)
-        if action_hist is not None:
-            q_values = model.online(state_tensor, action_hist)
-        else:
-            q_values = model.online(state_tensor)
+        q_values = model.online(state_tensor, action_hist)
         q_action = q_values[0, action_idx]
         q_action.backward()
         saliency = state_tensor.grad.abs()[0].max(dim=0)[0]
@@ -164,11 +172,12 @@ def create_attention_visualization(
     chosen_action: int,
     x_pos: int,
     output_path: Path,
+    danger_pred: np.ndarray = None,
 ):
     """Create comprehensive visualization of network attention."""
     
-    fig = plt.figure(figsize=(20, 16))
-    gs = gridspec.GridSpec(4, 6, figure=fig, hspace=0.3, wspace=0.3)
+    fig = plt.figure(figsize=(20, 18))
+    gs = gridspec.GridSpec(5, 6, figure=fig, hspace=0.3, wspace=0.3, height_ratios=[1, 1, 1, 1, 0.8])
     
     fig.suptitle(
         f"Network Attention Analysis | X={x_pos} | "
@@ -233,6 +242,31 @@ def create_attention_visualization(
     ax.set_title("Q-Values", fontsize=11)
     ax.tick_params(axis="x", rotation=45)
     
+    # Row 5: Danger predictions
+    if danger_pred is not None and len(danger_pred) > 0:
+        ax = fig.add_subplot(gs[4, :])
+        bins = len(danger_pred)
+        behind_bins = bins // 4
+        
+        # Color bars based on danger level
+        colors = plt.cm.Reds(danger_pred)
+        bars = ax.bar(range(bins), danger_pred, color=colors, edgecolor="black", linewidth=0.5)
+        
+        # Mark the "current position" divider
+        ax.axvline(x=behind_bins - 0.5, color="blue", linestyle="--", linewidth=2, alpha=0.7, label="Mario's position")
+        
+        ax.set_ylim(0, 1.1)
+        ax.set_xlim(-0.5, bins - 0.5)
+        ax.set_ylabel("Danger Probability", fontsize=10)
+        ax.set_xlabel("Distance Bins (← Behind | Ahead →)", fontsize=10)
+        ax.set_title(f"Danger Prediction (max={danger_pred.max():.2f})", fontsize=11, fontweight="bold")
+        
+        # Add bin labels
+        bin_labels = [f"-{behind_bins - i}" for i in range(behind_bins)] + [f"+{i}" for i in range(bins - behind_bins)]
+        ax.set_xticks(range(bins))
+        ax.set_xticklabels(bin_labels, fontsize=8)
+        ax.legend(loc="upper right")
+    
     # Add Q-range annotation
     q_range = q_values.max() - q_values.min()
     ax.text(0.95, 0.95, f"Q-range: {q_range:.3f}", transform=ax.transAxes,
@@ -257,7 +291,11 @@ def run_analysis(
     model, input_size, action_history_len = load_model(checkpoint_path, device)
     
     print("Creating environment...")
-    mario_env = create_mario_env(level=(1, 1), render_frames=False, action_history_len=action_history_len)
+    mario_env = create_mario_env(
+        level=(1, 1), 
+        render_frames=False, 
+        action_history_len=action_history_len,
+    )
     env = mario_env.env
     
     state, info = env.reset()
@@ -273,12 +311,16 @@ def run_analysis(
         if action_history_len > 0 and "action_history" in info:
             action_hist_tensor = torch.from_numpy(info["action_history"]).float().unsqueeze(0).to(device)
         
-        # Get Q-values
+        # Get Q-values and danger predictions
         with torch.no_grad():
-            if action_hist_tensor is not None:
-                q_values = model.online(state_tensor, action_hist_tensor).cpu().numpy()[0]
+            result = model.online(state_tensor, action_hist_tensor, return_danger=True)
+            if isinstance(result, tuple):
+                q_values, danger_pred = result
+                q_values = q_values.cpu().numpy()[0]
+                danger_pred = danger_pred.cpu().numpy()[0]
             else:
-                q_values = model.online(state_tensor).cpu().numpy()[0]
+                q_values = result.cpu().numpy()[0]
+                danger_pred = np.zeros(16)
         
         action = q_values.argmax()
         x_pos = info.get("x_pos", 0)
@@ -310,6 +352,7 @@ def run_analysis(
             chosen_action=action,
             x_pos=x_pos,
             output_path=output_path,
+            danger_pred=danger_pred,
         )
         
         # Step environment

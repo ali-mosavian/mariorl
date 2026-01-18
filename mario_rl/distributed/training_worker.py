@@ -94,6 +94,7 @@ class TrainingWorker:
 
     # Action history configuration
     action_history_len: int = 4  # Track and use action history (default: 4)
+    danger_prediction_bins: int = 16  # Predict danger for auxiliary task (default: 16)
 
     # Internal state
     _buffer: ReplayBuffer = field(init=False, repr=False)
@@ -103,6 +104,10 @@ class TrainingWorker:
     _steps_since_flush: int = field(init=False, default=0)
     _action_window: list = field(init=False, repr=False, default_factory=list)  # Rolling window of recent actions
     _action_window_size: int = 10000  # Track last 10k actions for recent distribution
+    # Death tracking for danger prediction
+    _death_positions: dict = field(init=False, repr=False, default_factory=dict)  # {(world, stage): [(x, count), ...]}
+    _max_deaths_per_level: int = 500
+    _death_merge_threshold: int = 20
 
     # MCTS state
     _mcts_explorer: MCTSExplorer | None = field(init=False, default=None)
@@ -146,6 +151,7 @@ class TrainingWorker:
             gamma=self.gamma,
             alpha=self.alpha,
             action_history_shape=action_history_shape,
+            danger_target_bins=self.danger_prediction_bins,
         )
 
         # Create env runner
@@ -224,6 +230,85 @@ class TrainingWorker:
             state = np.squeeze(state, axis=-1)
         return state
 
+    def _record_death(self, level: tuple, x_pos: int) -> None:
+        """Record a death position for danger prediction supervision.
+        
+        Args:
+            level: (world, stage) tuple
+            x_pos: X position where death occurred
+        """
+        if level not in self._death_positions:
+            self._death_positions[level] = []
+        
+        deaths = self._death_positions[level]
+        
+        # Check if there's already a death nearby - if so, increment count
+        for i, (dx, count) in enumerate(deaths):
+            if abs(dx - x_pos) < self._death_merge_threshold:
+                deaths[i] = (dx, count + 1)
+                return
+        
+        # New death location
+        deaths.append((x_pos, 1))
+        
+        # Limit memory size - keep most frequent deaths
+        if len(deaths) > self._max_deaths_per_level:
+            deaths.sort(key=lambda d: d[1], reverse=True)
+            self._death_positions[level] = deaths[:self._max_deaths_per_level]
+
+    def _compute_danger_target(self, level: tuple, current_x: int) -> np.ndarray:
+        """Compute danger target vector from recorded death positions.
+        
+        Creates a vector where each bin represents danger level at a relative
+        distance from the current position. This is used as supervision for
+        the auxiliary danger prediction head.
+        
+        Args:
+            level: (world, stage) tuple
+            current_x: Mario's current X position
+            
+        Returns:
+            danger_target: Array of shape (danger_prediction_bins,) with values in [0, 1]
+        """
+        if self.danger_prediction_bins == 0:
+            return None
+            
+        deaths = self._death_positions.get(level, [])
+        danger_vector = np.zeros(self.danger_prediction_bins, dtype=np.float32)
+        
+        if not deaths:
+            return danger_vector
+        
+        # Bin layout: 25% behind, 75% ahead (same as RelativeDeathMemory wrapper)
+        max_lookahead = 256
+        max_lookbehind = 64
+        behind_bins = self.danger_prediction_bins // 4
+        ahead_bins = self.danger_prediction_bins - behind_bins
+        behind_bin_size = max_lookbehind / max(behind_bins, 1)
+        ahead_bin_size = max_lookahead / max(ahead_bins, 1)
+        
+        for death_x, count in deaths:
+            relative_x = death_x - current_x
+            
+            if -max_lookbehind <= relative_x < 0:
+                # Death is behind Mario
+                bin_idx = int((-relative_x) / behind_bin_size)
+                bin_idx = min(bin_idx, behind_bins - 1)
+                danger_vector[behind_bins - 1 - bin_idx] += count
+                
+            elif 0 <= relative_x < max_lookahead:
+                # Death is ahead of Mario
+                bin_idx = int(relative_x / ahead_bin_size)
+                bin_idx = min(bin_idx, ahead_bins - 1)
+                danger_vector[behind_bins + bin_idx] += count
+        
+        # Normalize to [0, 1]
+        max_val = danger_vector.max()
+        if max_val > 0:
+            danger_vector = danger_vector / max_val
+        
+        return danger_vector
+
     def _get_action(self, state: np.ndarray, info: dict | None = None) -> int:
         """Get action using epsilon-greedy policy or MuZero MCTS.
         
@@ -251,14 +336,15 @@ class TrainingWorker:
                 with torch.no_grad():
                     state_t = torch.from_numpy(state).unsqueeze(0).float().to(self.device)
                     
-                    # Pass action history if enabled and model supports it
+                    # Prepare auxiliary inputs
+                    action_hist_t = None
+                    
                     if self._current_action_history is not None and hasattr(self.model, 'action_history_len'):
                         action_hist_t = torch.from_numpy(
                             self._current_action_history
                         ).unsqueeze(0).float().to(self.device)
-                        q_values = self.model(state_t, action_history=action_hist_t)
-                    else:
-                        q_values = self.model(state_t)
+                    
+                    q_values = self.model(state_t, action_history=action_hist_t)
                     action = int(q_values.argmax(dim=1).item())
 
         # Track action distribution (rolling window for recent distribution)
@@ -276,10 +362,10 @@ class TrainingWorker:
         return hasattr(adapter, "model") and hasattr(adapter.model, "initial_inference")
 
     def _collect_with_action_history(self, num_steps: int, collect_start: float) -> dict[str, Any]:
-        """Collect experience while tracking action history.
+        """Collect experience while tracking action history and danger targets.
         
-        This method is used when action_history_len > 0 to properly track
-        and store action histories in transitions.
+        This method is used when action_history_len > 0 or danger_prediction_bins > 0
+        to properly track and store auxiliary inputs and targets in transitions.
         """
         episodes_completed = 0
         episode_rewards: list[float] = []
@@ -290,16 +376,24 @@ class TrainingWorker:
         if not hasattr(self, '_collect_state') or self._collect_state is None:
             obs, info = self.env.reset()
             self._collect_state = obs
+            self._current_level = (info.get("world", 1), info.get("stage", 1))
             if "action_history" in info:
                 self._current_action_history = info["action_history"].copy()
 
         obs = self._collect_state
         
         for _ in range(num_steps):
-            # Get current action history before taking action
+            # Get current auxiliary inputs before taking action
             current_hist = self._current_action_history.copy() if self._current_action_history is not None else None
             
-            # Get action (passes action_history to model if available)
+            # Get current level and x position for danger target
+            current_level = getattr(self, '_current_level', (1, 1))
+            current_x = getattr(self, '_current_x', 0)
+            
+            # Compute danger target from recorded death positions
+            danger_target = self._compute_danger_target(current_level, current_x)
+            
+            # Get action
             action = self._get_action(obs)
             
             # Step environment
@@ -308,21 +402,33 @@ class TrainingWorker:
             current_episode_reward += reward
             step_infos.append(info)
             
+            # Update current position tracking
+            self._current_level = (info.get("world", 1), info.get("stage", 1))
+            self._current_x = info.get("x_pos", 0)
+            
+            # Record death for danger prediction supervision
+            if done and reward < 0:
+                self._record_death(self._current_level, info.get("x_pos", 0))
+            
             # Get next action history from info
             next_hist = None
             if "action_history" in info:
                 self._current_action_history = info["action_history"].copy()
                 next_hist = self._current_action_history.copy()
             
-            # Create transition with action history
+            # Create transition with auxiliary inputs and danger target
+            # CRITICAL: Use actual_death flag if present (from snapshot wrapper)
+            # This ensures TD targets treat deaths as terminal even if episode continues
+            effective_done = info.get("actual_death", done)
             transition = Transition(
                 state=self._preprocess_state(obs),
                 action=action,
                 reward=reward,
                 next_state=self._preprocess_state(next_obs),
-                done=done,
+                done=effective_done,
                 action_history=current_hist,
                 next_action_history=next_hist,
+                danger_target=danger_target,
             )
             self._buffer.add(transition)
             
@@ -338,6 +444,8 @@ class TrainingWorker:
                 
                 # Reset environment
                 obs, info = self.env.reset()
+                self._current_level = (info.get("world", 1), info.get("stage", 1))
+                self._current_x = info.get("x_pos", 40)
                 if "action_history" in info:
                     self._current_action_history = info["action_history"].copy()
             else:
@@ -541,8 +649,8 @@ class TrainingWorker:
         """
         collect_start = time.time()
         
-        # If action history is enabled, do manual collection to track it
-        if self.action_history_len > 0:
+        # If action history or death memory is enabled, do manual collection to track them
+        if self.action_history_len > 0 or self.danger_prediction_bins > 0:
             return self._collect_with_action_history(num_steps, collect_start)
         
         # Otherwise use standard EnvRunner collection
@@ -731,6 +839,8 @@ class TrainingWorker:
             # Execute action in real environment
             next_obs, reward, terminated, truncated, info = self.env.step(action)
             done = terminated or truncated
+            # Use actual_death flag for TD targets even if episode continues
+            effective_done = info.get("actual_death", done)
 
             # Add the real transition to buffer
             from mario_rl.core.types import Transition
@@ -739,7 +849,7 @@ class TrainingWorker:
                 action=action,
                 reward=reward,
                 next_state=next_obs if not done else obs,
-                done=done,
+                done=effective_done,
             )
             self._buffer.add(real_transition)
             transitions_collected += 1
@@ -862,6 +972,7 @@ class TrainingWorker:
             weights=batch.weights,  # Pass PER importance sampling weights
             action_histories=batch.action_histories,
             next_action_histories=batch.next_action_histories,
+            danger_targets=batch.danger_targets,
         )
 
         # Backprop

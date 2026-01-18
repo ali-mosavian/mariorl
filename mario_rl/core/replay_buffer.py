@@ -44,6 +44,7 @@ class NStepBuffer:
                 max_x=transition.max_x,
                 action_history=transition.action_history.copy() if transition.action_history is not None else None,
                 next_action_history=transition.next_action_history.copy() if transition.next_action_history is not None else None,
+                danger_target=transition.danger_target.copy() if transition.danger_target is not None else None,
             )
         )
 
@@ -65,6 +66,7 @@ class NStepBuffer:
                     max_x=self.buffer[0].max_x,
                     action_history=self.buffer[0].action_history,
                     next_action_history=self.buffer[i].next_action_history,
+                    danger_target=self.buffer[0].danger_target,
                 )
                 self.buffer.pop(0)
                 return result
@@ -79,6 +81,7 @@ class NStepBuffer:
             max_x=self.buffer[0].max_x,
             action_history=self.buffer[0].action_history,
             next_action_history=self.buffer[-1].next_action_history,
+            danger_target=self.buffer[0].danger_target,
         )
         self.buffer.pop(0)
         return result
@@ -106,6 +109,7 @@ class NStepBuffer:
                     flag_get=self.buffer[0].flag_get,
                     action_history=self.buffer[0].action_history,
                     next_action_history=self.buffer[last_idx].next_action_history,
+                    danger_target=self.buffer[0].danger_target,
                     max_x=self.buffer[0].max_x,
                 )
             )
@@ -198,6 +202,7 @@ class Batch:
     weights: Tensor | None = None
     action_histories: Tensor | None = None
     next_action_histories: Tensor | None = None
+    danger_targets: Tensor | None = None
 
 
 @dataclass
@@ -222,7 +227,9 @@ class ReplayBuffer:
     beta_end: float = 1.0
     epsilon: float = 1e-6
     flag_priority_multiplier: float = 50.0  # Priority boost for flag captures
+    death_priority_multiplier: float = 10.0  # Priority boost for death transitions
     action_history_shape: tuple[int, ...] | None = None  # (history_len, num_actions) if used
+    danger_target_bins: int = 16  # Number of bins for auxiliary danger prediction
 
     # Storage (initialized in __post_init__)
     _states: np.ndarray = field(init=False, repr=False)
@@ -232,6 +239,7 @@ class ReplayBuffer:
     _dones: np.ndarray = field(init=False, repr=False)
     _action_histories: np.ndarray | None = field(init=False, repr=False, default=None)
     _next_action_histories: np.ndarray | None = field(init=False, repr=False, default=None)
+    _danger_targets: np.ndarray | None = field(init=False, repr=False, default=None)
 
     # For PER
     _tree: SumTree | None = field(init=False, repr=False, default=None)
@@ -265,6 +273,12 @@ class ReplayBuffer:
             )
             self._next_action_histories = np.zeros(
                 (self.capacity, *self.action_history_shape), dtype=np.float32
+            )
+
+        # Danger target storage (for auxiliary prediction task)
+        if self.danger_target_bins > 0:
+            self._danger_targets = np.zeros(
+                (self.capacity, self.danger_target_bins), dtype=np.float32
             )
 
         # Initialize tracking
@@ -322,14 +336,26 @@ class ReplayBuffer:
             else:
                 self._next_action_histories[idx] = 0.0
 
-        # Update PER tree with max priority (apply flag bonus)
+        # Store danger targets if enabled
+        if self._danger_targets is not None:
+            if transition.danger_target is not None:
+                self._danger_targets[idx] = transition.danger_target
+            else:
+                self._danger_targets[idx] = 0.0
+
+        # Update PER tree with max priority (apply priority boosts)
         if self._tree is not None:
             base_priority = self._max_priority ** self.alpha
-            # Apply asymmetric priority: flag captures get boosted
+            priority = base_priority
+            
+            # Apply asymmetric priority boosts
             if transition.flag_get and self.flag_priority_multiplier > 1.0:
-                priority = base_priority * self.flag_priority_multiplier
-            else:
-                priority = base_priority
+                priority = priority * self.flag_priority_multiplier
+            
+            # Death transitions get priority boost to ensure learning from rare deaths
+            if transition.done and self.death_priority_multiplier > 1.0:
+                priority = priority * self.death_priority_multiplier
+            
             self._tree.add(priority)
 
         # Update pointers
@@ -384,6 +410,11 @@ class ReplayBuffer:
             action_histories = torch.from_numpy(self._action_histories[indices]).to(device)
             next_action_histories = torch.from_numpy(self._next_action_histories[indices]).to(device)
 
+        # Get danger targets if enabled
+        danger_targets = None
+        if self._danger_targets is not None:
+            danger_targets = torch.from_numpy(self._danger_targets[indices]).to(device)
+
         return Batch(
             states=torch.from_numpy(self._states[indices]).to(device),
             actions=torch.from_numpy(self._actions[indices]).to(device),
@@ -394,6 +425,7 @@ class ReplayBuffer:
             weights=torch.ones(batch_size, device=device),
             action_histories=action_histories,
             next_action_histories=next_action_histories,
+            danger_targets=danger_targets,
         )
 
     def _sample_per(self, batch_size: int, device: str, beta: float | None) -> Batch:
@@ -433,6 +465,11 @@ class ReplayBuffer:
             action_histories = torch.from_numpy(self._action_histories[data_indices]).to(device)
             next_action_histories = torch.from_numpy(self._next_action_histories[data_indices]).to(device)
 
+        # Get danger targets if enabled
+        danger_targets = None
+        if self._danger_targets is not None:
+            danger_targets = torch.from_numpy(self._danger_targets[data_indices]).to(device)
+
         return Batch(
             states=torch.from_numpy(self._states[data_indices]).to(device),
             actions=torch.from_numpy(self._actions[data_indices]).to(device),
@@ -443,6 +480,7 @@ class ReplayBuffer:
             weights=torch.from_numpy(weights.astype(np.float32)).to(device),
             action_histories=action_histories,
             next_action_histories=next_action_histories,
+            danger_targets=danger_targets,
         )
 
     def update_priorities(self, indices: np.ndarray | Tensor, td_errors: np.ndarray | Tensor) -> None:

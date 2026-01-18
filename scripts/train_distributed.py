@@ -80,6 +80,7 @@ class Config:
 
     # Environment options
     action_history_len: int = 4  # Include previous actions in observation (default: 4)
+    danger_prediction_bins: int = 16  # Auxiliary danger prediction task (default: 16)
     sum_rewards: bool = True  # If False, use only last reward from frame skips
 
     # MuZero specific
@@ -114,7 +115,7 @@ def create_model_and_learner(
         from mario_rl.agent.ddqn_net import DoubleDQN
         from mario_rl.learners.ddqn import DDQNLearner
 
-        # Use model with action history support
+        # Use model with action history and death memory support
         model = DoubleDQN(
             input_shape=(4, 64, 64),
             num_actions=7,  # SIMPLE_MOVEMENT
@@ -122,6 +123,7 @@ def create_model_and_learner(
             hidden_dim=256,
             dropout=0.1,
             action_history_len=config.action_history_len,
+            danger_prediction_bins=config.danger_prediction_bins,
         )
         if device:
             model = model.to(device)
@@ -318,6 +320,7 @@ def run_worker(
             logger=logger,
             flush_every=config.collect_steps * 10,  # Flush every 10 cycles
             action_history_len=config.action_history_len,
+            danger_prediction_bins=config.danger_prediction_bins,
             # MCTS exploration
             mcts_enabled=config.mcts_enabled,
             mcts_num_simulations=config.mcts_num_simulations,
@@ -724,7 +727,7 @@ def start_monitor_thread(
 @click.option("--mcts-periodic", default=10, help="Use MCTS every N episodes")
 @click.option("--mcts-seq-len", default=15, help="Actions to execute per MCTS call (like old MCTS)")
 # Environment options
-@click.option("--action-history", default=0, help="Length of action history to include in observation (0=disabled)")
+@click.option("--action-history", default=4, help="Length of action history to include in observation (0=disabled)")
 @click.option("--sum-rewards/--last-reward", default=True, help="Sum rewards across frame skips (default) or use only last reward")
 # Other
 @click.option("--total-steps", default=2_000_000, help="Total training steps (for LR schedule)")
@@ -782,6 +785,7 @@ def main(
         print(f"  MCTS: {mcts_sims} sims, depth={mcts_depth}, seq_len={mcts_seq_len}, stuck={mcts_stuck}, periodic={mcts_periodic}")
     if action_history > 0:
         print(f"  Action history: {action_history} steps")
+    print("  Danger prediction: 16 bins (auxiliary task)")
     if not sum_rewards:
         print("  Reward mode: last reward only (no stacking)")
     

@@ -70,6 +70,8 @@ class DDQNLearner:
         weights: Tensor | None = None,
         action_histories: Tensor | None = None,
         next_action_histories: Tensor | None = None,
+        danger_targets: Tensor | None = None,
+        danger_loss_coef: float = 0.1,
     ) -> tuple[Tensor, dict[str, Any]]:
         """Compute Double DQN loss for a batch of transitions.
 
@@ -89,17 +91,36 @@ class DDQNLearner:
             weights: Importance sampling weights for PER (batch,), None for uniform
             action_histories: Optional action history for current states (batch, history_len, num_actions)
             next_action_histories: Optional action history for next states
+            danger_targets: Optional danger targets for auxiliary prediction (batch, num_bins)
+            danger_loss_coef: Coefficient for danger prediction loss (default 0.1)
 
         Returns:
             loss: Scalar loss tensor for backpropagation
             metrics: Dict with training metrics
         """
+        # Determine if we need danger predictions
+        has_danger_aux = (
+            danger_targets is not None and 
+            hasattr(self.model, 'danger_prediction_bins') and 
+            self.model.danger_prediction_bins > 0
+        )
+        
         # Current Q-values for taken actions (in symlog space)
-        # Pass action_history if model supports it
-        if action_histories is not None and hasattr(self.model, 'action_history_len') and self.model.action_history_len > 0:
-            current_q = self.model(states, network="online", action_history=action_histories)
+        action_hist = action_histories if action_histories is not None and hasattr(self.model, 'action_history_len') and self.model.action_history_len > 0 else None
+        
+        if has_danger_aux:
+            current_q, danger_pred = self.model(
+                states, network="online",
+                action_history=action_hist,
+                return_danger=True,
+            )
         else:
-            current_q = self.model(states, network="online")  # (batch, num_actions)
+            current_q = self.model(
+                states, network="online",
+                action_history=action_hist,
+            )
+            danger_pred = None
+        
         current_q_selected = current_q.gather(1, actions.unsqueeze(1)).squeeze(1)  # (batch,)
 
         # Double DQN target:
@@ -107,13 +128,12 @@ class DDQNLearner:
         # 2. Evaluate that action using target network
         # 3. Convert to real space, apply Bellman, convert back to symlog
         with torch.no_grad():
+            # Determine auxiliary inputs for next states
+            next_hist = next_action_histories if next_action_histories is not None and hasattr(self.model, 'action_history_len') and self.model.action_history_len > 0 else None
+            
             # Action selection with online network (symlog-scaled, but argmax is invariant)
-            if next_action_histories is not None and hasattr(self.model, 'action_history_len') and self.model.action_history_len > 0:
-                next_q_online = self.model(next_states, network="online", action_history=next_action_histories)
-                next_q_target = self.model(next_states, network="target", action_history=next_action_histories)
-            else:
-                next_q_online = self.model(next_states, network="online")  # (batch, num_actions)
-                next_q_target = self.model(next_states, network="target")  # (batch, num_actions)
+            next_q_online = self.model(next_states, network="online", action_history=next_hist)
+            next_q_target = self.model(next_states, network="target", action_history=next_hist)
             
             best_actions = next_q_online.argmax(dim=1)  # (batch,)
 
@@ -146,8 +166,14 @@ class DDQNLearner:
         log_policy = F.log_softmax(current_q, dim=1)
         entropy = -(policy * log_policy).sum(dim=1).mean()
 
-        # Total loss: TD loss - entropy bonus (we want to maximize entropy)
-        loss = td_loss - self.entropy_coef * entropy
+        # Auxiliary danger prediction loss
+        danger_loss = torch.tensor(0.0, device=states.device)
+        if has_danger_aux and danger_pred is not None:
+            # Binary cross-entropy for danger prediction
+            danger_loss = F.binary_cross_entropy(danger_pred, danger_targets)
+
+        # Total loss: TD loss + danger loss - entropy bonus (we want to maximize entropy)
+        loss = td_loss + danger_loss_coef * danger_loss - self.entropy_coef * entropy
 
         # Compute TD errors for prioritized replay (in symlog space for consistency)
         td_errors = (current_q_selected - target_q).abs().detach()
@@ -157,6 +183,7 @@ class DDQNLearner:
         metrics: dict[str, Any] = {
             "loss": loss.item(),
             "td_loss": td_loss.item(),
+            "danger_loss": danger_loss.item() if has_danger_aux else 0.0,
             "q_mean": current_q_real.mean().item(),
             "q_max": current_q_real.max().item(),
             "td_error": td_errors.mean().item(),

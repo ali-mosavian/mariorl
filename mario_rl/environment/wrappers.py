@@ -189,3 +189,136 @@ class ActionHistoryWrapper(gym.Wrapper):
         
         return obs, reward, done, truncated, info
 
+
+class RelativeDeathMemory(gym.Wrapper):
+    """
+    Wrapper that tracks death positions and provides them as relative distances.
+    
+    Instead of encoding absolute positions like "X=690 is dangerous", this encodes
+    relative positions like "50 pixels ahead is dangerous". This helps the network
+    generalize - it learns "danger 50px ahead = jump" which works for ALL pits.
+    
+    The death memory is stored as a vector in the info dict under 'death_memory'.
+    Each bin represents a distance range from Mario's current position.
+    """
+
+    def __init__(
+        self,
+        env,
+        num_bins: int = 16,
+        max_lookahead: int = 256,
+        max_lookbehind: int = 64,
+        memory_size: int = 500,
+        merge_threshold: int = 20,
+    ):
+        """
+        Args:
+            env: The environment to wrap
+            num_bins: Number of distance bins (25% behind, 75% ahead)
+            max_lookahead: Maximum distance ahead to track (pixels)
+            max_lookbehind: Maximum distance behind to track (pixels)
+            memory_size: Maximum deaths to remember per level
+            merge_threshold: Merge deaths within this distance (pixels)
+        """
+        super().__init__(env)
+        self.num_bins = num_bins
+        self.max_lookahead = max_lookahead
+        self.max_lookbehind = max_lookbehind
+        self.memory_size = memory_size
+        self.merge_threshold = merge_threshold
+        
+        # Store deaths per level: {(world, stage): [(x, count), ...]}
+        self.death_memory: dict[tuple, list] = {}
+        self.current_level = (1, 1)
+        
+        # Bin layout: 25% behind, 75% ahead
+        self.behind_bins = num_bins // 4
+        self.ahead_bins = num_bins - self.behind_bins
+        self.behind_bin_size = max_lookbehind / max(self.behind_bins, 1)
+        self.ahead_bin_size = max_lookahead / max(self.ahead_bins, 1)
+    
+    def _get_relative_death_vector(self, current_x: int) -> np.ndarray:
+        """
+        Create vector of death densities relative to current position.
+        
+        Bins are organized as: [behind_bins..., ahead_bins...]
+        - Behind bins: distances from -max_lookbehind to 0
+        - Ahead bins: distances from 0 to +max_lookahead
+        """
+        deaths = self.death_memory.get(self.current_level, [])
+        death_vector = np.zeros(self.num_bins, dtype=np.float32)
+        
+        for death_x, count in deaths:
+            relative_x = death_x - current_x
+            
+            if -self.max_lookbehind <= relative_x < 0:
+                # Death is behind Mario
+                bin_idx = int((-relative_x) / self.behind_bin_size)
+                bin_idx = min(bin_idx, self.behind_bins - 1)
+                # Reverse so closer deaths are in higher bins
+                death_vector[self.behind_bins - 1 - bin_idx] += count
+                
+            elif 0 <= relative_x < self.max_lookahead:
+                # Death is ahead of Mario
+                bin_idx = int(relative_x / self.ahead_bin_size)
+                bin_idx = min(bin_idx, self.ahead_bins - 1)
+                death_vector[self.behind_bins + bin_idx] += count
+        
+        # Normalize to [0, 1]
+        max_val = death_vector.max()
+        if max_val > 0:
+            death_vector = death_vector / max_val
+        
+        return death_vector
+    
+    def _record_death(self, x: int):
+        """Record a death, merging nearby deaths to avoid duplicates."""
+        if self.current_level not in self.death_memory:
+            self.death_memory[self.current_level] = []
+        
+        deaths = self.death_memory[self.current_level]
+        
+        # Check if there's already a death nearby - if so, increment count
+        for i, (dx, count) in enumerate(deaths):
+            if abs(dx - x) < self.merge_threshold:
+                deaths[i] = (dx, count + 1)
+                return
+        
+        # New death location
+        deaths.append((x, 1))
+        
+        # Limit memory size - keep most frequent deaths
+        if len(deaths) > self.memory_size:
+            deaths.sort(key=lambda d: d[1], reverse=True)
+            self.death_memory[self.current_level] = deaths[:self.memory_size]
+    
+    def step(self, action):
+        obs, reward, done, truncated, info = self.env.step(action)
+        
+        # Update current level
+        self.current_level = (info.get("world", 1), info.get("stage", 1))
+        
+        # Record death position
+        if done and reward < 0:
+            self._record_death(info.get("x_pos", 0))
+        
+        # Add relative death vector to info
+        info["death_memory"] = self._get_relative_death_vector(info.get("x_pos", 0))
+        
+        return obs, reward, done, truncated, info
+    
+    def reset(self, **kwargs):
+        obs, info = self.env.reset(**kwargs)
+        self.current_level = (info.get("world", 1), info.get("stage", 1))
+        info["death_memory"] = self._get_relative_death_vector(info.get("x_pos", 40))
+        return obs, info
+    
+    def get_death_count(self) -> int:
+        """Get total number of recorded deaths across all levels."""
+        return sum(len(deaths) for deaths in self.death_memory.values())
+    
+    def get_death_positions(self, level: tuple | None = None) -> list[tuple[int, int]]:
+        """Get death positions for a level (or current level if None)."""
+        level = level or self.current_level
+        return self.death_memory.get(level, [])
+
