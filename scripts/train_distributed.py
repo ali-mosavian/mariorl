@@ -69,7 +69,7 @@ class Config:
     weight_decay: float = 1e-4
     buffer_capacity: int = 10_000
     batch_size: int = 32
-    n_step: int = 3
+    n_step: int = 10
     alpha: float = 0.6
     eps_base: float = 0.15  # Base for per-worker epsilon (floor ~2-9%)
     epsilon_decay_steps: int = 1_000_000
@@ -698,7 +698,7 @@ def start_monitor_thread(
 @click.option("--lr", default=2.5e-4, help="Initial learning rate")
 @click.option("--lr-end", default=1e-5, help="Final learning rate")
 @click.option("--gamma", default=0.99, help="Discount factor")
-@click.option("--n-step", default=3, help="N-step returns")
+@click.option("--n-step", default=10, help="N-step returns")
 @click.option("--tau", default=0.001, help="Soft update coefficient")
 # Worker settings
 @click.option("--buffer-size", default=10_000, help="Buffer capacity per worker")

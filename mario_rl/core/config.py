@@ -23,7 +23,7 @@ class BufferConfig:
 
     capacity: int = 10_000
     batch_size: int = 32
-    n_step: int = 3
+    n_step: int = 10
     gamma: float = 0.99
 
     # PER hyperparameters
