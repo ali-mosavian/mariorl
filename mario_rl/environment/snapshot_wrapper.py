@@ -228,6 +228,8 @@ def create_snapshot_mario_env(
     checkpoint_interval: int = 500,
     max_restores_without_progress: int = 3,
     enabled: bool = True,
+    sum_rewards: bool = False,
+    action_history_len: int = 4,
 ) -> SnapshotMarioEnvironment:
     """
     Factory function to create a Mario environment with snapshot support.
@@ -239,13 +241,20 @@ def create_snapshot_mario_env(
         checkpoint_interval: Game ticks between time-based checkpoints
         max_restores_without_progress: Max restores before giving up
         enabled: Whether snapshot functionality is enabled
+        sum_rewards: If True, sum rewards across frame skips. If False, use last reward only.
+        action_history_len: If > 0, track this many previous actions in info dict.
 
     Returns:
         SnapshotMarioEnvironment with full snapshot support
     """
     from mario_rl.environment.factory import create_mario_env
 
-    base_env = create_mario_env(level=level, render_frames=render_frames)
+    base_env = create_mario_env(
+        level=level,
+        render_frames=render_frames,
+        sum_rewards=sum_rewards,
+        action_history_len=action_history_len,
+    )
 
     return SnapshotMarioEnvironment(
         env=base_env,

@@ -68,6 +68,8 @@ class DDQNLearner:
         next_states: Tensor,
         dones: Tensor,
         weights: Tensor | None = None,
+        action_histories: Tensor | None = None,
+        next_action_histories: Tensor | None = None,
     ) -> tuple[Tensor, dict[str, Any]]:
         """Compute Double DQN loss for a batch of transitions.
 
@@ -85,13 +87,19 @@ class DDQNLearner:
             next_states: Next observations (batch, *obs_shape) - state after N steps
             dones: Episode termination flags (batch,)
             weights: Importance sampling weights for PER (batch,), None for uniform
+            action_histories: Optional action history for current states (batch, history_len, num_actions)
+            next_action_histories: Optional action history for next states
 
         Returns:
             loss: Scalar loss tensor for backpropagation
             metrics: Dict with training metrics
         """
         # Current Q-values for taken actions (in symlog space)
-        current_q = self.model(states, network="online")  # (batch, num_actions)
+        # Pass action_history if model supports it
+        if action_histories is not None and hasattr(self.model, 'action_history_len') and self.model.action_history_len > 0:
+            current_q = self.model(states, network="online", action_history=action_histories)
+        else:
+            current_q = self.model(states, network="online")  # (batch, num_actions)
         current_q_selected = current_q.gather(1, actions.unsqueeze(1)).squeeze(1)  # (batch,)
 
         # Double DQN target:
@@ -100,11 +108,16 @@ class DDQNLearner:
         # 3. Convert to real space, apply Bellman, convert back to symlog
         with torch.no_grad():
             # Action selection with online network (symlog-scaled, but argmax is invariant)
-            next_q_online = self.model(next_states, network="online")  # (batch, num_actions)
+            if next_action_histories is not None and hasattr(self.model, 'action_history_len') and self.model.action_history_len > 0:
+                next_q_online = self.model(next_states, network="online", action_history=next_action_histories)
+                next_q_target = self.model(next_states, network="target", action_history=next_action_histories)
+            else:
+                next_q_online = self.model(next_states, network="online")  # (batch, num_actions)
+                next_q_target = self.model(next_states, network="target")  # (batch, num_actions)
+            
             best_actions = next_q_online.argmax(dim=1)  # (batch,)
 
             # Value evaluation with target network (symlog-scaled)
-            next_q_target = self.model(next_states, network="target")  # (batch, num_actions)
             next_q_selected_symlog = next_q_target.gather(1, best_actions.unsqueeze(1)).squeeze(1)
 
             # Convert to real space for Bellman update

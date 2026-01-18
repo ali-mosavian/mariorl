@@ -78,6 +78,10 @@ class Config:
     target_update_interval: int = 1  # Update target every step like working script
     checkpoint_interval: int = 10_000
 
+    # Environment options
+    action_history_len: int = 4  # Include previous actions in observation (default: 4)
+    sum_rewards: bool = True  # If False, use only last reward from frame skips
+
     # MuZero specific
     muzero_num_simulations: int = 50  # MCTS simulations per action
     muzero_unroll_steps: int = 5  # K steps to unroll during training
@@ -107,16 +111,17 @@ def create_model_and_learner(
     into the learner for use by MCTSExplorer.
     """
     if config.model == "ddqn":
-        from mario_rl.models.ddqn import DoubleDQN, DDQNConfig
+        from mario_rl.agent.ddqn_net import DoubleDQN
         from mario_rl.learners.ddqn import DDQNLearner
 
-        cfg = DDQNConfig(input_shape=(4, 64, 64), num_actions=7)  # SIMPLE_MOVEMENT
+        # Use model with action history support
         model = DoubleDQN(
-            input_shape=cfg.input_shape,
-            num_actions=cfg.num_actions,
-            feature_dim=cfg.feature_dim,
-            hidden_dim=cfg.hidden_dim,
-            dropout=cfg.dropout,
+            input_shape=(4, 64, 64),
+            num_actions=7,  # SIMPLE_MOVEMENT
+            feature_dim=512,
+            hidden_dim=256,
+            dropout=0.1,
+            action_history_len=config.action_history_len,
         )
         if device:
             model = model.to(device)
@@ -276,6 +281,8 @@ def run_worker(
             checkpoint_interval=500,
             max_restores_without_progress=3,
             enabled=True,
+            sum_rewards=config.sum_rewards,
+            action_history_len=config.action_history_len,
         )
         _, learner = create_model_and_learner(config, device)
 
@@ -310,6 +317,7 @@ def run_worker(
             epsilon_decay_steps=config.epsilon_decay_steps,
             logger=logger,
             flush_every=config.collect_steps * 10,  # Flush every 10 cycles
+            action_history_len=config.action_history_len,
             # MCTS exploration
             mcts_enabled=config.mcts_enabled,
             mcts_num_simulations=config.mcts_num_simulations,
@@ -715,6 +723,9 @@ def start_monitor_thread(
 @click.option("--mcts-stuck", default=500, help="Steps without progress to trigger MCTS")
 @click.option("--mcts-periodic", default=10, help="Use MCTS every N episodes")
 @click.option("--mcts-seq-len", default=15, help="Actions to execute per MCTS call (like old MCTS)")
+# Environment options
+@click.option("--action-history", default=0, help="Length of action history to include in observation (0=disabled)")
+@click.option("--sum-rewards/--last-reward", default=True, help="Sum rewards across frame skips (default) or use only last reward")
 # Other
 @click.option("--total-steps", default=2_000_000, help="Total training steps (for LR schedule)")
 @click.option("--no-ui", is_flag=True, help="Disable ncurses UI")
@@ -747,6 +758,8 @@ def main(
     mcts_stuck: int,
     mcts_periodic: int,
     mcts_seq_len: int,
+    action_history: int,
+    sum_rewards: bool,
     total_steps: int,
     no_ui: bool,
 ) -> None:
@@ -767,6 +780,10 @@ def main(
         print(f"  MuZero: {muzero_sims} sims, unroll={muzero_unroll}, td_steps={muzero_td_steps}")
     if mcts:
         print(f"  MCTS: {mcts_sims} sims, depth={mcts_depth}, seq_len={mcts_seq_len}, stuck={mcts_stuck}, periodic={mcts_periodic}")
+    if action_history > 0:
+        print(f"  Action history: {action_history} steps")
+    if not sum_rewards:
+        print("  Reward mode: last reward only (no stacking)")
     
     # Print GPU distribution
     from mario_rl.core.device import get_device_assignment_summary, assign_device
@@ -793,6 +810,8 @@ def main(
         eps_base=eps_base,
         epsilon_decay_steps=eps_decay_steps,
         latent_dim=latent_dim,
+        action_history_len=action_history,
+        sum_rewards=sum_rewards,
         muzero_num_simulations=muzero_sims,
         muzero_unroll_steps=muzero_unroll,
         muzero_td_steps=muzero_td_steps,

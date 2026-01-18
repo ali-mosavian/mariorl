@@ -42,6 +42,8 @@ class NStepBuffer:
                 done=transition.done,
                 flag_get=transition.flag_get,
                 max_x=transition.max_x,
+                action_history=transition.action_history.copy() if transition.action_history is not None else None,
+                next_action_history=transition.next_action_history.copy() if transition.next_action_history is not None else None,
             )
         )
 
@@ -61,6 +63,8 @@ class NStepBuffer:
                     done=True,
                     flag_get=self.buffer[0].flag_get,
                     max_x=self.buffer[0].max_x,
+                    action_history=self.buffer[0].action_history,
+                    next_action_history=self.buffer[i].next_action_history,
                 )
                 self.buffer.pop(0)
                 return result
@@ -73,6 +77,8 @@ class NStepBuffer:
             done=self.buffer[-1].done,
             flag_get=self.buffer[0].flag_get,
             max_x=self.buffer[0].max_x,
+            action_history=self.buffer[0].action_history,
+            next_action_history=self.buffer[-1].next_action_history,
         )
         self.buffer.pop(0)
         return result
@@ -98,6 +104,8 @@ class NStepBuffer:
                     next_state=self.buffer[last_idx].next_state,
                     done=self.buffer[last_idx].done,
                     flag_get=self.buffer[0].flag_get,
+                    action_history=self.buffer[0].action_history,
+                    next_action_history=self.buffer[last_idx].next_action_history,
                     max_x=self.buffer[0].max_x,
                 )
             )
@@ -188,6 +196,8 @@ class Batch:
     dones: Tensor
     indices: Tensor | None = None
     weights: Tensor | None = None
+    action_histories: Tensor | None = None
+    next_action_histories: Tensor | None = None
 
 
 @dataclass
@@ -200,6 +210,7 @@ class ReplayBuffer:
     - Tensor output for training
     - Device placement support
     - Flag capture priority boost (asymmetric priority)
+    - Optional action history storage
     """
 
     capacity: int
@@ -211,6 +222,7 @@ class ReplayBuffer:
     beta_end: float = 1.0
     epsilon: float = 1e-6
     flag_priority_multiplier: float = 50.0  # Priority boost for flag captures
+    action_history_shape: tuple[int, ...] | None = None  # (history_len, num_actions) if used
 
     # Storage (initialized in __post_init__)
     _states: np.ndarray = field(init=False, repr=False)
@@ -218,6 +230,8 @@ class ReplayBuffer:
     _rewards: np.ndarray = field(init=False, repr=False)
     _next_states: np.ndarray = field(init=False, repr=False)
     _dones: np.ndarray = field(init=False, repr=False)
+    _action_histories: np.ndarray | None = field(init=False, repr=False, default=None)
+    _next_action_histories: np.ndarray | None = field(init=False, repr=False, default=None)
 
     # For PER
     _tree: SumTree | None = field(init=False, repr=False, default=None)
@@ -243,6 +257,15 @@ class ReplayBuffer:
         self._next_states = np.zeros((self.capacity, *self.obs_shape), dtype=np.float32)
         self._dones = np.zeros(self.capacity, dtype=np.float32)
         self._flag_gets = np.zeros(self.capacity, dtype=np.bool_)
+
+        # Action history storage (optional)
+        if self.action_history_shape is not None:
+            self._action_histories = np.zeros(
+                (self.capacity, *self.action_history_shape), dtype=np.float32
+            )
+            self._next_action_histories = np.zeros(
+                (self.capacity, *self.action_history_shape), dtype=np.float32
+            )
 
         # Initialize tracking
         self._size = 0
@@ -287,6 +310,17 @@ class ReplayBuffer:
         self._next_states[idx] = transition.next_state
         self._dones[idx] = float(transition.done)
         self._flag_gets[idx] = transition.flag_get
+
+        # Store action histories if enabled
+        if self._action_histories is not None:
+            if transition.action_history is not None:
+                self._action_histories[idx] = transition.action_history
+            else:
+                self._action_histories[idx] = 0.0  # Zero if not provided
+            if transition.next_action_history is not None:
+                self._next_action_histories[idx] = transition.next_action_history
+            else:
+                self._next_action_histories[idx] = 0.0
 
         # Update PER tree with max priority (apply flag bonus)
         if self._tree is not None:
@@ -343,6 +377,13 @@ class ReplayBuffer:
         """Sample uniformly from buffer."""
         indices = np.random.randint(0, self._size, size=batch_size)
 
+        # Get action histories if enabled
+        action_histories = None
+        next_action_histories = None
+        if self._action_histories is not None:
+            action_histories = torch.from_numpy(self._action_histories[indices]).to(device)
+            next_action_histories = torch.from_numpy(self._next_action_histories[indices]).to(device)
+
         return Batch(
             states=torch.from_numpy(self._states[indices]).to(device),
             actions=torch.from_numpy(self._actions[indices]).to(device),
@@ -351,6 +392,8 @@ class ReplayBuffer:
             dones=torch.from_numpy(self._dones[indices]).to(device),
             indices=torch.from_numpy(indices).to(device),
             weights=torch.ones(batch_size, device=device),
+            action_histories=action_histories,
+            next_action_histories=next_action_histories,
         )
 
     def _sample_per(self, batch_size: int, device: str, beta: float | None) -> Batch:
@@ -383,6 +426,13 @@ class ReplayBuffer:
         weights = (self._size * probabilities) ** (-beta)
         weights = weights / weights.max()
 
+        # Get action histories if enabled
+        action_histories = None
+        next_action_histories = None
+        if self._action_histories is not None:
+            action_histories = torch.from_numpy(self._action_histories[data_indices]).to(device)
+            next_action_histories = torch.from_numpy(self._next_action_histories[data_indices]).to(device)
+
         return Batch(
             states=torch.from_numpy(self._states[data_indices]).to(device),
             actions=torch.from_numpy(self._actions[data_indices]).to(device),
@@ -391,6 +441,8 @@ class ReplayBuffer:
             dones=torch.from_numpy(self._dones[data_indices]).to(device),
             indices=torch.from_numpy(indices).to(device),
             weights=torch.from_numpy(weights.astype(np.float32)).to(device),
+            action_histories=action_histories,
+            next_action_histories=next_action_histories,
         )
 
     def update_priorities(self, indices: np.ndarray | Tensor, td_errors: np.ndarray | Tensor) -> None:

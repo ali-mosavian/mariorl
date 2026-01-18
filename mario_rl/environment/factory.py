@@ -16,6 +16,7 @@ from mario_rl.core.config import LevelType
 from mario_rl.environment.wrappers import SkipFrame
 from mario_rl.environment.wrappers import ResizeObservation
 from mario_rl.environment.wrappers import GrayScaleObservation
+from mario_rl.environment.wrappers import ActionHistoryWrapper
 from mario_rl.environment.frame_stack import FrameStack
 from mario_rl.environment.mariogym import SuperMarioBrosMultiLevel
 
@@ -65,6 +66,8 @@ def create_mario_env(
     level: LevelType = (1, 1),
     render_frames: bool = False,
     lz4_compress: bool = True,
+    sum_rewards: bool = False,
+    action_history_len: int = 4,
 ) -> MarioEnvironment:
     """
     Create a wrapped Mario environment.
@@ -73,6 +76,10 @@ def create_mario_env(
         level: Level specification - tuple (world, stage) or "random"/"sequential"
         render_frames: Whether to render frames for visualization
         lz4_compress: Whether to use LZ4 compression for frame stacking (saves memory)
+        sum_rewards: If True, sum rewards across frame skips (old behavior).
+                    If False (default), use only the last reward for cleaner credit assignment.
+        action_history_len: If > 0, track this many previous actions and include in info dict.
+                           Helps the network understand action effects (e.g., jump timing).
 
     Returns:
         MarioEnvironment containing the wrapped env and components
@@ -88,9 +95,14 @@ def create_mario_env(
 
     base_env = SuperMarioBrosMultiLevel(level=level)
     env = JoypadSpace(base_env, actions=smb_actions.SIMPLE_MOVEMENT)
-    env = SkipFrame(env, skip=4, render_frames=render_frames)
+    env = SkipFrame(env, skip=4, render_frames=render_frames, sum_rewards=sum_rewards)
     env = GrayScaleObservation(env, keep_dim=False)
     env = ResizeObservation(env, shape=64)
+    
+    # Add action history tracking if requested
+    if action_history_len > 0:
+        env = ActionHistoryWrapper(env, history_len=action_history_len, num_actions=7)
+    
     # Note: Normalization (x/255) is done in the neural network on GPU
     # This keeps observations as uint8 (smaller memory, faster transfer)
     # LZ4 compression further reduces memory for replay buffer storage

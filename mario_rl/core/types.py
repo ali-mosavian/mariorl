@@ -25,6 +25,8 @@ class Transition:
         done: Whether episode terminated.
         flag_get: Whether flag was captured (for priority boost).
         max_x: Maximum X position reached (for quality scoring).
+        action_history: One-hot encoded previous actions (history_len, num_actions).
+        next_action_history: Action history for next state.
     """
 
     state: np.ndarray
@@ -34,6 +36,8 @@ class Transition:
     done: bool
     flag_get: bool = False
     max_x: int = 0
+    action_history: np.ndarray | None = None
+    next_action_history: np.ndarray | None = None
 
 
 @dataclass(frozen=True, slots=True)

@@ -75,6 +75,11 @@ class DDQNBackbone(nn.Module):
     - Dropout2d between conv layers (drops entire feature maps)
     - LayerNorm after flatten (stabilizes training)
     - Orthogonal initialization
+    
+    Optional action history input:
+    - If action_history_dim > 0, expects flattened action history as second input
+    - Action history is concatenated with visual features before the final FC layer
+    - This helps the network understand action effects (e.g., "I pressed jump last frame")
     """
 
     def __init__(
@@ -82,9 +87,11 @@ class DDQNBackbone(nn.Module):
         input_shape: Tuple[int, ...],
         feature_dim: int = 512,
         dropout: float = 0.1,
+        action_history_dim: int = 0,
     ):
         super().__init__()
         c, h, w = input_shape
+        self.action_history_dim = action_history_dim
 
         # Conv layers with orthogonal init
         self.conv1 = layer_init(nn.Conv2d(c, 32, kernel_size=8, stride=4))
@@ -103,7 +110,9 @@ class DDQNBackbone(nn.Module):
         self.layer_norm = nn.LayerNorm(flat_size)
 
         # Feature projection with orthogonal init
-        self.fc = layer_init(nn.Linear(flat_size, feature_dim))
+        # If action history is used, concatenate it before the FC layer
+        fc_input_dim = flat_size + action_history_dim
+        self.fc = layer_init(nn.Linear(fc_input_dim, feature_dim))
         self.feature_dim = feature_dim
 
         # Dropout for regularization
@@ -111,7 +120,7 @@ class DDQNBackbone(nn.Module):
         self.conv_dropout = nn.Dropout2d(dropout) if dropout > 0 else nn.Identity()
         self.fc_dropout = nn.Dropout(dropout) if dropout > 0 else nn.Identity()
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+    def forward(self, x: torch.Tensor, action_history: torch.Tensor | None = None) -> torch.Tensor:
         x = torch.nn.functional.gelu(self.conv1(x))
         x = self.conv_dropout(x)
         x = torch.nn.functional.gelu(self.conv2(x))
@@ -120,6 +129,19 @@ class DDQNBackbone(nn.Module):
         x = x.flatten(1)
         x = self.layer_norm(x)
         x = self.fc_dropout(x)
+        
+        # Concatenate action history if provided
+        if action_history is not None:
+            # Flatten action history: (N, history_len, num_actions) -> (N, history_len * num_actions)
+            if action_history.dim() == 3:
+                action_history = action_history.flatten(1)
+            x = torch.cat([x, action_history], dim=1)
+        elif self.action_history_dim > 0:
+            # If network expects action history but none provided, use zeros
+            batch_size = x.shape[0]
+            zeros = torch.zeros(batch_size, self.action_history_dim, device=x.device)
+            x = torch.cat([x, zeros], dim=1)
+        
         x = torch.nn.functional.gelu(self.fc(x))
         return x
 
@@ -170,6 +192,7 @@ class DDQNNet(nn.Module):
     - Dueling architecture (separate value and advantage streams)
     - GELU activation, LayerNorm, Dropout, Orthogonal init
     - Raw linear Q-value output (unbounded)
+    - Optional action history input for temporal context
     """
 
     def __init__(
@@ -179,35 +202,64 @@ class DDQNNet(nn.Module):
         feature_dim: int = 512,
         hidden_dim: int = 256,
         dropout: float = 0.1,
+        action_history_len: int = 4,
     ):
+        """
+        Args:
+            input_shape: Shape of frame stack (C, H, W)
+            num_actions: Number of actions in action space
+            feature_dim: Dimension of backbone feature output
+            hidden_dim: Dimension of dueling head hidden layers
+            dropout: Dropout rate for regularization
+            action_history_len: Length of action history to use (0 = disabled).
+                               When enabled, expects action_history tensor of shape
+                               (N, action_history_len, num_actions) as second input.
+        """
         super().__init__()
-        self.backbone = DDQNBackbone(input_shape, feature_dim, dropout)
-        self.head = DuelingHead(feature_dim, num_actions, hidden_dim)
+        self.action_history_len = action_history_len
         self.num_actions = num_actions
+        
+        # Calculate action history dimension (flattened one-hot)
+        action_history_dim = action_history_len * num_actions if action_history_len > 0 else 0
+        
+        self.backbone = DDQNBackbone(input_shape, feature_dim, dropout, action_history_dim)
+        self.head = DuelingHead(feature_dim, num_actions, hidden_dim)
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+    def forward(
+        self,
+        x: torch.Tensor,
+        action_history: torch.Tensor | None = None,
+    ) -> torch.Tensor:
         """
         Forward pass returning Q-values for all actions.
 
         Args:
             x: Observation tensor (N, C, H, W) where C is frame stack
+            action_history: Optional action history tensor (N, history_len, num_actions)
+                           One-hot encoded previous actions.
 
         Returns:
             q_values: Q-values for each action (N, num_actions)
         """
-        features = self.backbone(x)
+        features = self.backbone(x, action_history)
         q_values = self.head(features)
 
         # Raw linear output (no activation)
         return q_values
 
-    def get_action(self, x: torch.Tensor, epsilon: float = 0.0) -> torch.Tensor:
+    def get_action(
+        self,
+        x: torch.Tensor,
+        epsilon: float = 0.0,
+        action_history: torch.Tensor | None = None,
+    ) -> torch.Tensor:
         """
         Get action using epsilon-greedy policy.
 
         Args:
             x: Observation tensor (N, C, H, W)
             epsilon: Exploration rate (0 = greedy, 1 = random)
+            action_history: Optional action history tensor
 
         Returns:
             action: Selected action indices (N,)
@@ -219,7 +271,7 @@ class DDQNNet(nn.Module):
         else:
             # Greedy action
             with torch.no_grad():
-                q_values = self.forward(x)
+                q_values = self.forward(x, action_history)
                 return q_values.argmax(dim=1)
 
 
@@ -239,6 +291,7 @@ class DoubleDQN(nn.Module):
 
     Features:
     - Raw linear Q-value output (unbounded)
+    - Optional action history input for temporal context
     """
 
     def __init__(
@@ -248,35 +301,52 @@ class DoubleDQN(nn.Module):
         feature_dim: int = 512,
         hidden_dim: int = 256,
         dropout: float = 0.1,
+        action_history_len: int = 4,
     ):
         super().__init__()
-        self.online = DDQNNet(input_shape, num_actions, feature_dim, hidden_dim, dropout)
-        self.target = DDQNNet(input_shape, num_actions, feature_dim, hidden_dim, dropout)
+        self.online = DDQNNet(
+            input_shape, num_actions, feature_dim, hidden_dim, dropout, action_history_len
+        )
+        self.target = DDQNNet(
+            input_shape, num_actions, feature_dim, hidden_dim, dropout, action_history_len
+        )
         self.num_actions = num_actions
+        self.action_history_len = action_history_len
 
         # Copy online weights to target and freeze target
         self.sync_target()
 
-    def forward(self, x: torch.Tensor, network: str = "online") -> torch.Tensor:
+    def forward(
+        self,
+        x: torch.Tensor,
+        network: str = "online",
+        action_history: torch.Tensor | None = None,
+    ) -> torch.Tensor:
         """
         Forward pass through specified network.
 
         Args:
             x: Observation tensor (N, C, H, W)
             network: "online" or "target"
+            action_history: Optional action history tensor (N, history_len, num_actions)
 
         Returns:
             q_values: Q-values for each action (N, num_actions)
         """
         if network == "online":
-            return self.online(x)
+            return self.online(x, action_history)
         elif network == "target":
-            return self.target(x)
+            return self.target(x, action_history)
         raise ValueError(f"Unknown network: {network}")
 
-    def get_action(self, x: torch.Tensor, epsilon: float = 0.0) -> torch.Tensor:
+    def get_action(
+        self,
+        x: torch.Tensor,
+        epsilon: float = 0.0,
+        action_history: torch.Tensor | None = None,
+    ) -> torch.Tensor:
         """Get action using online network with epsilon-greedy."""
-        return self.online.get_action(x, epsilon)
+        return self.online.get_action(x, epsilon, action_history)
 
     def sync_target(self) -> None:
         """Hard sync: copy online weights to target network."""
@@ -306,6 +376,8 @@ class DoubleDQN(nn.Module):
         next_states: torch.Tensor,
         dones: torch.Tensor,
         gamma: float = 0.99,
+        action_history: torch.Tensor | None = None,
+        next_action_history: torch.Tensor | None = None,
     ) -> Tuple[torch.Tensor, dict]:
         """
         Compute Double DQN loss with Huber loss for robustness.
@@ -320,6 +392,8 @@ class DoubleDQN(nn.Module):
             next_states: Next states (N, C, H, W)
             dones: Episode done flags (N,)
             gamma: Discount factor
+            action_history: Optional action history for current states (N, history_len, num_actions)
+            next_action_history: Optional action history for next states
 
         Returns:
             loss: Huber loss
@@ -328,17 +402,17 @@ class DoubleDQN(nn.Module):
         states.shape[0]
 
         # Current Q-values for taken actions
-        current_q = self.online(states)  # (N, num_actions)
+        current_q = self.online(states, action_history)  # (N, num_actions)
         current_q_selected = current_q.gather(1, actions.unsqueeze(1)).squeeze(1)  # (N,)
 
         # Double DQN target
         with torch.no_grad():
             # Select best actions using online network
-            next_q_online = self.online(next_states)  # (N, num_actions)
+            next_q_online = self.online(next_states, next_action_history)  # (N, num_actions)
             best_actions = next_q_online.argmax(dim=1)  # (N,)
 
             # Evaluate using target network
-            next_q_target = self.target(next_states)  # (N, num_actions)
+            next_q_target = self.target(next_states, next_action_history)  # (N, num_actions)
             next_q_selected = next_q_target.gather(1, best_actions.unsqueeze(1)).squeeze(1)  # (N,)
 
             # TD target

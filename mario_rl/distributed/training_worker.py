@@ -92,8 +92,12 @@ class TrainingWorker:
     muzero_unroll_steps: int = 5  # K steps to unroll during training
     muzero_td_steps: int = 10  # n-step returns for value targets
 
+    # Action history configuration
+    action_history_len: int = 4  # Track and use action history (default: 4)
+
     # Internal state
     _buffer: ReplayBuffer = field(init=False, repr=False)
+    _current_action_history: np.ndarray | None = field(init=False, repr=False, default=None)
     _env_runner: EnvRunner = field(init=False, repr=False)
     _last_weights_mtime: float = field(init=False, default=0.0)
     _steps_since_flush: int = field(init=False, default=0)
@@ -115,9 +119,24 @@ class TrainingWorker:
     def __post_init__(self) -> None:
         """Initialize buffer and env runner."""
         # Get obs shape from env and preprocess
-        obs, _ = self.env.reset()
+        obs, info = self.env.reset()
         obs = self._preprocess_state(obs)
         obs_shape = obs.shape
+
+        # Initialize action history tracking if enabled
+        action_history_shape = None
+        if self.action_history_len > 0:
+            # Get action history from info if available
+            if "action_history" in info:
+                self._current_action_history = info["action_history"].copy()
+                action_history_shape = self._current_action_history.shape
+            else:
+                # Create zero action history (history_len, num_actions)
+                num_actions = self.model.num_actions
+                self._current_action_history = np.zeros(
+                    (self.action_history_len, num_actions), dtype=np.float32
+                )
+                action_history_shape = self._current_action_history.shape
 
         # Create buffer
         self._buffer = ReplayBuffer(
@@ -126,6 +145,7 @@ class TrainingWorker:
             n_step=self.n_step,
             gamma=self.gamma,
             alpha=self.alpha,
+            action_history_shape=action_history_shape,
         )
 
         # Create env runner
@@ -204,8 +224,13 @@ class TrainingWorker:
             state = np.squeeze(state, axis=-1)
         return state
 
-    def _get_action(self, state: np.ndarray) -> int:
-        """Get action using epsilon-greedy policy or MuZero MCTS."""
+    def _get_action(self, state: np.ndarray, info: dict | None = None) -> int:
+        """Get action using epsilon-greedy policy or MuZero MCTS.
+        
+        Args:
+            state: Current observation
+            info: Optional info dict from env (contains action_history if enabled)
+        """
         # Check if we have a MuZero adapter (latent-space MCTS)
         if self._use_muzero_mcts():
             # MuZero uses its own exploration via MCTS + Dirichlet noise
@@ -225,7 +250,15 @@ class TrainingWorker:
                 state = self._preprocess_state(state)
                 with torch.no_grad():
                     state_t = torch.from_numpy(state).unsqueeze(0).float().to(self.device)
-                    q_values = self.model(state_t)
+                    
+                    # Pass action history if enabled and model supports it
+                    if self._current_action_history is not None and hasattr(self.model, 'action_history_len'):
+                        action_hist_t = torch.from_numpy(
+                            self._current_action_history
+                        ).unsqueeze(0).float().to(self.device)
+                        q_values = self.model(state_t, action_history=action_hist_t)
+                    else:
+                        q_values = self.model(state_t)
                     action = int(q_values.argmax(dim=1).item())
 
         # Track action distribution (rolling window for recent distribution)
@@ -241,6 +274,130 @@ class TrainingWorker:
         # Check if it's a MuZero adapter (has run latent MCTS)
         adapter = self.learner.mcts_adapter
         return hasattr(adapter, "model") and hasattr(adapter.model, "initial_inference")
+
+    def _collect_with_action_history(self, num_steps: int, collect_start: float) -> dict[str, Any]:
+        """Collect experience while tracking action history.
+        
+        This method is used when action_history_len > 0 to properly track
+        and store action histories in transitions.
+        """
+        episodes_completed = 0
+        episode_rewards: list[float] = []
+        step_infos: list[dict] = []
+        current_episode_reward = 0.0
+
+        # Get current state
+        if not hasattr(self, '_collect_state') or self._collect_state is None:
+            obs, info = self.env.reset()
+            self._collect_state = obs
+            if "action_history" in info:
+                self._current_action_history = info["action_history"].copy()
+
+        obs = self._collect_state
+        
+        for _ in range(num_steps):
+            # Get current action history before taking action
+            current_hist = self._current_action_history.copy() if self._current_action_history is not None else None
+            
+            # Get action (passes action_history to model if available)
+            action = self._get_action(obs)
+            
+            # Step environment
+            next_obs, reward, terminated, truncated, info = self.env.step(action)
+            done = terminated or truncated
+            current_episode_reward += reward
+            step_infos.append(info)
+            
+            # Get next action history from info
+            next_hist = None
+            if "action_history" in info:
+                self._current_action_history = info["action_history"].copy()
+                next_hist = self._current_action_history.copy()
+            
+            # Create transition with action history
+            transition = Transition(
+                state=self._preprocess_state(obs),
+                action=action,
+                reward=reward,
+                next_state=self._preprocess_state(next_obs),
+                done=done,
+                action_history=current_hist,
+                next_action_history=next_hist,
+            )
+            self._buffer.add(transition)
+            
+            # Track action distribution
+            self._action_window.append(action)
+            if len(self._action_window) > self._action_window_size:
+                self._action_window.pop(0)
+            
+            if done:
+                episodes_completed += 1
+                episode_rewards.append(current_episode_reward)
+                current_episode_reward = 0.0
+                
+                # Reset environment
+                obs, info = self.env.reset()
+                if "action_history" in info:
+                    self._current_action_history = info["action_history"].copy()
+            else:
+                obs = next_obs
+            
+            self._collect_state = obs
+
+        # Update tracking
+        self.total_steps += num_steps
+        self._steps_since_flush += num_steps
+        self.total_episodes += episodes_completed
+        
+        # Update PER beta
+        progress = min(1.0, self.total_steps / self.epsilon_decay_steps)
+        self._buffer.update_beta(progress)
+        
+        # Calculate timing
+        collect_end = time.time()
+        elapsed = collect_end - collect_start
+        steps_per_sec = num_steps / max(elapsed, 0.001)
+        
+        # Log metrics if logger provided
+        if self.logger is not None:
+            self.logger.count("steps", n=num_steps)
+            self.logger.count("episodes", n=episodes_completed)
+            self.logger.gauge("epsilon", self.epsilon_at(self.total_steps))
+            self.logger.gauge("buffer_size", len(self._buffer))
+            self.logger.gauge("steps_per_sec", steps_per_sec)
+            self.logger.gauge("per_beta", self._buffer._current_beta)
+
+            # Log action distribution
+            if len(self._action_window) > 100:
+                action_counts = np.zeros(self.model.num_actions, dtype=np.int64)
+                for a in self._action_window:
+                    action_counts[a] += 1
+                total_actions = action_counts.sum()
+                action_probs = action_counts / total_actions
+                nonzero = action_probs > 0
+                action_entropy = -np.sum(action_probs[nonzero] * np.log(action_probs[nonzero]))
+                max_entropy = np.log(self.model.num_actions)
+                normalized_entropy = action_entropy / max_entropy if max_entropy > 0 else 0.0
+                self.logger.gauge("action_entropy", float(normalized_entropy))
+                pct_str = ",".join(f"{p * 100:.1f}" for p in action_probs)
+                self.logger.text("action_dist", pct_str)
+
+            for reward in episode_rewards:
+                self.logger.observe("reward", reward)
+            if episode_rewards:
+                self.logger.gauge("episode_reward", episode_rewards[-1])
+
+            if self._steps_since_flush >= self.flush_every:
+                self.logger.flush()
+                self._steps_since_flush = 0
+        
+        return {
+            "steps": num_steps,
+            "episodes_completed": episodes_completed,
+            "episode_rewards": episode_rewards,
+            "step_infos": step_infos,
+        }
 
     def epsilon_at(self, steps: int) -> float:
         """Get epsilon for given step count."""
@@ -384,6 +541,11 @@ class TrainingWorker:
         """
         collect_start = time.time()
         
+        # If action history is enabled, do manual collection to track it
+        if self.action_history_len > 0:
+            return self._collect_with_action_history(num_steps, collect_start)
+        
+        # Otherwise use standard EnvRunner collection
         transitions, info = self._env_runner.collect_with_info(num_steps)
 
         # Add to buffer with preprocessing
@@ -698,6 +860,8 @@ class TrainingWorker:
             next_states=batch.next_states,
             dones=batch.dones,
             weights=batch.weights,  # Pass PER importance sampling weights
+            action_histories=batch.action_histories,
+            next_action_histories=batch.next_action_histories,
         )
 
         # Backprop
