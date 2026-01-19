@@ -127,11 +127,12 @@ def make_bar_chart(
     x_title: str = "",
     y_title: str = "",
 ) -> go.Figure:
-    """Create a bar chart with standard styling."""
-    if orientation == "h":
-        fig = go.Figure(data=go.Bar(x=y, y=x, orientation="h", marker_color=color))
-    else:
-        fig = go.Figure(data=go.Bar(x=x, y=y, marker_color=color))
+    """Create a bar chart with standard styling.
+    
+    For vertical (default): x=categories, y=values (bar heights)
+    For horizontal: x=values (bar lengths), y=categories
+    """
+    fig = go.Figure(data=go.Bar(x=x, y=y, orientation=orientation, marker_color=color))
     
     fig.update_layout(
         title=title,

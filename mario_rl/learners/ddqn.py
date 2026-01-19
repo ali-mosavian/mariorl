@@ -3,6 +3,7 @@
 Implements the Learner protocol for Double DQN:
 - Computes TD loss using Double DQN targets
 - Uses symlog transform for scale-invariant Q-learning
+- Uses MSE loss for strong gradients on death transitions
 - Supports N-step returns with correct gamma discounting
 - Uses importance sampling weights for PER correction
 - Includes entropy regularization for exploration
@@ -29,20 +30,19 @@ class DDQNLearner:
 
     Computes Double DQN loss with N-step returns and symlog transform:
         target = symlog(r + γ^n * symexp(Q_target(s', a*)) * (1 - done))
-        loss = mean(weights * huber_loss(Q_online(s, a), target))
+        loss = mean(weights * mse_loss(Q_online(s, a), target))
 
-    The network learns to output symlog-scaled Q-values directly. This means:
-    - Network outputs are in a compressed range (approx ±10 instead of ±10000)
-    - Action selection (argmax) still works since symlog is monotonic
-    - For TD targets, we convert target Q back to real space, compute Bellman
-      update, then convert back to symlog space
+    The network learns symlog-scaled Q-values. Combined with MSE loss:
+    - Symlog compresses scale (prevents Q-value explosion)
+    - MSE gives strong gradients for large errors (death transitions)
+    - Gradient clipping (max_grad_norm=100) provides safety
 
     Features:
-    - Symlog transform for scale-invariant Q-learning (handles varying reward scales)
+    - Symlog transform for scale-invariant Q-learning
+    - MSE loss for strong death gradients (no Huber capping)
     - N-step returns with correct gamma^n discounting
     - Importance sampling weights for PER bias correction
     - Entropy regularization for exploration
-    - Huber loss for robustness to outliers
     """
 
     model: DoubleDQN
@@ -75,12 +75,12 @@ class DDQNLearner:
     ) -> tuple[Tensor, dict[str, Any]]:
         """Compute Double DQN loss for a batch of transitions.
 
-        The network outputs symlog-scaled Q-values. For TD targets:
+        Uses symlog Q-values with MSE loss:
         1. Get Q_target in symlog space from target network
         2. Convert to real space: Q_real = symexp(Q_target)
         3. Compute Bellman target: target_real = r + γ * Q_real * (1-done)
         4. Convert back to symlog: target = symlog(target_real)
-        5. Loss = huber(Q_online, target) - both already in symlog space
+        5. Loss = MSE(Q_online, target) - both in symlog space
 
         Args:
             states: Current observations (batch, *obs_shape)
@@ -149,9 +149,11 @@ class DDQNLearner:
             # Convert target back to symlog space
             target_q = symlog(target_q_real)
 
-        # Compute element-wise Huber loss (both in symlog space)
-        element_wise_loss = F.huber_loss(
-            current_q_selected, target_q, reduction="none", delta=1.0
+        # Compute element-wise MSE loss (both in symlog space)
+        # MSE instead of Huber: gives strong gradients for large TD errors (death)
+        # Symlog compresses scale, grad clipping (max_grad_norm=100) prevents explosion
+        element_wise_loss = F.mse_loss(
+            current_q_selected, target_q, reduction="none"
         )
 
         # Apply importance sampling weights for PER bias correction
@@ -161,7 +163,7 @@ class DDQNLearner:
             td_loss = element_wise_loss.mean()
 
         # Entropy regularization: encourage exploration by penalizing low entropy
-        # Q-values are in symlog space but softmax still gives valid distribution
+        # Q-values are in symlog space, softmax still gives valid distribution
         policy = F.softmax(current_q, dim=1)
         log_policy = F.log_softmax(current_q, dim=1)
         entropy = -(policy * log_policy).sum(dim=1).mean()
@@ -175,7 +177,7 @@ class DDQNLearner:
         # Total loss: TD loss + danger loss - entropy bonus (we want to maximize entropy)
         loss = td_loss + danger_loss_coef * danger_loss - self.entropy_coef * entropy
 
-        # Compute TD errors for prioritized replay (in symlog space for consistency)
+        # Compute TD errors for prioritized replay (in symlog space)
         td_errors = (current_q_selected - target_q).abs().detach()
 
         # Training metrics (convert to real space for interpretability)

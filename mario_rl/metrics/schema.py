@@ -66,8 +66,9 @@ class CommonMetrics:
     SNAPSHOT_SAVES = MetricDef("snapshot_saves", MetricType.COUNTER)
     SNAPSHOT_RESTORES = MetricDef("snapshot_restores", MetricType.COUNTER)
     
-    # Death tracking (positions stored as comma-separated string)
+    # Death/timeout tracking (positions stored as comma-separated string)
     DEATH_POSITIONS = MetricDef("death_positions", MetricType.TEXT)
+    TIMEOUT_POSITIONS = MetricDef("timeout_positions", MetricType.TEXT)
     
     # MCTS metrics
     MCTS_USED = MetricDef("mcts_used", MetricType.GAUGE)
@@ -101,6 +102,7 @@ class CommonMetrics:
             cls.SNAPSHOT_SAVES,
             cls.SNAPSHOT_RESTORES,
             cls.DEATH_POSITIONS,
+            cls.TIMEOUT_POSITIONS,
             cls.MCTS_USED,
             cls.MCTS_RUNS,
             cls.MCTS_AVG_ROLLOUTS,
@@ -127,6 +129,11 @@ class DDQNMetrics(CommonMetrics):
     ACTION_ENTROPY = MetricDef("action_entropy", MetricType.GAUGE)
     ACTION_DIST = MetricDef("action_dist", MetricType.TEXT)
     
+    # Protected buffer sizes (partitioned replay buffer)
+    BUF_NEG = MetricDef("buf_neg", MetricType.GAUGE)  # Negative (death) buffer
+    BUF_POS = MetricDef("buf_pos", MetricType.GAUGE)  # Positive (flag) buffer
+    BUF_DIFF = MetricDef("buf_diff", MetricType.GAUGE)  # Difficult (hard sections) buffer
+    
     @classmethod
     def definitions(cls) -> list[MetricDef]:
         """Return list of all DDQN metric definitions."""
@@ -140,6 +147,9 @@ class DDQNMetrics(CommonMetrics):
             cls.PER_BETA,
             cls.ACTION_ENTROPY,
             cls.ACTION_DIST,
+            cls.BUF_NEG,
+            cls.BUF_POS,
+            cls.BUF_DIFF,
         ]
 
 

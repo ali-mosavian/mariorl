@@ -42,7 +42,7 @@ from mario_rl.distributed.events import (
     event_to_ui_message,
     make_endpoint,
 )
-from mario_rl.metrics import MetricAggregator, DeathHotspotAggregate
+from mario_rl.metrics import MetricAggregator, DeathHotspotAggregate, DifficultyHotspotAggregate
 
 
 # =============================================================================
@@ -67,7 +67,7 @@ class Config:
     tau: float = 0.004  # 4x higher to compensate for averaging 4 gradients into 1 update
     max_grad_norm: float = 10.0
     weight_decay: float = 1e-4
-    buffer_capacity: int = 10_000
+    buffer_capacity: int = 25_000
     batch_size: int = 32
     n_step: int = 10
     alpha: float = 0.6
@@ -358,6 +358,13 @@ def run_worker(
         while True:
             heartbeat.update(worker_id)
             worker.sync_weights(weights_path)
+            
+            # Load difficulty ranges for transition tagging
+            ranges_path = weights_path.parent / "difficulty_ranges.json"
+            if ranges_path.exists():
+                from mario_rl.metrics.levels import DifficultyHotspotAggregate
+                ranges = DifficultyHotspotAggregate.load_difficulty_ranges(ranges_path)
+                worker.set_difficulty_ranges(ranges)
 
             result = worker.run_cycle(
                 collect_steps=config.collect_steps,
@@ -392,6 +399,7 @@ def run_worker(
             deaths_this_cycle = 0
             timeouts_this_cycle = 0
             death_positions: list[int] = []
+            timeout_positions: list[int] = []
             flags_this_cycle = 0
             
             # Count deaths that were restored (from step_infos)
@@ -410,6 +418,9 @@ def run_worker(
                 elif ep_info.get("is_timeout", False):
                     # Timeout - ran out of time (not a skill failure)
                     timeouts_this_cycle += 1
+                    timeout_x = ep_info.get("x_pos", 0)
+                    if timeout_x > 0:
+                        timeout_positions.append(timeout_x)
                 else:
                     # Actual death (skill failure)
                     deaths_this_cycle += 1
@@ -432,8 +443,28 @@ def run_worker(
             else:
                 # Clear death positions if no deaths this cycle
                 logger.text("death_positions", "")
+            
+            # Get stuck positions from worker and publish for aggregation
+            stuck_positions = worker.get_stuck_positions()
+            for stuck_level_id, stuck_pos_list in stuck_positions.items():
+                if stuck_pos_list:
+                    events.publish("stuck_positions", {
+                        "level_id": stuck_level_id,
+                        "positions": stuck_pos_list,
+                    })
             if timeouts_this_cycle > 0:
                 logger.count("timeouts", n=timeouts_this_cycle)
+                # Log timeout positions to CSV (format: "level:pos1,pos2,pos3")
+                timeout_positions_str = ",".join(str(p) for p in timeout_positions)
+                logger.text("timeout_positions", f"{level_id}:{timeout_positions_str}")
+                # Publish for main process aggregation
+                events.publish("timeout_positions", {
+                    "level_id": level_id,
+                    "positions": timeout_positions,
+                })
+            else:
+                # Clear timeout positions if no timeouts this cycle
+                logger.text("timeout_positions", "")
             if flags_this_cycle > 0:
                 logger.count("flags", n=flags_this_cycle)
 
@@ -701,7 +732,7 @@ def start_monitor_thread(
 @click.option("--n-step", default=10, help="N-step returns")
 @click.option("--tau", default=0.001, help="Soft update coefficient")
 # Worker settings
-@click.option("--buffer-size", default=10_000, help="Buffer capacity per worker")
+@click.option("--buffer-size", default=25_000, help="Buffer capacity per worker")
 @click.option("--batch-size", default=32, help="Batch size per worker")
 @click.option("--collect-steps", default=64, help="Steps to collect per cycle")
 @click.option("--train-steps", default=4, help="Gradient computations per cycle")
@@ -923,9 +954,9 @@ def main(
         main_csv_writer.writerow(row)
         main_csv_file.flush()
     
-    # Death hotspot aggregator for snapshot/restore decisions
-    hotspot_path = run_dir / "death_hotspots.json"
-    hotspot_aggregator = DeathHotspotAggregate.load_or_create(hotspot_path)
+    # Difficulty hotspot aggregator (deaths + stuck positions) for sampling decisions
+    hotspot_path = run_dir / "difficulty_hotspots.json"
+    hotspot_aggregator = DifficultyHotspotAggregate.load_or_create(hotspot_path)
     last_hotspot_save = time.time()
     
     # Cleanup ZMQ on exit
@@ -1043,6 +1074,13 @@ def main(
                     if level_id and positions:
                         hotspot_aggregator.record_deaths_batch(level_id, positions)
                 
+                # Aggregate stuck positions for difficulty tracking
+                if msg_type == "stuck_positions":
+                    level_id = event.get("data", {}).get("level_id", "")
+                    positions = event.get("data", {}).get("positions", [])
+                    if level_id and positions:
+                        hotspot_aggregator.record_stuck_batch(level_id, positions)
+                
                 # Enhance learner_status with aggregated worker metrics
                 if msg_type == "learner_status":
                     agg = aggregator.aggregate()
@@ -1077,7 +1115,9 @@ def main(
             now = time.time()
             if now - last_hotspot_save > 30:
                 if hotspot_aggregator.save_if_dirty():
-                    pass  # Saved successfully
+                    # Also save difficulty ranges for workers
+                    ranges_path = run_dir / "difficulty_ranges.json"
+                    hotspot_aggregator.save_difficulty_ranges(ranges_path)
                 last_hotspot_save = now
             
             time.sleep(0.01)

@@ -17,6 +17,8 @@ from mario_rl.environment.wrappers import SkipFrame
 from mario_rl.environment.wrappers import ResizeObservation
 from mario_rl.environment.wrappers import GrayScaleObservation
 from mario_rl.environment.wrappers import ActionHistoryWrapper
+from mario_rl.environment.wrappers import DeathPenaltyWrapper
+from mario_rl.environment.wrappers import FlagBonusWrapper
 from mario_rl.environment.frame_stack import FrameStack
 from mario_rl.environment.mariogym import SuperMarioBrosMultiLevel
 
@@ -95,6 +97,10 @@ def create_mario_env(
 
     base_env = SuperMarioBrosMultiLevel(level=level)
     env = JoypadSpace(base_env, actions=smb_actions.SIMPLE_MOVEMENT)
+    # Add strong death penalty (-475 to bring total death cost from ~-25 to ~-500)
+    env = DeathPenaltyWrapper(env, penalty=-475.0)
+    # Add flag capture bonus (+500 to make success strongly positive, symmetric with death)
+    env = FlagBonusWrapper(env, bonus=500.0)
     env = SkipFrame(env, skip=4, render_frames=render_frames, sum_rewards=sum_rewards)
     env = GrayScaleObservation(env, keep_dim=False)
     env = ResizeObservation(env, shape=64)

@@ -89,19 +89,19 @@ def render_workers_tab(workers: dict[int, pd.DataFrame]) -> None:
             _render_beta_or_buffer_chart(workers, colors)
 
     # Row 5: Model-specific charts
-    col_e1, col_e2 = st.columns(2)
     if model_type == "dreamer":
+        col_e1, col_e2 = st.columns(2)
         # Dreamer: Reconstruction and SSIM (world model quality)
         with col_e1:
             _render_worker_chart(workers, "recon_loss", "Reconstruction Loss by Worker", colors, x_column="steps", key="recon_loss")
         with col_e2:
             _render_worker_chart(workers, "ssim", "SSIM by Worker", colors, x_column="steps", key="ssim")
-    else:
-        # DDQN: Elite buffer charts
-        with col_e1:
-            _render_elite_buffer_chart(workers, colors)
-        with col_e2:
-            _render_elite_quality_chart(workers, colors)
+    
+    # Row 5b: Replay buffer charts (DDQN only)
+    if model_type != "dreamer":
+        st.divider()
+        st.subheader("🗄️ Replay Buffer Partitions")
+        _render_protected_buffer_charts(workers, colors)
 
     # Row 6: Model-specific charts (continued)
     col_f1, col_f2 = st.columns(2)
@@ -194,12 +194,16 @@ def _render_summary_table(workers: dict[int, pd.DataFrame], model_type: str = "d
                 "Q Mean": f"{latest.get('q_mean', 0):.1f}",
                 "TD Err": f"{latest.get('td_error', 0):.3f}",
             })
-            # Elite buffer stats (DDQN only)
-            elite_size = int(latest.get("elite_size", 0))
-            elite_max_q = latest.get("elite_max_quality", 0)
+            # Buffer stats (DDQN only)
+            buf_size = int(latest.get("buffer_size", 0))
+            buf_neg = int(latest.get("buf_neg", 0))
+            buf_pos = int(latest.get("buf_pos", 0))
+            buf_diff = int(latest.get("buf_diff", 0))
             row.update({
-                "Elite": f"{elite_size}" if elite_size > 0 else "-",
-                "Elite Q": f"{elite_max_q:.0f}" if elite_max_q > 0 else "-",
+                "📦 Buffer": buf_size if buf_size > 0 else "-",
+                "💀 Death": buf_neg if buf_neg > 0 else "-",
+                "🏁 Flag": buf_pos if buf_pos > 0 else "-",
+                "⚠ Hard": buf_diff if buf_diff > 0 else "-",
             })
         
         # Common trailing columns
@@ -358,78 +362,176 @@ def _render_beta_or_buffer_chart(workers: dict[int, pd.DataFrame], colors: list[
         st.plotly_chart(fig, use_container_width=True)
 
 
-def _render_elite_buffer_chart(workers: dict[int, pd.DataFrame], colors: list[str]) -> None:
-    """Render elite buffer size over time."""
-    fig = go.Figure()
-    has_data = False
+def _render_protected_buffer_charts(workers: dict[int, pd.DataFrame], colors: list[str]) -> None:
+    """Render charts for the four replay buffer partitions (main, negative, positive, difficult)."""
+    # Check if any worker has protected buffer data
+    has_protected_data = any(
+        len(df) > 0 and any(col in df.columns for col in ["buf_neg", "buf_pos", "buf_diff"])
+        for df in workers.values()
+    )
     
-    for i, (wid, df) in enumerate(sorted(workers.items())):
-        if len(df) > 0 and "elite_size" in df.columns:
-            has_data = True
-            x_axis = df["steps"] if "steps" in df.columns else df.get("episodes", range(len(df)))
-            fig.add_trace(go.Scatter(
-                x=x_axis, y=df["elite_size"],
-                name=f"W{wid}",
-                line=dict(color=colors[i % len(colors)], width=1.5),
-                opacity=0.8,
-            ))
+    if not has_protected_data:
+        st.info("⏳ Protected buffer tracking not yet available...")
+        return
     
-    if has_data:
-        fig.update_layout(
-            title="Elite Buffer Size (preserved best experiences)",
-            height=280,
-            margin=dict(l=0, r=0, t=30, b=0),
-            **DARK_LAYOUT,
-            xaxis=dict(title="Steps", **GRID_STYLE),
-            yaxis=dict(title="Elite Transitions", **GRID_STYLE),
-            legend=dict(orientation="h", yanchor="bottom", y=1.02),
-        )
-        st.plotly_chart(fig, use_container_width=True)
-    else:
-        st.info("⏳ Elite buffer tracking not yet available (new feature)...")
-
-
-def _render_elite_quality_chart(workers: dict[int, pd.DataFrame], colors: list[str]) -> None:
-    """Render elite buffer quality range over time."""
-    fig = go.Figure()
-    has_data = False
+    # Create 4 columns for the buffer charts
+    col1, col2, col3, col4 = st.columns(4)
     
-    for i, (wid, df) in enumerate(sorted(workers.items())):
-        if len(df) > 0 and "elite_max_quality" in df.columns:
-            has_data = True
-            x_axis = df["steps"] if "steps" in df.columns else df.get("episodes", range(len(df)))
-            
-            # Max quality line
-            fig.add_trace(go.Scatter(
-                x=x_axis, y=df["elite_max_quality"],
-                name=f"W{wid} max",
-                line=dict(color=colors[i % len(colors)], width=1.5),
-                opacity=0.8,
-            ))
-            
-            # Min quality line (lighter)
-            if "elite_min_quality" in df.columns:
+    # Main buffer (buffer_size)
+    with col1:
+        fig = go.Figure()
+        for i, (wid, df) in enumerate(sorted(workers.items())):
+            if len(df) > 0 and "buffer_size" in df.columns:
+                x_axis = df["steps"] if "steps" in df.columns else range(len(df))
                 fig.add_trace(go.Scatter(
-                    x=x_axis, y=df["elite_min_quality"],
-                    name=f"W{wid} min",
-                    line=dict(color=colors[i % len(colors)], width=1, dash="dot"),
-                    opacity=0.5,
-                    showlegend=False,
+                    x=x_axis, y=df["buffer_size"],
+                    name=f"W{wid}",
+                    line=dict(color=colors[i % len(colors)], width=1.5),
+                    opacity=0.8,
                 ))
-    
-    if has_data:
         fig.update_layout(
-            title="Elite Buffer Quality (max_x + 1000×flag + 0.1×reward)",
-            height=280,
+            title="📦 Main Buffer",
+            height=220,
             margin=dict(l=0, r=0, t=30, b=0),
             **DARK_LAYOUT,
             xaxis=dict(title="Steps", **GRID_STYLE),
-            yaxis=dict(title="Quality Score", **GRID_STYLE),
-            legend=dict(orientation="h", yanchor="bottom", y=1.02),
+            yaxis=dict(title="Size", **GRID_STYLE),
+            showlegend=False,
         )
-        st.plotly_chart(fig, use_container_width=True)
-    else:
-        st.info("⏳ Elite quality tracking not yet available (new feature)...")
+        st.plotly_chart(fig, use_container_width=True, key="buf_main")
+    
+    # Negative buffer (deaths)
+    with col2:
+        fig = go.Figure()
+        for i, (wid, df) in enumerate(sorted(workers.items())):
+            if len(df) > 0 and "buf_neg" in df.columns:
+                x_axis = df["steps"] if "steps" in df.columns else range(len(df))
+                fig.add_trace(go.Scatter(
+                    x=x_axis, y=df["buf_neg"],
+                    name=f"W{wid}",
+                    line=dict(color=colors[i % len(colors)], width=1.5),
+                    opacity=0.8,
+                ))
+        fig.update_layout(
+            title="💀 Death Buffer",
+            height=220,
+            margin=dict(l=0, r=0, t=30, b=0),
+            **DARK_LAYOUT,
+            xaxis=dict(title="Steps", **GRID_STYLE),
+            yaxis=dict(title="Size", **GRID_STYLE),
+            showlegend=False,
+        )
+        st.plotly_chart(fig, use_container_width=True, key="buf_neg")
+    
+    # Positive buffer (flags)
+    with col3:
+        fig = go.Figure()
+        for i, (wid, df) in enumerate(sorted(workers.items())):
+            if len(df) > 0 and "buf_pos" in df.columns:
+                x_axis = df["steps"] if "steps" in df.columns else range(len(df))
+                fig.add_trace(go.Scatter(
+                    x=x_axis, y=df["buf_pos"],
+                    name=f"W{wid}",
+                    line=dict(color=colors[i % len(colors)], width=1.5),
+                    opacity=0.8,
+                ))
+        fig.update_layout(
+            title="🏁 Flag Buffer",
+            height=220,
+            margin=dict(l=0, r=0, t=30, b=0),
+            **DARK_LAYOUT,
+            xaxis=dict(title="Steps", **GRID_STYLE),
+            yaxis=dict(title="Size", **GRID_STYLE),
+            showlegend=False,
+        )
+        st.plotly_chart(fig, use_container_width=True, key="buf_pos")
+    
+    # Difficult buffer (hard sections passed)
+    with col4:
+        fig = go.Figure()
+        for i, (wid, df) in enumerate(sorted(workers.items())):
+            if len(df) > 0 and "buf_diff" in df.columns:
+                x_axis = df["steps"] if "steps" in df.columns else range(len(df))
+                fig.add_trace(go.Scatter(
+                    x=x_axis, y=df["buf_diff"],
+                    name=f"W{wid}",
+                    line=dict(color=colors[i % len(colors)], width=1.5),
+                    opacity=0.8,
+                ))
+        fig.update_layout(
+            title="⚠️ Hard Section Buffer",
+            height=220,
+            margin=dict(l=0, r=0, t=30, b=0),
+            **DARK_LAYOUT,
+            xaxis=dict(title="Steps", **GRID_STYLE),
+            yaxis=dict(title="Size", **GRID_STYLE),
+            showlegend=False,
+        )
+        st.plotly_chart(fig, use_container_width=True, key="buf_diff")
+    
+    # Summary bar chart showing current buffer sizes per worker
+    st.caption("📊 Current Buffer Sizes by Worker")
+    _render_buffer_summary_barchart(workers, colors)
+
+
+def _render_buffer_summary_barchart(workers: dict[int, pd.DataFrame], colors: list[str]) -> None:
+    """Render grouped bar chart showing current buffer sizes per worker."""
+    worker_ids = []
+    main_sizes = []
+    neg_sizes = []
+    pos_sizes = []
+    diff_sizes = []
+    
+    for wid, df in sorted(workers.items()):
+        if len(df) > 0:
+            latest = df.iloc[-1]
+            worker_ids.append(f"W{wid}")
+            main_sizes.append(int(latest.get("buffer_size", 0)))
+            neg_sizes.append(int(latest.get("buf_neg", 0)))
+            pos_sizes.append(int(latest.get("buf_pos", 0)))
+            diff_sizes.append(int(latest.get("buf_diff", 0)))
+    
+    if not worker_ids:
+        return
+    
+    fig = go.Figure()
+    
+    fig.add_trace(go.Bar(
+        name="📦 Main Buffer",
+        x=worker_ids,
+        y=main_sizes,
+        marker_color=COLORS["blue"],
+    ))
+    fig.add_trace(go.Bar(
+        name="💀 Death Buffer",
+        x=worker_ids,
+        y=neg_sizes,
+        marker_color=COLORS["red"],
+    ))
+    fig.add_trace(go.Bar(
+        name="🏁 Flag Buffer",
+        x=worker_ids,
+        y=pos_sizes,
+        marker_color=COLORS["green"],
+    ))
+    fig.add_trace(go.Bar(
+        name="⚠️ Hard Section Buffer",
+        x=worker_ids,
+        y=diff_sizes,
+        marker_color=COLORS["yellow"],
+    ))
+    
+    fig.update_layout(
+        barmode="group",
+        height=250,
+        margin=dict(l=0, r=0, t=10, b=0),
+        **DARK_LAYOUT,
+        xaxis=dict(title="Worker", **GRID_STYLE),
+        yaxis=dict(title="Transitions", **GRID_STYLE),
+        legend=dict(orientation="h", yanchor="bottom", y=1.02),
+    )
+    
+    st.plotly_chart(fig, use_container_width=True, key="buf_summary")
 
 
 def _render_action_entropy_chart(workers: dict[int, pd.DataFrame], colors: list[str]) -> None:

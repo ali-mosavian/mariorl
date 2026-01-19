@@ -59,7 +59,7 @@ class TrainingWorker:
 
     env: Any  # Gymnasium-like environment
     learner: Learner
-    buffer_capacity: int = 10_000
+    buffer_capacity: int = 25_000
     batch_size: int = 32
     n_step: int = 1
     gamma: float = 0.99
@@ -108,6 +108,13 @@ class TrainingWorker:
     _death_positions: dict = field(init=False, repr=False, default_factory=dict)  # {(world, stage): [(x, count), ...]}
     _max_deaths_per_level: int = 500
     _death_merge_threshold: int = 20
+
+    # Stuck detection tracking
+    _stuck_positions: dict = field(init=False, repr=False, default_factory=dict)  # {level_id: [x_pos, ...]}
+    _stuck_check_steps: int = 50  # Check for stuck every N steps
+    _stuck_min_progress: int = 20  # Minimum x progress to not be considered stuck
+    _x_at_stuck_check: int = field(init=False, default=0)  # x_pos at last stuck check
+    _steps_since_stuck_check: int = field(init=False, default=0)
 
     # MCTS state
     _mcts_explorer: MCTSExplorer | None = field(init=False, default=None)
@@ -221,13 +228,27 @@ class TrainingWorker:
         """Access the replay buffer."""
         return self._buffer
 
-    def _preprocess_state(self, state: np.ndarray) -> np.ndarray:
-        """Preprocess state: squeeze extra channel dimension if present.
-
-        Converts (4, 64, 64, 1) -> (4, 64, 64) for frame-stacked grayscale.
+    def _preprocess_state(self, state) -> np.ndarray:
+        """Convert state to uint8 numpy array for network input.
+        
+        Handles LazyFrames (from env) or numpy arrays.
+        Squeezes extra channel dimension if present: (4, 64, 64, 1) -> (4, 64, 64)
         """
+        # Convert LazyFrames to numpy
+        if hasattr(state, '__array__'):
+            state = np.array(state)
+        
+        # Squeeze extra channel dim if present
         if state.ndim == 4 and state.shape[-1] == 1:
             state = np.squeeze(state, axis=-1)
+        
+        # Ensure uint8 (network expects this)
+        if state.dtype != np.uint8:
+            if state.max() <= 1.0:  # Normalized float
+                state = (state * 255).astype(np.uint8)
+            else:
+                state = state.astype(np.uint8)
+        
         return state
 
     def _record_death(self, level: tuple, x_pos: int) -> None:
@@ -255,6 +276,49 @@ class TrainingWorker:
         if len(deaths) > self._max_deaths_per_level:
             deaths.sort(key=lambda d: d[1], reverse=True)
             self._death_positions[level] = deaths[:self._max_deaths_per_level]
+
+    def _check_and_record_stuck(self) -> None:
+        """Check if Mario is stuck (low progress) and record the position.
+        
+        Called every _stuck_check_steps to detect areas where the agent
+        fails to make forward progress (gets stuck at obstacles/enemies).
+        """
+        delta_x = self._current_x - self._x_at_stuck_check
+        
+        if delta_x < self._stuck_min_progress:
+            # Agent is stuck - record this position
+            level_id = f"{self._current_level[0]}-{self._current_level[1]}"
+            if level_id not in self._stuck_positions:
+                self._stuck_positions[level_id] = []
+            
+            # Only record if we have a valid x position
+            if self._current_x > 0:
+                self._stuck_positions[level_id].append(self._current_x)
+        
+        # Reset for next check
+        self._x_at_stuck_check = self._current_x
+        self._steps_since_stuck_check = 0
+
+    def get_stuck_positions(self) -> dict[str, list[int]]:
+        """Get accumulated stuck positions and clear the buffer.
+        
+        Returns:
+            Dict mapping level_id -> list of x positions where agent got stuck.
+        """
+        positions = dict(self._stuck_positions)
+        self._stuck_positions = {}
+        return positions
+
+    def set_difficulty_ranges(self, ranges: dict[str, list[tuple[int, int]]]) -> None:
+        """Set difficulty ranges for the replay buffer.
+        
+        Transitions within these ranges (that don't die) are tracked as
+        "difficult success" and sampled more frequently.
+        
+        Args:
+            ranges: Dict mapping level_id -> list of (start_x, end_x) tuples.
+        """
+        self._buffer.set_difficulty_ranges(ranges)
 
     def _compute_danger_target(self, level: tuple, current_x: int) -> np.ndarray:
         """Compute danger target vector from recorded death positions.
@@ -334,7 +398,8 @@ class TrainingWorker:
             else:
                 state = self._preprocess_state(state)
                 with torch.no_grad():
-                    state_t = torch.from_numpy(state).unsqueeze(0).float().to(self.device)
+                    # Network expects uint8, handles normalization internally
+                    state_t = torch.from_numpy(state).unsqueeze(0).to(self.device)
                     
                     # Prepare auxiliary inputs
                     action_hist_t = None
@@ -370,15 +435,18 @@ class TrainingWorker:
         episodes_completed = 0
         episode_rewards: list[float] = []
         step_infos: list[dict] = []
+        episode_end_infos: list[dict] = []
         current_episode_reward = 0.0
 
-        # Get current state
+        # Get current state and episode collector
         if not hasattr(self, '_collect_state') or self._collect_state is None:
             obs, info = self.env.reset()
             self._collect_state = obs
             self._current_level = (info.get("world", 1), info.get("stage", 1))
             if "action_history" in info:
                 self._current_action_history = info["action_history"].copy()
+            # Start new episode collector
+            self._current_episode = self._buffer.episode()
 
         obs = self._collect_state
         
@@ -410,6 +478,11 @@ class TrainingWorker:
             if done and reward < 0:
                 self._record_death(self._current_level, info.get("x_pos", 0))
             
+            # Check for stuck (low progress over many steps)
+            self._steps_since_stuck_check += 1
+            if self._steps_since_stuck_check >= self._stuck_check_steps:
+                self._check_and_record_stuck()
+            
             # Get next action history from info
             next_hist = None
             if "action_history" in info:
@@ -420,17 +493,22 @@ class TrainingWorker:
             # CRITICAL: Use actual_death flag if present (from snapshot wrapper)
             # This ensures TD targets treat deaths as terminal even if episode continues
             effective_done = info.get("actual_death", done)
+            level_id = f"{self._current_level[0]}-{self._current_level[1]}"
+            # Store LazyFrames directly for memory efficiency (buffer decompresses on sample)
             transition = Transition(
-                state=self._preprocess_state(obs),
+                state=obs,  # LazyFrames - compressed
                 action=action,
                 reward=reward,
-                next_state=self._preprocess_state(next_obs),
+                next_state=next_obs,  # LazyFrames - compressed
                 done=effective_done,
+                flag_get=info.get("flag_get", False),  # For flag history capture
                 action_history=current_hist,
                 next_action_history=next_hist,
                 danger_target=danger_target,
+                level_id=level_id,
+                x_pos=self._current_x,
             )
-            self._buffer.add(transition)
+            self._current_episode.add(transition)
             
             # Track action distribution
             self._action_window.append(action)
@@ -440,7 +518,11 @@ class TrainingWorker:
             if done:
                 episodes_completed += 1
                 episode_rewards.append(current_episode_reward)
+                episode_end_infos.append(info)  # Track episode ending info for death/flag/timeout counting
                 current_episode_reward = 0.0
+                
+                # End current episode and start new one
+                self._current_episode.end()
                 
                 # Reset environment
                 obs, info = self.env.reset()
@@ -448,6 +530,9 @@ class TrainingWorker:
                 self._current_x = info.get("x_pos", 40)
                 if "action_history" in info:
                     self._current_action_history = info["action_history"].copy()
+                
+                # Start new episode collector
+                self._current_episode = self._buffer.episode()
             else:
                 obs = next_obs
             
@@ -475,6 +560,12 @@ class TrainingWorker:
             self.logger.gauge("buffer_size", len(self._buffer))
             self.logger.gauge("steps_per_sec", steps_per_sec)
             self.logger.gauge("per_beta", self._buffer._current_beta)
+            
+            # Log protected buffer stats
+            stats = self._buffer.buffer_stats
+            self.logger.gauge("buf_neg", stats["negative_size"])
+            self.logger.gauge("buf_pos", stats["positive_size"])
+            self.logger.gauge("buf_diff", stats["difficult_size"])
 
             # Log action distribution
             if len(self._action_window) > 100:
@@ -505,6 +596,7 @@ class TrainingWorker:
             "episodes_completed": episodes_completed,
             "episode_rewards": episode_rewards,
             "step_infos": step_infos,
+            "episode_end_infos": episode_end_infos,
         }
 
     def epsilon_at(self, steps: int) -> float:
@@ -656,17 +748,17 @@ class TrainingWorker:
         # Otherwise use standard EnvRunner collection
         transitions, info = self._env_runner.collect_with_info(num_steps)
 
-        # Add to buffer with preprocessing
+        # Add to buffer using episode collector
+        # Note: env_runner handles episode boundaries internally, 
+        # but we still need to signal episode ends for flag history
+        if not hasattr(self, '_current_episode') or self._current_episode is None:
+            self._current_episode = self._buffer.episode()
+        
         for t in transitions:
-            # Preprocess observations to squeeze extra channel dim
-            preprocessed = Transition(
-                state=self._preprocess_state(t.state),
-                action=t.action,
-                reward=t.reward,
-                next_state=self._preprocess_state(t.next_state),
-                done=t.done,
-            )
-            self._buffer.add(preprocessed)
+            self._current_episode.add(t)
+            if t.done:
+                self._current_episode.end()
+                self._current_episode = self._buffer.episode()
 
         self.total_steps += num_steps
         self._steps_since_flush += num_steps
@@ -795,6 +887,10 @@ class TrainingWorker:
         obs = self._get_frame_stack_obs()
         done = False
         
+        # Ensure episode collector exists
+        if not hasattr(self, '_current_episode') or self._current_episode is None:
+            self._current_episode = self._buffer.episode()
+        
         # Action sequence from MCTS (like old implementation)
         action_sequence: list[int] = []
 
@@ -850,8 +946,9 @@ class TrainingWorker:
                 reward=reward,
                 next_state=next_obs if not done else obs,
                 done=effective_done,
+                flag_get=info.get("flag_get", False),
             )
-            self._buffer.add(real_transition)
+            self._current_episode.add(real_transition)
             transitions_collected += 1
 
             # Update observation for next iteration
@@ -875,6 +972,9 @@ class TrainingWorker:
             episodes_completed = 1
             self.total_episodes += 1
             episode_end_infos.append(info)
+            # End current episode and start new one
+            self._current_episode.end()
+            self._current_episode = self._buffer.episode()
             # Reset env for next cycle
             self.env.reset()
 

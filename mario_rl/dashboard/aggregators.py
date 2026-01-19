@@ -103,10 +103,6 @@ def aggregate_level_stats_direct(checkpoint_dir: str) -> dict[str, LevelStats]:
         return {}
 
     level_expr = _get_level_expr(columns)
-
-    # Build column expressions based on what's available
-    deaths_expr = "SUM(COALESCE(deaths, 0))" if "deaths" in columns else "0"
-    flags_expr = "SUM(COALESCE(flags, 0))" if "flags" in columns else "0"
     speed_expr = "speed" if "speed" in columns else "0"
 
     # Build best_x expression - prefer x_pos (episode-specific) over best_x_ever (global cumulative)
@@ -119,24 +115,47 @@ def aggregate_level_stats_direct(checkpoint_dir: str) -> dict[str, LevelStats]:
     else:
         best_x_expr = "0"
 
+    # IMPORTANT: deaths/flags are cumulative counters in the CSV, so we need:
+    # 1. MAX per worker (to get final cumulative value)
+    # 2. SUM those maxes across workers
+    deaths_avail = "deaths" in columns
+    flags_avail = "flags" in columns
+
     try:
         result = query_workers(
             checkpoint_dir,
             f"""
+            WITH per_worker AS (
+                SELECT 
+                    {level_expr} AS level,
+                    worker_id,
+                    COUNT(*) AS episodes,
+                    {"MAX(COALESCE(deaths, 0))" if deaths_avail else "0"} AS max_deaths,
+                    {"MAX(COALESCE(flags, 0))" if flags_avail else "0"} AS max_flags,
+                    {best_x_expr} AS best_x,
+                    AVG(COALESCE(reward, 0)) AS avg_reward,
+                    MIN(COALESCE(reward, 0)) AS min_reward,
+                    MAX(COALESCE(reward, 0)) AS max_reward,
+                    AVG(COALESCE({speed_expr}, 0)) AS avg_speed,
+                    MIN(COALESCE({speed_expr}, 0)) AS min_speed,
+                    MAX(COALESCE({speed_expr}, 0)) AS max_speed
+                FROM workers
+                WHERE {level_expr} IS NOT NULL AND {level_expr} != '?'
+                GROUP BY level, worker_id
+            )
             SELECT 
-                {level_expr} AS level,
-                COUNT(*) AS episodes,
-                {deaths_expr} AS deaths,
-                {flags_expr} AS flags,
-                {best_x_expr} AS best_x,
-                AVG(COALESCE(reward, 0)) AS avg_reward,
-                MIN(COALESCE(reward, 0)) AS min_reward,
-                MAX(COALESCE(reward, 0)) AS max_reward,
-                AVG(COALESCE({speed_expr}, 0)) AS avg_speed,
-                MIN(COALESCE({speed_expr}, 0)) AS min_speed,
-                MAX(COALESCE({speed_expr}, 0)) AS max_speed
-            FROM workers
-            WHERE {level_expr} IS NOT NULL AND {level_expr} != '?'
+                level,
+                SUM(episodes) AS episodes,
+                SUM(max_deaths) AS deaths,
+                SUM(max_flags) AS flags,
+                MAX(best_x) AS best_x,
+                AVG(avg_reward) AS avg_reward,
+                MIN(min_reward) AS min_reward,
+                MAX(max_reward) AS max_reward,
+                AVG(avg_speed) AS avg_speed,
+                MIN(min_speed) AS min_speed,
+                MAX(max_speed) AS max_speed
+            FROM per_worker
             GROUP BY level
             ORDER BY level
         """,
@@ -391,6 +410,65 @@ def aggregate_death_hotspots_direct(checkpoint_dir: str) -> dict[str, dict[int, 
     return hotspots
 
 
+def aggregate_timeout_hotspots_direct(checkpoint_dir: str) -> dict[str, dict[int, int]]:
+    """Aggregate timeout hotspots directly from files using DuckDB."""
+    try:
+        columns = query_workers(checkpoint_dir, "SELECT * FROM workers LIMIT 0").columns
+    except Exception:
+        return {}
+
+    if "timeout_positions" not in columns:
+        return {}
+
+    try:
+        result = query_workers(
+            checkpoint_dir,
+            f"""
+            WITH parsed AS (
+                SELECT 
+                    split_part(CAST(timeout_positions AS VARCHAR), ':', 1) AS level,
+                    split_part(CAST(timeout_positions AS VARCHAR), ':', 2) AS positions_str
+                FROM workers
+                WHERE timeout_positions IS NOT NULL 
+                  AND CAST(timeout_positions AS VARCHAR) != ''
+                  AND CAST(timeout_positions AS VARCHAR) LIKE '%:%'
+            ),
+            exploded AS (
+                SELECT 
+                    level,
+                    CAST(TRIM(unnest(string_split(positions_str, ','))) AS INTEGER) AS pos
+                FROM parsed
+                WHERE positions_str IS NOT NULL AND positions_str != ''
+            )
+            SELECT 
+                level,
+                (pos // 25) * 25 AS bucket,
+                COUNT(*) AS count
+            FROM exploded
+            WHERE pos IS NOT NULL 
+              AND pos > 0 
+              AND pos <= {MAX_VALID_X_POS}
+            GROUP BY level, bucket
+            ORDER BY level, bucket
+        """,
+        ).df()
+    except Exception:
+        return {}
+
+    hotspots: dict[str, dict[int, int]] = {}
+    levels = result["level"].values
+    buckets = result["bucket"].values
+    counts = result["count"].values
+
+    for level, bucket, count in zip(levels, buckets, counts):
+        level = str(level)
+        if level not in hotspots:
+            hotspots[level] = {}
+        hotspots[level][int(bucket)] = int(count)
+
+    return hotspots
+
+
 def aggregate_death_distribution_direct(
     checkpoint_dir: str,
     step_bucket_size: int = 50000,
@@ -573,15 +651,9 @@ def aggregate_level_stats(workers: dict[int, pd.DataFrame]) -> dict[str, LevelSt
     combined = pd.concat(all_dfs, ignore_index=True)
     columns = list(combined.columns)
     level_expr = _get_level_expr(columns)
-
-    # Build column expressions based on what's available
-    deaths_expr = "SUM(COALESCE(deaths, 0))" if "deaths" in columns else "0"
-    flags_expr = "SUM(COALESCE(flags, 0))" if "flags" in columns else "0"
     speed_expr = "speed" if "speed" in columns else "0"
 
     # Build best_x expression - prefer x_pos (episode-specific) over best_x_ever (global cumulative)
-    # x_pos is the X position at end of episode, which is level-specific
-    # best_x_ever is a running max across ALL levels, so not useful for per-level stats
     best_x_cols = [c for c in ["x_pos", "best_x"] if c in columns]
     if best_x_cols:
         coalesce_expr = f"COALESCE({', '.join(best_x_cols)}, 0)"
@@ -589,21 +661,44 @@ def aggregate_level_stats(workers: dict[int, pd.DataFrame]) -> dict[str, LevelSt
     else:
         best_x_expr = "0"
 
+    # IMPORTANT: deaths/flags are cumulative counters in the CSV, so we need:
+    # 1. MAX per worker (to get final cumulative value)
+    # 2. SUM those maxes across workers
+    deaths_avail = "deaths" in columns
+    flags_avail = "flags" in columns
+
     result = duckdb.sql(f"""
+        WITH per_worker AS (
+            SELECT 
+                {level_expr} AS level,
+                worker_id,
+                COUNT(*) AS episodes,
+                {"MAX(COALESCE(deaths, 0))" if deaths_avail else "0"} AS max_deaths,
+                {"MAX(COALESCE(flags, 0))" if flags_avail else "0"} AS max_flags,
+                {best_x_expr} AS best_x,
+                AVG(COALESCE(reward, 0)) AS avg_reward,
+                MIN(COALESCE(reward, 0)) AS min_reward,
+                MAX(COALESCE(reward, 0)) AS max_reward,
+                AVG(COALESCE({speed_expr}, 0)) AS avg_speed,
+                MIN(COALESCE({speed_expr}, 0)) AS min_speed,
+                MAX(COALESCE({speed_expr}, 0)) AS max_speed
+            FROM combined
+            WHERE {level_expr} IS NOT NULL AND {level_expr} != '?'
+            GROUP BY level, worker_id
+        )
         SELECT 
-            {level_expr} AS level,
-            COUNT(*) AS episodes,
-            {deaths_expr} AS deaths,
-            {flags_expr} AS flags,
-            {best_x_expr} AS best_x,
-            AVG(COALESCE(reward, 0)) AS avg_reward,
-            MIN(COALESCE(reward, 0)) AS min_reward,
-            MAX(COALESCE(reward, 0)) AS max_reward,
-            AVG(COALESCE({speed_expr}, 0)) AS avg_speed,
-            MIN(COALESCE({speed_expr}, 0)) AS min_speed,
-            MAX(COALESCE({speed_expr}, 0)) AS max_speed
-        FROM combined
-        WHERE {level_expr} IS NOT NULL AND {level_expr} != '?'
+            level,
+            SUM(episodes) AS episodes,
+            SUM(max_deaths) AS deaths,
+            SUM(max_flags) AS flags,
+            MAX(best_x) AS best_x,
+            AVG(avg_reward) AS avg_reward,
+            MIN(min_reward) AS min_reward,
+            MAX(max_reward) AS max_reward,
+            AVG(avg_speed) AS avg_speed,
+            MIN(min_speed) AS min_speed,
+            MAX(max_speed) AS max_speed
+        FROM per_worker
         GROUP BY level
         ORDER BY level
     """).df()

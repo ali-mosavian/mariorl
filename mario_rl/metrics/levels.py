@@ -575,3 +575,373 @@ class DeathHotspotAggregate:
             }
             for level_id, buckets in self._data.items()
         }
+
+
+# =============================================================================
+# Difficulty Hotspot Aggregation (Deaths + Stuck positions)
+# =============================================================================
+
+
+@dataclass
+class DifficultyHotspotAggregate:
+    """Aggregates both death AND stuck positions for difficulty-aware sampling.
+    
+    Tracks two types of difficult areas:
+    1. Death hotspots: Where Mario frequently dies
+    2. Stuck hotspots: Where Mario frequently gets stuck (no progress)
+    
+    Workers report positions, coordinator aggregates. The combined difficulty
+    map is shared back to workers for tagging "difficult success" transitions.
+    
+    Data format:
+        deaths: {level_id: {bucket_start: count, ...}, ...}
+        stuck: {level_id: {bucket_start: count, ...}, ...}
+    """
+    
+    bucket_size: int = 25
+    save_path: Path | None = None
+    
+    # Death data: level_id -> {bucket_start -> death_count}
+    _deaths: dict[str, dict[int, int]] = field(default_factory=dict, init=False)
+    
+    # Stuck data: level_id -> {bucket_start -> stuck_count}
+    _stuck: dict[str, dict[int, int]] = field(default_factory=dict, init=False)
+    
+    # Track if modified since last save
+    _dirty: bool = field(default=False, init=False)
+    
+    def _bucket_for(self, x_pos: int) -> int:
+        """Get bucket start position for an x position."""
+        return (x_pos // self.bucket_size) * self.bucket_size
+    
+    # -------------------------------------------------------------------------
+    # Recording deaths
+    # -------------------------------------------------------------------------
+    
+    def record_death(self, level_id: str, x_pos: int) -> None:
+        """Record a death at the given position."""
+        if level_id not in self._deaths:
+            self._deaths[level_id] = {}
+        
+        bucket = self._bucket_for(x_pos)
+        self._deaths[level_id][bucket] = self._deaths[level_id].get(bucket, 0) + 1
+        self._dirty = True
+    
+    def record_deaths_batch(self, level_id: str, positions: list[int]) -> None:
+        """Record multiple deaths efficiently."""
+        if level_id not in self._deaths:
+            self._deaths[level_id] = {}
+        
+        for x_pos in positions:
+            bucket = self._bucket_for(x_pos)
+            self._deaths[level_id][bucket] = self._deaths[level_id].get(bucket, 0) + 1
+        
+        if positions:
+            self._dirty = True
+    
+    # -------------------------------------------------------------------------
+    # Recording stuck positions
+    # -------------------------------------------------------------------------
+    
+    def record_stuck(self, level_id: str, x_pos: int) -> None:
+        """Record a stuck position (where agent made no progress)."""
+        if level_id not in self._stuck:
+            self._stuck[level_id] = {}
+        
+        bucket = self._bucket_for(x_pos)
+        self._stuck[level_id][bucket] = self._stuck[level_id].get(bucket, 0) + 1
+        self._dirty = True
+    
+    def record_stuck_batch(self, level_id: str, positions: list[int]) -> None:
+        """Record multiple stuck positions efficiently."""
+        if level_id not in self._stuck:
+            self._stuck[level_id] = {}
+        
+        for x_pos in positions:
+            bucket = self._bucket_for(x_pos)
+            self._stuck[level_id][bucket] = self._stuck[level_id].get(bucket, 0) + 1
+        
+        if positions:
+            self._dirty = True
+    
+    # -------------------------------------------------------------------------
+    # Querying difficulty
+    # -------------------------------------------------------------------------
+    
+    def get_death_histogram(self, level_id: str) -> dict[int, int]:
+        """Get death histogram for a level."""
+        return dict(self._deaths.get(level_id, {}))
+    
+    def get_stuck_histogram(self, level_id: str) -> dict[int, int]:
+        """Get stuck histogram for a level."""
+        return dict(self._stuck.get(level_id, {}))
+    
+    def get_all_levels(self) -> list[str]:
+        """Get list of all tracked level IDs."""
+        return sorted(set(self._deaths.keys()) | set(self._stuck.keys()))
+    
+    def get_combined_difficulty(self, level_id: str, death_weight: float = 1.0, stuck_weight: float = 0.5) -> dict[int, float]:
+        """Get combined difficulty score per bucket.
+        
+        Args:
+            level_id: Level identifier
+            death_weight: Weight for death counts (default 1.0)
+            stuck_weight: Weight for stuck counts (default 0.5, less severe)
+            
+        Returns:
+            Dict mapping bucket_start -> difficulty_score
+        """
+        deaths = self._deaths.get(level_id, {})
+        stuck = self._stuck.get(level_id, {})
+        
+        # Get all buckets
+        all_buckets = set(deaths.keys()) | set(stuck.keys())
+        
+        result = {}
+        for bucket in all_buckets:
+            death_count = deaths.get(bucket, 0)
+            stuck_count = stuck.get(bucket, 0)
+            result[bucket] = death_weight * death_count + stuck_weight * stuck_count
+        
+        return result
+    
+    def get_difficulty_hotspots(
+        self, 
+        level_id: str, 
+        min_score: float = 3.0,
+        top_n: int | None = None,
+    ) -> list[tuple[int, float]]:
+        """Get bucket positions with significant difficulty.
+        
+        Args:
+            level_id: Level identifier
+            min_score: Minimum difficulty score to be considered a hotspot
+            top_n: If set, return only top N hotspots
+            
+        Returns:
+            List of (bucket_start, score) tuples sorted by score descending.
+        """
+        difficulty = self.get_combined_difficulty(level_id)
+        hotspots = [
+            (bucket, score) 
+            for bucket, score in difficulty.items() 
+            if score >= min_score
+        ]
+        hotspots.sort(key=lambda x: x[1], reverse=True)
+        
+        if top_n is not None:
+            hotspots = hotspots[:top_n]
+        
+        return hotspots
+    
+    def is_difficult_position(
+        self, 
+        level_id: str, 
+        x_pos: int, 
+        min_score: float = 3.0,
+        range_buckets: int = 2,
+    ) -> bool:
+        """Check if a position is in or near a difficulty hotspot.
+        
+        Args:
+            level_id: Level identifier
+            x_pos: X position to check
+            min_score: Minimum difficulty score to consider difficult
+            range_buckets: Number of adjacent buckets to check
+            
+        Returns:
+            True if position is in a difficult area.
+        """
+        difficulty = self.get_combined_difficulty(level_id)
+        if not difficulty:
+            return False
+        
+        center_bucket = self._bucket_for(x_pos)
+        
+        # Check center bucket and adjacent buckets
+        for offset in range(-range_buckets, range_buckets + 1):
+            bucket = center_bucket + offset * self.bucket_size
+            if difficulty.get(bucket, 0) >= min_score:
+                return True
+        
+        return False
+    
+    def get_difficult_ranges(
+        self, 
+        level_id: str, 
+        min_score: float = 3.0,
+    ) -> list[tuple[int, int]]:
+        """Get ranges of difficult positions for efficient lookup.
+        
+        Args:
+            level_id: Level identifier
+            min_score: Minimum difficulty score
+            
+        Returns:
+            List of (start_x, end_x) tuples representing difficult ranges.
+        """
+        hotspots = self.get_difficulty_hotspots(level_id, min_score=min_score)
+        if not hotspots:
+            return []
+        
+        # Convert hotspots to ranges and merge adjacent
+        ranges: list[tuple[int, int]] = []
+        for bucket, _ in sorted(hotspots, key=lambda x: x[0]):
+            start = bucket
+            end = bucket + self.bucket_size
+            
+            # Extend range by one bucket on each side for safety margin
+            start = max(0, start - self.bucket_size)
+            end = end + self.bucket_size
+            
+            # Merge with previous range if overlapping
+            if ranges and start <= ranges[-1][1]:
+                ranges[-1] = (ranges[-1][0], max(ranges[-1][1], end))
+            else:
+                ranges.append((start, end))
+        
+        return ranges
+    
+    # -------------------------------------------------------------------------
+    # Serialization
+    # -------------------------------------------------------------------------
+    
+    def to_dict(self) -> dict[str, Any]:
+        """Convert to dict for serialization."""
+        return {
+            "bucket_size": self.bucket_size,
+            "deaths": {
+                level_id: {str(k): v for k, v in buckets.items()}
+                for level_id, buckets in self._deaths.items()
+            },
+            "stuck": {
+                level_id: {str(k): v for k, v in buckets.items()}
+                for level_id, buckets in self._stuck.items()
+            },
+        }
+    
+    @classmethod
+    def from_dict(cls, data: dict[str, Any], save_path: Path | None = None) -> "DifficultyHotspotAggregate":
+        """Create from dict."""
+        agg = cls(
+            bucket_size=data.get("bucket_size", 25),
+            save_path=save_path,
+        )
+        
+        for level_id, buckets in data.get("deaths", {}).items():
+            agg._deaths[level_id] = {int(k): v for k, v in buckets.items()}
+        
+        for level_id, buckets in data.get("stuck", {}).items():
+            agg._stuck[level_id] = {int(k): v for k, v in buckets.items()}
+        
+        # Also support legacy format (just "levels" for deaths)
+        for level_id, buckets in data.get("levels", {}).items():
+            if level_id not in agg._deaths:
+                agg._deaths[level_id] = {int(k): v for k, v in buckets.items()}
+        
+        return agg
+    
+    def save(self, path: Path | None = None) -> None:
+        """Save aggregate to disk."""
+        target = path or self.save_path
+        if target is None:
+            raise ValueError("No save path specified")
+        
+        target.parent.mkdir(parents=True, exist_ok=True)
+        
+        with open(target, "w") as f:
+            json.dump(self.to_dict(), f, indent=2)
+        
+        self._dirty = False
+    
+    def save_if_dirty(self, path: Path | None = None) -> bool:
+        """Save only if data has changed since last save."""
+        if self._dirty:
+            self.save(path)
+            return True
+        return False
+    
+    @classmethod
+    def load(cls, path: Path) -> "DifficultyHotspotAggregate":
+        """Load aggregate from disk."""
+        with open(path) as f:
+            data = json.load(f)
+        
+        return cls.from_dict(data, save_path=path)
+    
+    @classmethod
+    def load_or_create(cls, path: Path, bucket_size: int = 25) -> "DifficultyHotspotAggregate":
+        """Load from disk or create new if file doesn't exist."""
+        if path.exists():
+            return cls.load(path)
+        return cls(bucket_size=bucket_size, save_path=path)
+    
+    def summary(self) -> dict[str, Any]:
+        """Get summary of all levels."""
+        all_levels = set(self._deaths.keys()) | set(self._stuck.keys())
+        
+        return {
+            level_id: {
+                "total_deaths": sum(self._deaths.get(level_id, {}).values()),
+                "total_stuck": sum(self._stuck.get(level_id, {}).values()),
+                "hotspot_count": len(self.get_difficulty_hotspots(level_id, min_score=3.0)),
+            }
+            for level_id in all_levels
+        }
+
+    def export_difficulty_ranges(self, min_score: float = 3.0) -> dict[str, list[tuple[int, int]]]:
+        """Export difficulty ranges for all levels.
+        
+        Args:
+            min_score: Minimum difficulty score to include
+            
+        Returns:
+            Dict mapping level_id -> list of (start_x, end_x) tuples
+        """
+        all_levels = set(self._deaths.keys()) | set(self._stuck.keys())
+        
+        return {
+            level_id: self.get_difficult_ranges(level_id, min_score=min_score)
+            for level_id in all_levels
+            if self.get_difficult_ranges(level_id, min_score=min_score)  # Only include levels with ranges
+        }
+
+    def save_difficulty_ranges(self, path: Path, min_score: float = 3.0) -> None:
+        """Save difficulty ranges to a separate JSON file for workers.
+        
+        Args:
+            path: Path to save the ranges file
+            min_score: Minimum difficulty score to include
+        """
+        ranges = self.export_difficulty_ranges(min_score=min_score)
+        
+        # Convert tuples to lists for JSON serialization
+        serializable = {
+            level_id: [[start, end] for start, end in level_ranges]
+            for level_id, level_ranges in ranges.items()
+        }
+        
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with open(path, "w") as f:
+            json.dump(serializable, f, indent=2)
+
+    @staticmethod
+    def load_difficulty_ranges(path: Path) -> dict[str, list[tuple[int, int]]]:
+        """Load difficulty ranges from a JSON file.
+        
+        Args:
+            path: Path to the ranges file
+            
+        Returns:
+            Dict mapping level_id -> list of (start_x, end_x) tuples
+        """
+        if not path.exists():
+            return {}
+        
+        with open(path) as f:
+            data = json.load(f)
+        
+        return {
+            level_id: [(start, end) for start, end in ranges]
+            for level_id, ranges in data.items()
+        }

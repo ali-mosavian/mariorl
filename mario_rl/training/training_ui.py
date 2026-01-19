@@ -1267,10 +1267,14 @@ class TrainingUI:
             stdscr.addstr(" ")
             stdscr.addstr(f"{buffer_fill_pct:3.0f}%", buf_color)
 
-            # Elite buffer indicator
-            elite_size = ws.get("elite_size", 0)
-            if elite_size > 0:
-                stdscr.addstr(f"E{elite_size}", curses.color_pair(4))
+            # Protected buffer stats (death/flag/difficult)
+            buf_neg = int(ws.get("buf_neg", 0))
+            buf_pos = int(ws.get("buf_pos", 0))
+            buf_diff = int(ws.get("buf_diff", 0))
+            if buf_neg > 0 or buf_pos > 0 or buf_diff > 0:
+                stdscr.addstr(f" 💀{buf_neg}", curses.color_pair(3) if buf_neg > 0 else curses.A_DIM)
+                stdscr.addstr(f"🏁{buf_pos}", curses.color_pair(1) if buf_pos > 0 else curses.A_DIM)
+                stdscr.addstr(f"⚠{buf_diff}", curses.color_pair(2) if buf_diff > 0 else curses.A_DIM)
 
             # Training indicator
             train_char = "✓" if can_train else "✗"

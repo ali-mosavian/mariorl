@@ -20,6 +20,7 @@ from mario_rl.dashboard.aggregators import (
     aggregate_rate_data_direct,
     aggregate_death_distribution_direct,
     aggregate_death_hotspots_direct,
+    aggregate_timeout_hotspots_direct,
     level_sort_key,
     sample_data,
 )
@@ -55,11 +56,16 @@ def _cached_death_hotspots(checkpoint_dir: str) -> dict[str, dict[int, int]]:
     return aggregate_death_hotspots_direct(checkpoint_dir)
 
 
+@st.cache_data(ttl=5)
+def _cached_timeout_hotspots(checkpoint_dir: str) -> dict[str, dict[int, int]]:
+    return aggregate_timeout_hotspots_direct(checkpoint_dir)
+
+
 def render_levels_tab(
     checkpoint_dir: str,
     death_hotspots: dict[str, dict[int, int]] | None,
 ) -> None:
-    """Render levels tab with death hotspot visualization.
+    """Render levels tab with death/timeout hotspot visualization.
     
     Uses cached direct queries to DuckDB for optimal performance.
     """
@@ -68,6 +74,7 @@ def render_levels_tab(
     action_data = _cached_action_distribution(checkpoint_dir)
     rate_data = _cached_rate_data(checkpoint_dir)
     death_dist_data = _cached_death_distribution(checkpoint_dir)
+    timeout_hotspots = _cached_timeout_hotspots(checkpoint_dir)
     
     # Get death hotspots from CSV if not provided (for summary table)
     if death_hotspots is None or len(death_hotspots) == 0:
@@ -88,11 +95,11 @@ def render_levels_tab(
     # Per-level analysis section
     st.divider()
     st.subheader("🎮 Per-Level Analysis: Actions & Deaths")
-    _render_per_level_analysis(level_stats, action_data, rate_data, death_dist_data, death_hotspots)
+    _render_per_level_analysis(level_stats, action_data, rate_data, death_dist_data, death_hotspots, timeout_hotspots)
     
-    # Global death hotspots table
-    if death_hotspots:
-        _render_death_hotspots_summary(death_hotspots)
+    # Global hotspots summary (deaths and timeouts)
+    if death_hotspots or timeout_hotspots:
+        _render_hotspots_summary(death_hotspots or {}, timeout_hotspots)
 
 
 def _render_level_stats_table(level_stats: dict[str, LevelStats]) -> None:
@@ -256,8 +263,9 @@ def _render_per_level_analysis(
     rate_data: dict[str, list],
     death_dist_data: dict[str, list[DeathDistPoint]],
     death_hotspots: dict[str, dict[int, int]] | None,
+    timeout_hotspots: dict[str, dict[int, int]] | None = None,
 ) -> None:
-    """Render per-level analysis with actions, deaths, and rates side by side."""
+    """Render per-level analysis with actions, deaths/timeouts, and rates side by side."""
     
     # Get all levels from all data sources
     all_levels: set[str] = set()
@@ -267,6 +275,8 @@ def _render_per_level_analysis(
     all_levels.update(death_dist_data.keys())
     if death_hotspots:
         all_levels.update(death_hotspots.keys())
+    if timeout_hotspots:
+        all_levels.update(timeout_hotspots.keys())
     
     if not all_levels:
         st.info("⏳ No level data available yet...")
@@ -276,25 +286,30 @@ def _render_per_level_analysis(
     
     # Summary stats
     total_deaths = sum(sum(b.values()) for b in (death_hotspots or {}).values())
-    stats_cols = st.columns(3)
+    total_timeouts = sum(sum(b.values()) for b in (timeout_hotspots or {}).values())
+    stats_cols = st.columns(4)
     stats_cols[0].metric("Levels", len(sorted_levels))
-    stats_cols[1].metric("Total Deaths", total_deaths)
+    stats_cols[1].metric("💀 Total Deaths", total_deaths)
+    stats_cols[2].metric("⏰ Total Timeouts", total_timeouts)
     if death_hotspots:
         deadliest = max(death_hotspots.items(), key=lambda x: sum(x[1].values()), default=("?", {}))
-        stats_cols[2].metric("Deadliest Level", deadliest[0])
+        stats_cols[3].metric("Deadliest Level", deadliest[0])
     
     st.divider()
     
-    # Render each level as a row
+    # Render each level as a row with 4 columns: actions, deaths barchart, timeouts barchart, rates
     for level in sorted_levels:
         st.markdown(f"### Level {level}")
-        col_actions, col_deaths, col_rates = st.columns(3)
+        col_actions, col_deaths, col_timeouts, col_rates = st.columns(4)
         
         with col_actions:
             _render_level_action_heatmap(level, action_data)
         
         with col_deaths:
-            _render_level_death_heatmap(level, death_dist_data, death_hotspots)
+            _render_level_death_barchart(level, death_hotspots)
+        
+        with col_timeouts:
+            _render_level_timeout_barchart(level, timeout_hotspots)
         
         with col_rates:
             _render_level_rate_chart(level, rate_data)
@@ -332,65 +347,12 @@ def _render_level_action_heatmap(level: str, action_data: dict[str, list]) -> No
         st.info("⏳ Not enough action data")
 
 
-def _render_level_death_heatmap(
+def _render_level_death_barchart(
     level: str,
-    death_dist_data: dict[str, list[DeathDistPoint]],
     death_hotspots: dict[str, dict[int, int]] | None,
 ) -> None:
-    """Render death position heatmap over time for a single level."""
-    if level in death_dist_data and len(death_dist_data[level]) >= 2:
-        level_data = sorted(death_dist_data[level], key=lambda x: x.steps)
-        sampled = sample_data(level_data, max_points=30)
-        
-        # Collect all position buckets across all time points
-        all_positions: set[int] = set()
-        for point in sampled:
-            all_positions.update(point.position_counts.keys())
-        
-        if not all_positions:
-            st.info("⏳ No death position data")
-            return
-        
-        # Sort positions and create labels
-        sorted_positions = sorted(all_positions)
-        y_labels = [f"{pos}" for pos in sorted_positions]
-        x_labels = [f"{int(d.steps // 1000)}k" for d in sampled]
-        
-        # Build heatmap matrix: rows=positions, cols=time points
-        z_data = []
-        for pos in sorted_positions:
-            row = [point.position_counts.get(pos, 0) for point in sampled]
-            z_data.append(row)
-        
-        fig = make_heatmap(
-            z_data=z_data,
-            x_labels=x_labels,
-            y_labels=y_labels,
-            title="💀 Deaths Over Time",
-            height=250,
-            colorscale="Reds",
-        )
-        fig.update_layout(
-            xaxis=dict(title="Steps"),
-            yaxis=dict(title="X Position"),
-        )
-        st.plotly_chart(fig, use_container_width=True, key=f"deaths_{level}")
-        
-        # Death stats from hotspots (total counts)
-        if death_hotspots and level in death_hotspots:
-            buckets = death_hotspots[level]
-            total_level_deaths = sum(buckets.values())
-            if buckets:
-                hottest_pos = max(buckets.items(), key=lambda x: x[1])
-                st.caption(f"💀 Total: {total_level_deaths} | Hotspot: x={hottest_pos[0]}")
-            else:
-                st.caption(f"💀 Total: {total_level_deaths}")
-        else:
-            # Count from distribution data
-            total = sum(sum(p.position_counts.values()) for p in level_data)
-            st.caption(f"💀 Total: {total}")
-    elif death_hotspots and level in death_hotspots and death_hotspots[level]:
-        # Fallback to bar chart if not enough time-series data
+    """Render death position barchart for a single level."""
+    if death_hotspots and level in death_hotspots and death_hotspots[level]:
         buckets = death_hotspots[level]
         sorted_buckets = sorted(buckets.items(), key=lambda x: x[0])
         
@@ -398,8 +360,8 @@ def _render_level_death_heatmap(
         counts = [b[1] for b in sorted_buckets]
         
         fig = make_bar_chart(
-            x=positions,
-            y=counts,
+            x=counts,
+            y=positions,
             title="💀 Deaths by Position",
             height=250,
             color="crimson",
@@ -414,6 +376,37 @@ def _render_level_death_heatmap(
         st.caption(f"💀 Total: {total_level_deaths} | Hotspot: x={hottest_pos[0]}")
     else:
         st.info("⏳ No death position data")
+
+
+def _render_level_timeout_barchart(
+    level: str,
+    timeout_hotspots: dict[str, dict[int, int]] | None,
+) -> None:
+    """Render timeout position barchart for a single level."""
+    if timeout_hotspots and level in timeout_hotspots and timeout_hotspots[level]:
+        buckets = timeout_hotspots[level]
+        sorted_buckets = sorted(buckets.items(), key=lambda x: x[0])
+        
+        positions = [f"{b[0]}" for b in sorted_buckets]
+        counts = [b[1] for b in sorted_buckets]
+        
+        fig = make_bar_chart(
+            x=counts,
+            y=positions,
+            title="⏰ Timeouts by Position",
+            height=250,
+            color=COLORS["yellow"],
+            orientation="h",
+            x_title="Timeouts",
+            y_title="X Position",
+        )
+        st.plotly_chart(fig, use_container_width=True, key=f"timeouts_{level}")
+        
+        total_level_timeouts = sum(counts)
+        hottest_pos = max(buckets.items(), key=lambda x: x[1])
+        st.caption(f"⏰ Total: {total_level_timeouts} | Hotspot: x={hottest_pos[0]}")
+    else:
+        st.info("⏳ No timeout position data")
 
 
 def _render_level_rate_chart(level: str, rate_data: dict[str, list]) -> None:
@@ -452,44 +445,105 @@ def _render_level_rate_chart(level: str, rate_data: dict[str, list]) -> None:
         st.info("⏳ Not enough rate data")
 
 
-def _render_death_hotspots_summary(death_hotspots: dict[str, dict[int, int]]) -> None:
-    """Render global death hotspots summary."""
+def _render_hotspots_summary(
+    death_hotspots: dict[str, dict[int, int]],
+    timeout_hotspots: dict[str, dict[int, int]] | None,
+) -> None:
+    """Render global death and timeout hotspots summary."""
     total_deaths = sum(sum(b.values()) for b in death_hotspots.values())
+    total_timeouts = sum(sum(b.values()) for b in (timeout_hotspots or {}).values())
     
-    st.caption("🔥 TOP DEATH ZONES (ALL LEVELS)")
+    col1, col2 = st.columns(2)
     
-    all_hotspots = []
-    for level, buckets in death_hotspots.items():
-        for pos, count in buckets.items():
-            all_hotspots.append((level, pos, count))
+    with col1:
+        st.caption("🔥 TOP DEATH ZONES (ALL LEVELS)")
+        
+        all_death_hotspots = []
+        for level, buckets in death_hotspots.items():
+            for pos, count in buckets.items():
+                all_death_hotspots.append((level, pos, count))
+        
+        if all_death_hotspots:
+            top_death_spots = sorted(all_death_hotspots, key=lambda x: x[2], reverse=True)[:15]
+            death_rows = [
+                {
+                    "Level": level,
+                    "Position": f"x={pos}-{pos+25}",
+                    "Deaths": count,
+                    "% of Total": f"{count/total_deaths*100:.1f}%" if total_deaths > 0 else "0%",
+                }
+                for level, pos, count in top_death_spots
+            ]
+            st.dataframe(pd.DataFrame(death_rows), hide_index=True, use_container_width=True)
+        else:
+            st.info("⏳ No death data yet")
     
-    top_spots = sorted(all_hotspots, key=lambda x: x[2], reverse=True)[:15]
-    spot_rows = [
-        {
-            "Level": level,
-            "Position": f"x={pos}-{pos+25}",
-            "Deaths": count,
-            "% of Total": f"{count/total_deaths*100:.1f}%" if total_deaths > 0 else "0%",
-        }
-        for level, pos, count in top_spots
-    ]
-    st.dataframe(pd.DataFrame(spot_rows), hide_index=True, use_container_width=True)
+    with col2:
+        st.caption("⏰ TOP TIMEOUT ZONES (ALL LEVELS)")
+        
+        all_timeout_hotspots = []
+        for level, buckets in (timeout_hotspots or {}).items():
+            for pos, count in buckets.items():
+                all_timeout_hotspots.append((level, pos, count))
+        
+        if all_timeout_hotspots:
+            top_timeout_spots = sorted(all_timeout_hotspots, key=lambda x: x[2], reverse=True)[:15]
+            timeout_rows = [
+                {
+                    "Level": level,
+                    "Position": f"x={pos}-{pos+25}",
+                    "Timeouts": count,
+                    "% of Total": f"{count/total_timeouts*100:.1f}%" if total_timeouts > 0 else "0%",
+                }
+                for level, pos, count in top_timeout_spots
+            ]
+            st.dataframe(pd.DataFrame(timeout_rows), hide_index=True, use_container_width=True)
+        else:
+            st.info("⏳ No timeout data yet")
     
-    # Deaths per level bar chart
+    # Per-level totals bar charts (deaths and timeouts side by side)
     st.divider()
-    st.caption("📊 TOTAL DEATHS PER LEVEL")
     
-    level_deaths = {
-        level: sum(buckets.values()) 
-        for level, buckets in death_hotspots.items()
-    }
-    sorted_level_deaths = sorted(level_deaths.items(), key=lambda x: x[0])
+    col1, col2 = st.columns(2)
     
-    fig = make_bar_chart(
-        x=[l[0] for l in sorted_level_deaths],
-        y=[l[1] for l in sorted_level_deaths],
-        title="",
-        height=200,
-        color=COLORS["red"],
-    )
-    st.plotly_chart(fig, use_container_width=True)
+    with col1:
+        st.caption("📊 TOTAL DEATHS PER LEVEL")
+        
+        level_deaths = {
+            level: sum(buckets.values()) 
+            for level, buckets in death_hotspots.items()
+        }
+        if level_deaths:
+            sorted_level_deaths = sorted(level_deaths.items(), key=lambda x: level_sort_key(x[0]))
+            
+            fig = make_bar_chart(
+                x=[l[0] for l in sorted_level_deaths],
+                y=[l[1] for l in sorted_level_deaths],
+                title="",
+                height=200,
+                color=COLORS["red"],
+            )
+            st.plotly_chart(fig, use_container_width=True)
+        else:
+            st.info("⏳ No death data yet")
+    
+    with col2:
+        st.caption("📊 TOTAL TIMEOUTS PER LEVEL")
+        
+        level_timeouts = {
+            level: sum(buckets.values()) 
+            for level, buckets in (timeout_hotspots or {}).items()
+        }
+        if level_timeouts:
+            sorted_level_timeouts = sorted(level_timeouts.items(), key=lambda x: level_sort_key(x[0]))
+            
+            fig = make_bar_chart(
+                x=[l[0] for l in sorted_level_timeouts],
+                y=[l[1] for l in sorted_level_timeouts],
+                title="",
+                height=200,
+                color=COLORS["yellow"],
+            )
+            st.plotly_chart(fig, use_container_width=True)
+        else:
+            st.info("⏳ No timeout data yet")

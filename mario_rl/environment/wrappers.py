@@ -7,6 +7,60 @@ import gymnasium as gym
 from gymnasium.spaces import Box, Dict
 
 
+class DeathPenaltyWrapper(gym.Wrapper):
+    """
+    Add a strong death penalty to encourage survival.
+    
+    The base gym-super-mario-bros only gives ~-25 for death, which is too weak
+    for the agent to learn that death is catastrophic. This wrapper adds an
+    additional penalty to make death strongly negative.
+    
+    Args:
+        env: The environment to wrap
+        penalty: Additional penalty to add on death (default -475 to bring total to ~-500)
+    """
+    
+    def __init__(self, env: gym.Env, penalty: float = -475.0):
+        super().__init__(env)
+        self.penalty = penalty
+    
+    def step(self, action):
+        obs, reward, terminated, truncated, info = self.env.step(action)
+        
+        # Add death penalty if terminated but NOT from flag capture
+        if terminated and not info.get("flag_get", False):
+            reward += self.penalty
+        
+        return obs, reward, terminated, truncated, info
+
+
+class FlagBonusWrapper(gym.Wrapper):
+    """
+    Add a large bonus for capturing the flag to reinforce success.
+    
+    The base gym-super-mario-bros gives no special bonus for reaching the flag,
+    just the normal forward movement reward (~2-5). This wrapper adds a large
+    bonus to make flag capture strongly positive, symmetric with the death penalty.
+    
+    Args:
+        env: The environment to wrap
+        bonus: Bonus to add on flag capture (default +500)
+    """
+    
+    def __init__(self, env: gym.Env, bonus: float = 500.0):
+        super().__init__(env)
+        self.bonus = bonus
+    
+    def step(self, action):
+        obs, reward, terminated, truncated, info = self.env.step(action)
+        
+        # Add flag bonus if flag was captured
+        if info.get("flag_get", False):
+            reward += self.bonus
+        
+        return obs, reward, terminated, truncated, info
+
+
 class ResizeObservation(gym.ObservationWrapper):
     """Resize observations using OpenCV (much faster than skimage)."""
     

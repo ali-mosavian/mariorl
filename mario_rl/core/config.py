@@ -21,7 +21,7 @@ LevelType = Literal["sequential", "random"] | Tuple[Literal[1, 2, 3, 4, 5, 6, 7,
 class BufferConfig:
     """Configuration for replay buffers."""
 
-    capacity: int = 10_000
+    capacity: int = 25_000
     batch_size: int = 32
     n_step: int = 10
     gamma: float = 0.99
@@ -101,7 +101,7 @@ class WorkerConfig:
     steps_per_collection: int = 64
     train_steps: int = 4
     weight_sync_interval: float = 5.0  # Seconds between weight syncs
-    max_grad_norm: float = 10.0
+    max_grad_norm: float = 100.0
 
     # Reward normalization mode: "none" (use env rewards), "scale" (fixed), or "running"
     # - "none": use environment rewards directly (recommended - env already normalizes)
@@ -171,7 +171,7 @@ class LearnerConfig:
     learning_rate: float = 0.00025
     lr_end: float = 1e-5
     weight_decay: float = 1e-4
-    max_grad_norm: float = 10.0
+    max_grad_norm: float = 100.0
 
     # Target network
     tau: float = 0.005  # Soft update rate

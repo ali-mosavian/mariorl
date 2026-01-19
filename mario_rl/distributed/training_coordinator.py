@@ -100,12 +100,16 @@ class TrainingCoordinator:
             create=self.create_shm,
         )
 
-        # Create optimizer
+        # Collect trainable parameters (online network only)
+        params = [p for n, p in self.model.named_parameters() if n.startswith("online.")]
+        
+        # Create single optimizer for all parameters
         self.optimizer = Adam(
-            self.model.parameters(),
+            params,
             lr=self.learning_rate,
             weight_decay=self.weight_decay,
         )
+        print(f"[COORD] Optimizer: {len(params)} params @ LR={self.learning_rate}")
 
     @property
     def model(self):
@@ -167,7 +171,7 @@ class TrainingCoordinator:
             if name in averaged:
                 param.grad = averaged[name].to(param.device)
 
-        # Gradient clipping (returns total norm before clipping)
+        # Gradient clipping
         self._last_grad_norm = torch.nn.utils.clip_grad_norm_(
             self.model.parameters(),
             self.max_grad_norm,
@@ -192,7 +196,7 @@ class TrainingCoordinator:
         return self.lr_min + (self.learning_rate - self.lr_min) * cosine
 
     def update_lr(self) -> None:
-        """Update optimizer learning rate."""
+        """Update learning rate based on schedule."""
         lr = self.current_lr()
         for pg in self.optimizer.param_groups:
             pg["lr"] = lr

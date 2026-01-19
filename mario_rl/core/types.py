@@ -9,8 +9,12 @@ Using frozen dataclasses with slots for:
 """
 
 from dataclasses import dataclass
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
+
+if TYPE_CHECKING:
+    from mario_rl.environment.frame_stack import LazyFrames
 
 
 @dataclass(frozen=True, slots=True)
@@ -18,10 +22,10 @@ class Transition:
     """A single experience transition.
 
     Attributes:
-        state: Current observation.
+        state: Current observation (LazyFrames for memory efficiency, or np.ndarray).
         action: Action taken.
         reward: Reward received.
-        next_state: Next observation.
+        next_state: Next observation (LazyFrames for memory efficiency, or np.ndarray).
         done: Whether episode terminated.
         flag_get: Whether flag was captured (for priority boost).
         max_x: Maximum X position reached (for quality scoring).
@@ -29,18 +33,22 @@ class Transition:
         next_action_history: Action history for next state.
         danger_target: Target for auxiliary danger prediction (num_bins,).
                       Built from death positions relative to current x_pos.
+        level_id: Level identifier (e.g., "1-1") for difficulty-aware sampling.
+        x_pos: X position at this transition for difficulty-aware sampling.
     """
 
-    state: np.ndarray
+    state: "np.ndarray | LazyFrames | Any"  # LazyFrames preferred for memory efficiency
     action: int
     reward: float
-    next_state: np.ndarray
+    next_state: "np.ndarray | LazyFrames | Any"  # LazyFrames preferred for memory efficiency
     done: bool
     flag_get: bool = False
     max_x: int = 0
     action_history: np.ndarray | None = None
     next_action_history: np.ndarray | None = None
     danger_target: np.ndarray | None = None
+    level_id: str | None = None
+    x_pos: int = 0
 
 
 @dataclass(frozen=True, slots=True)
