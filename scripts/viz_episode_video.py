@@ -276,10 +276,23 @@ def generate_episode_video(
     action_history_len: int,
     level: tuple[int, int],
     scale: int,
+    frame_skip: int = 4,
 ) -> None:
-    """Generate video of a single episode with overlays."""
-    # Create environment with RGB rendering
-    env = create_mario_env(level=level, action_history_len=action_history_len)
+    """Generate video of a single episode with overlays.
+    
+    Captures EVERY frame (before frame skip) for smooth video playback.
+    Model predictions are updated every `frame_skip` frames.
+    """
+    from collections import deque
+    
+    from gym_super_mario_bros import actions as smb_actions
+    from nes_py.wrappers import JoypadSpace
+    
+    from mario_rl.environment.mariogym import SuperMarioBrosMultiLevel
+    
+    # Create base environment WITHOUT frame skip wrapper
+    base_env = SuperMarioBrosMultiLevel(level=level)
+    env = JoypadSpace(base_env, actions=smb_actions.SIMPLE_MOVEMENT)
     
     # Video dimensions
     base_width, base_height = 256, 240
@@ -295,64 +308,96 @@ def generate_episode_video(
     fourcc = cv2.VideoWriter_fourcc(*"mp4v")
     writer = cv2.VideoWriter(output_path, fourcc, fps, (out_width, out_height))
     
-    obs, _ = env.reset()
+    # Reset environment
+    obs_rgb, info = env.reset()
+    
+    # Initialize frame stack (4 grayscale 64x64 frames)
+    def preprocess_frame(rgb_frame: np.ndarray) -> np.ndarray:
+        """Convert RGB to grayscale 64x64."""
+        gray = cv2.cvtColor(rgb_frame, cv2.COLOR_RGB2GRAY)
+        resized = cv2.resize(gray, (64, 64), interpolation=cv2.INTER_AREA)
+        return resized
+    
+    # Initialize frame stack with first frame repeated
+    first_gray = preprocess_frame(obs_rgb)
+    frame_stack = deque([first_gray] * 4, maxlen=4)
+    
     action_history = torch.zeros(1, action_history_len, 7, device=device)
     
     frames_written = 0
     total_reward = 0
+    current_action = 0
+    frame_in_skip = 0
     
-    print(f"Recording episode (max {max_steps} steps)...")
+    # Cache for model predictions (updated every frame_skip frames)
+    q_real_cached = None
+    danger_probs_cached = None
+    attn_cached = None
     
-    for step in range(max_steps):
-        # Get RGB frame from environment
-        rgb_frame = env.render()
-        if rgb_frame is None:
-            print("Warning: render() returned None")
-            break
+    print(f"Recording episode (max {max_steps} env steps, capturing every frame)...")
+    
+    env_step = 0
+    done = False
+    
+    while env_step < max_steps and not done:
+        # Get current stacked observation for model
+        obs_stacked = np.stack(list(frame_stack), axis=0).astype(np.uint8)
+        state_tensor = torch.from_numpy(obs_stacked).unsqueeze(0).to(device)
+        
+        # Update model predictions at start of each frame skip cycle
+        if frame_in_skip == 0:
+            with torch.no_grad():
+                features = model.online.backbone(state_tensor, action_history)
+                q_symlog = model.online(state_tensor, action_history)
+                q_real_cached = symexp(q_symlog)
+                danger_logits = model.online.danger_head(features)
+                danger_probs_cached = torch.softmax(danger_logits, dim=1)
+                
+                # Get attention map
+                _ = model.online(state_tensor, action_history)
+                attn_cached = model.online.backbone.get_attention_map()
+            
+            # Select action for this frame skip cycle
+            if np.random.random() < epsilon:
+                current_action = np.random.randint(7)
+            else:
+                current_action = q_symlog.argmax(dim=1).item()
+        
+        # Get RGB frame and render
+        rgb_frame = base_env.render(mode="rgb_array")
         
         # Resize to output dimensions
         frame_resized = cv2.resize(rgb_frame, (out_width, out_height), interpolation=cv2.INTER_NEAREST)
         frame_bgr = cv2.cvtColor(frame_resized, cv2.COLOR_RGB2BGR)
         
-        # Get model predictions
-        state_tensor = torch.from_numpy(obs).unsqueeze(0).to(device)
-        
-        with torch.no_grad():
-            features = model.online.backbone(state_tensor, action_history)
-            q_symlog = model.online(state_tensor, action_history)
-            q_real = symexp(q_symlog)
-            danger_logits = model.online.danger_head(features)
-            danger_probs = torch.softmax(danger_logits, dim=1)
-            
-            # Get attention map
-            _ = model.online(state_tensor, action_history)
-            attn = model.online.backbone.get_attention_map()
-        
         # Apply attention overlay
-        if attn is not None:
-            attn_np = attn[0, 0].cpu().numpy()
+        if attn_cached is not None:
+            attn_np = attn_cached[0, 0].cpu().numpy()
             frame_bgr = apply_attention_overlay(frame_bgr, attn_np, attention_alpha)
         
         # Create and overlay Q-value chart
-        q_chart = create_qvalue_chart(q_real[0].cpu().numpy(), chart_width, chart_height_q)
-        frame_bgr = overlay_rgba_on_bgr(
-            frame_bgr,
-            q_chart,
-            out_width - chart_width - chart_margin,
-            chart_margin,
-        )
+        if q_real_cached is not None:
+            q_chart = create_qvalue_chart(q_real_cached[0].cpu().numpy(), chart_width, chart_height_q)
+            frame_bgr = overlay_rgba_on_bgr(
+                frame_bgr,
+                q_chart,
+                out_width - chart_width - chart_margin,
+                chart_margin,
+            )
         
         # Create and overlay danger chart
-        d_chart = create_danger_chart(danger_probs[0].cpu().numpy(), chart_width, chart_height_d)
-        frame_bgr = overlay_rgba_on_bgr(
-            frame_bgr,
-            d_chart,
-            out_width - chart_width - chart_margin,
-            chart_margin + chart_height_q + 5,
-        )
+        if danger_probs_cached is not None:
+            d_chart = create_danger_chart(danger_probs_cached[0].cpu().numpy(), chart_width, chart_height_d)
+            frame_bgr = overlay_rgba_on_bgr(
+                frame_bgr,
+                d_chart,
+                out_width - chart_width - chart_margin,
+                chart_margin + chart_height_q + 5,
+            )
         
         # Add info text overlay
-        info_text = f"Step: {step} | Reward: {total_reward:.0f}"
+        x_pos = info.get("x_pos", 0)
+        info_text = f"Step: {env_step} | X: {x_pos} | Reward: {total_reward:.0f}"
         cv2.putText(
             frame_bgr,
             info_text,
@@ -377,31 +422,33 @@ def generate_episode_video(
         writer.write(frame_bgr)
         frames_written += 1
         
-        # Select action
-        if np.random.random() < epsilon:
-            action = np.random.randint(7)
-        else:
-            action = q_symlog.argmax(dim=1).item()
-        
-        # Step environment
-        obs_next, reward, terminated, truncated, info = env.step(action)
+        # Step environment (single frame)
+        obs_rgb, reward, terminated, truncated, info = env.step(current_action)
         total_reward += reward
+        done = terminated or truncated
         
-        # Update action history
-        ah = torch.zeros(1, 1, 7, device=device)
-        ah[0, 0, action] = 1.0
-        action_history = torch.cat([action_history[:, 1:, :], ah], dim=1)
+        # Update frame stack
+        gray_frame = preprocess_frame(obs_rgb)
+        frame_stack.append(gray_frame)
         
-        obs = obs_next
+        # Track frame skip cycle
+        frame_in_skip += 1
+        if frame_in_skip >= frame_skip:
+            frame_in_skip = 0
+            env_step += 1
+            
+            # Update action history at end of frame skip cycle
+            ah = torch.zeros(1, 1, 7, device=device)
+            ah[0, 0, current_action] = 1.0
+            action_history = torch.cat([action_history[:, 1:, :], ah], dim=1)
         
-        if terminated or truncated:
-            x_pos = info.get("x_pos", 0)
-            flag = info.get("flag_get", False)
-            print(f"Episode ended: steps={step+1}, reward={total_reward:.0f}, x={x_pos}, flag={flag}")
-            break
-        
-        if step % 500 == 0:
-            print(f"  Step {step}, x={info.get('x_pos', 0)}, reward={total_reward:.0f}")
+        if env_step % 500 == 0 and frame_in_skip == 0:
+            print(f"  Step {env_step}, x={x_pos}, reward={total_reward:.0f}")
+    
+    if done:
+        x_pos = info.get("x_pos", 0)
+        flag = info.get("flag_get", False)
+        print(f"Episode ended: steps={env_step}, reward={total_reward:.0f}, x={x_pos}, flag={flag}")
     
     writer.release()
     env.close()
