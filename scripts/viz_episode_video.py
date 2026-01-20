@@ -255,8 +255,8 @@ def apply_attention_overlay(
     # Normalize attention
     attn_norm = (attn_resized - attn_resized.min()) / (attn_resized.max() - attn_resized.min() + 1e-8)
     
-    # Apply jet colormap
-    heatmap = plt.cm.jet(attn_norm)[:, :, :3]  # Drop alpha
+    # Apply grayscale colormap (white = high attention)
+    heatmap = plt.cm.gray(attn_norm)[:, :, :3]  # Drop alpha
     heatmap = (heatmap * 255).astype(np.uint8)
     heatmap_bgr = heatmap[:, :, ::-1]  # RGB to BGR
     
