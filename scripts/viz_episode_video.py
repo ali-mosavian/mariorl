@@ -18,6 +18,7 @@ import numpy as np
 import torch
 from PIL import Image
 from scipy.ndimage import zoom
+from tqdm import tqdm
 
 from mario_rl.agent.ddqn_net import DoubleDQN
 from mario_rl.environment.factory import create_mario_env
@@ -334,10 +335,16 @@ def generate_episode_video(
     danger_probs_cached = None
     attn_cached = None
     
-    print(f"Recording episode (max {max_steps} env steps, capturing every frame)...")
-    
     env_step = 0
     done = False
+    
+    # Progress bar for total frames (max_steps * frame_skip)
+    pbar = tqdm(
+        total=max_steps * frame_skip,
+        desc="Recording",
+        unit="frame",
+        ncols=80,
+    )
     
     while env_step < max_steps and not done:
         # Get current stacked observation for model
@@ -421,6 +428,7 @@ def generate_episode_video(
         
         writer.write(frame_bgr)
         frames_written += 1
+        pbar.update(1)
         
         # Step environment (single frame)
         obs_rgb, reward, terminated, truncated, info = env.step(current_action)
@@ -441,9 +449,11 @@ def generate_episode_video(
             ah = torch.zeros(1, 1, 7, device=device)
             ah[0, 0, current_action] = 1.0
             action_history = torch.cat([action_history[:, 1:, :], ah], dim=1)
-        
-        if env_step % 500 == 0 and frame_in_skip == 0:
-            print(f"  Step {env_step}, x={x_pos}, reward={total_reward:.0f}")
+            
+            # Update progress bar postfix
+            pbar.set_postfix(x=x_pos, r=f"{total_reward:.0f}")
+    
+    pbar.close()
     
     if done:
         x_pos = info.get("x_pos", 0)
