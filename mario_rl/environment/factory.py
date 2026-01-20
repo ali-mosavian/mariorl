@@ -58,6 +58,17 @@ class MarioEnvironment:
         result = self.env.step(action)
         return (np.asarray(result[0]), float(result[1]), bool(result[2]), bool(result[3]), dict(result[4]))
 
+    def render(self, mode: str = "rgb_array") -> np.ndarray | None:
+        """Render the current frame.
+        
+        Args:
+            mode: "rgb_array" returns RGB numpy array, "human" displays window
+            
+        Returns:
+            RGB frame as numpy array if mode="rgb_array", None otherwise
+        """
+        return self.base_env.render(mode=mode)
+
     def close(self) -> None:
         try:
             self.env.close()
