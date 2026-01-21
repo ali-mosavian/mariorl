@@ -10,13 +10,12 @@ These tests verify the DreamerLearner correctly:
 
 from dataclasses import dataclass
 
-import pytest
 import torch
+import pytest
 from torch import Tensor
 
 from mario_rl.learners import Learner
 from mario_rl.models import DreamerModel
-
 
 # =============================================================================
 # Configuration
@@ -99,9 +98,7 @@ def test_dreamer_learner_implements_learner_protocol(dreamer_learner) -> None:
     assert isinstance(dreamer_learner, Learner)
 
 
-def test_dreamer_learner_has_model_attribute(
-    dreamer_learner, dreamer_model: DreamerModel
-) -> None:
+def test_dreamer_learner_has_model_attribute(dreamer_learner, dreamer_model: DreamerModel) -> None:
     """DreamerLearner must expose its model as an attribute."""
     assert hasattr(dreamer_learner, "model")
     assert dreamer_learner.model is dreamer_model
@@ -112,9 +109,7 @@ def test_dreamer_learner_has_model_attribute(
 # =============================================================================
 
 
-def test_compute_loss_returns_scalar_tensor(
-    dreamer_learner, sample_batch: dict[str, Tensor]
-) -> None:
+def test_compute_loss_returns_scalar_tensor(dreamer_learner, sample_batch: dict[str, Tensor]) -> None:
     """compute_loss should return a scalar loss tensor."""
     loss, _ = dreamer_learner.compute_loss(**sample_batch)
 
@@ -123,9 +118,7 @@ def test_compute_loss_returns_scalar_tensor(
     assert loss.dtype == torch.float32
 
 
-def test_compute_loss_returns_metrics_dict(
-    dreamer_learner, sample_batch: dict[str, Tensor]
-) -> None:
+def test_compute_loss_returns_metrics_dict(dreamer_learner, sample_batch: dict[str, Tensor]) -> None:
     """compute_loss should return a metrics dictionary."""
     _, metrics = dreamer_learner.compute_loss(**sample_batch)
 
@@ -133,9 +126,7 @@ def test_compute_loss_returns_metrics_dict(
     assert "loss" in metrics
 
 
-def test_compute_loss_loss_is_finite(
-    dreamer_learner, sample_batch: dict[str, Tensor]
-) -> None:
+def test_compute_loss_loss_is_finite(dreamer_learner, sample_batch: dict[str, Tensor]) -> None:
     """Loss should be finite (not NaN or Inf)."""
     loss, _ = dreamer_learner.compute_loss(**sample_batch)
 
@@ -143,28 +134,21 @@ def test_compute_loss_loss_is_finite(
     assert not torch.isinf(loss)
 
 
-def test_compute_loss_requires_grad(
-    dreamer_learner, sample_batch: dict[str, Tensor]
-) -> None:
+def test_compute_loss_requires_grad(dreamer_learner, sample_batch: dict[str, Tensor]) -> None:
     """Loss tensor should require gradients for backprop."""
     loss, _ = dreamer_learner.compute_loss(**sample_batch)
 
     assert loss.requires_grad
 
 
-def test_compute_loss_allows_backprop(
-    dreamer_learner, sample_batch: dict[str, Tensor]
-) -> None:
+def test_compute_loss_allows_backprop(dreamer_learner, sample_batch: dict[str, Tensor]) -> None:
     """Backpropagation should compute gradients for model parameters."""
     dreamer_learner.model.zero_grad()
 
     loss, _ = dreamer_learner.compute_loss(**sample_batch)
     loss.backward()
 
-    has_grad = any(
-        p.grad is not None and p.grad.abs().sum() > 0
-        for p in dreamer_learner.model.parameters()
-    )
+    has_grad = any(p.grad is not None and p.grad.abs().sum() > 0 for p in dreamer_learner.model.parameters())
     assert has_grad
 
 
@@ -173,9 +157,7 @@ def test_compute_loss_allows_backprop(
 # =============================================================================
 
 
-def test_compute_world_model_loss(
-    dreamer_learner, sample_batch: dict[str, Tensor]
-) -> None:
+def test_compute_world_model_loss(dreamer_learner, sample_batch: dict[str, Tensor]) -> None:
     """Should be able to compute world model loss separately."""
     wm_loss, wm_metrics = dreamer_learner.compute_world_model_loss(
         states=sample_batch["states"],
@@ -190,9 +172,7 @@ def test_compute_world_model_loss(
     assert not torch.isnan(wm_loss)
 
 
-def test_world_model_loss_includes_dynamics(
-    dreamer_learner, sample_batch: dict[str, Tensor]
-) -> None:
+def test_world_model_loss_includes_dynamics(dreamer_learner, sample_batch: dict[str, Tensor]) -> None:
     """World model loss metrics should include dynamics loss."""
     _, metrics = dreamer_learner.compute_world_model_loss(
         states=sample_batch["states"],
@@ -205,9 +185,7 @@ def test_world_model_loss_includes_dynamics(
     assert "dynamics_loss" in metrics
 
 
-def test_world_model_loss_includes_reward(
-    dreamer_learner, sample_batch: dict[str, Tensor]
-) -> None:
+def test_world_model_loss_includes_reward(dreamer_learner, sample_batch: dict[str, Tensor]) -> None:
     """World model loss metrics should include reward prediction loss."""
     _, metrics = dreamer_learner.compute_world_model_loss(
         states=sample_batch["states"],
@@ -220,9 +198,7 @@ def test_world_model_loss_includes_reward(
     assert "reward_loss" in metrics
 
 
-def test_world_model_loss_includes_continue(
-    dreamer_learner, sample_batch: dict[str, Tensor]
-) -> None:
+def test_world_model_loss_includes_continue(dreamer_learner, sample_batch: dict[str, Tensor]) -> None:
     """World model loss metrics should include continue prediction loss."""
     _, metrics = dreamer_learner.compute_world_model_loss(
         states=sample_batch["states"],
@@ -251,9 +227,7 @@ def test_compute_behavior_loss(dreamer_learner, config: LearnerTestConfig) -> No
     assert not torch.isnan(behavior_loss)
 
 
-def test_behavior_loss_includes_actor_loss(
-    dreamer_learner, config: LearnerTestConfig
-) -> None:
+def test_behavior_loss_includes_actor_loss(dreamer_learner, config: LearnerTestConfig) -> None:
     """Behavior loss metrics should include actor loss."""
     z_start = torch.randn(config.batch_size, config.latent_dim)
 
@@ -262,9 +236,7 @@ def test_behavior_loss_includes_actor_loss(
     assert "actor_loss" in metrics
 
 
-def test_behavior_loss_includes_critic_loss(
-    dreamer_learner, config: LearnerTestConfig
-) -> None:
+def test_behavior_loss_includes_critic_loss(dreamer_learner, config: LearnerTestConfig) -> None:
     """Behavior loss metrics should include critic loss."""
     z_start = torch.randn(config.batch_size, config.latent_dim)
 
@@ -273,9 +245,7 @@ def test_behavior_loss_includes_critic_loss(
     assert "critic_loss" in metrics
 
 
-def test_behavior_loss_trains_on_imagination(
-    dreamer_learner, config: LearnerTestConfig
-) -> None:
+def test_behavior_loss_trains_on_imagination(dreamer_learner, config: LearnerTestConfig) -> None:
     """Behavior loss should be computed on imagined trajectories."""
     z_start = torch.randn(config.batch_size, config.latent_dim)
 
@@ -301,18 +271,14 @@ def test_update_targets_is_callable(dreamer_learner) -> None:
 # =============================================================================
 
 
-def test_metrics_include_world_model_metrics(
-    dreamer_learner, sample_batch: dict[str, Tensor]
-) -> None:
+def test_metrics_include_world_model_metrics(dreamer_learner, sample_batch: dict[str, Tensor]) -> None:
     """Total metrics should include world model components."""
     _, metrics = dreamer_learner.compute_loss(**sample_batch)
 
     assert any("dynamics" in k or "reward" in k for k in metrics.keys())
 
 
-def test_metrics_include_behavior_metrics(
-    dreamer_learner, sample_batch: dict[str, Tensor]
-) -> None:
+def test_metrics_include_behavior_metrics(dreamer_learner, sample_batch: dict[str, Tensor]) -> None:
     """Total metrics should include actor-critic components."""
     _, metrics = dreamer_learner.compute_loss(**sample_batch)
 
@@ -332,9 +298,7 @@ def test_single_sample_batch(dreamer_learner, config: LearnerTestConfig) -> None
     next_states = torch.randn(1, *config.input_shape)
     dones = torch.zeros(1)
 
-    loss, metrics = dreamer_learner.compute_loss(
-        states, actions, rewards, next_states, dones
-    )
+    loss, metrics = dreamer_learner.compute_loss(states, actions, rewards, next_states, dones)
 
     assert loss.dim() == 0
     assert isinstance(metrics, dict)
@@ -355,9 +319,7 @@ def test_all_done_batch(dreamer_learner, config: LearnerTestConfig) -> None:
 
 
 @pytest.mark.parametrize("horizon", [1, 5, 15, 30])
-def test_different_imagination_horizons(
-    dreamer_model: DreamerModel, horizon: int, config: LearnerTestConfig
-) -> None:
+def test_different_imagination_horizons(dreamer_model: DreamerModel, horizon: int, config: LearnerTestConfig) -> None:
     """Learner should work with different imagination horizons."""
     from mario_rl.learners.dreamer import DreamerLearner
 
@@ -382,9 +344,7 @@ def test_different_imagination_horizons(
 # =============================================================================
 
 
-def test_world_model_loss_includes_reconstruction(
-    dreamer_learner, sample_batch: dict[str, Tensor]
-) -> None:
+def test_world_model_loss_includes_reconstruction(dreamer_learner, sample_batch: dict[str, Tensor]) -> None:
     """World model loss metrics should include reconstruction loss."""
     _, metrics = dreamer_learner.compute_world_model_loss(
         states=sample_batch["states"],
@@ -398,9 +358,7 @@ def test_world_model_loss_includes_reconstruction(
     assert isinstance(metrics["recon_loss"], float)
 
 
-def test_world_model_loss_includes_kl(
-    dreamer_learner, sample_batch: dict[str, Tensor]
-) -> None:
+def test_world_model_loss_includes_kl(dreamer_learner, sample_batch: dict[str, Tensor]) -> None:
     """World model loss metrics should include KL divergence."""
     _, metrics = dreamer_learner.compute_world_model_loss(
         states=sample_batch["states"],
@@ -415,9 +373,7 @@ def test_world_model_loss_includes_kl(
     assert metrics["kl_loss"] >= 0.0  # KL is non-negative
 
 
-def test_reconstruction_loss_is_finite(
-    dreamer_learner, config: LearnerTestConfig
-) -> None:
+def test_reconstruction_loss_is_finite(dreamer_learner, config: LearnerTestConfig) -> None:
     """Reconstruction loss should be finite for valid inputs."""
     states = torch.randn(config.batch_size, *config.input_shape).abs()
     next_states = states.clone()
@@ -437,9 +393,7 @@ def test_reconstruction_loss_is_finite(
     assert not torch.isnan(torch.tensor(metrics["recon_loss"]))
 
 
-def test_total_metrics_include_reconstruction_metrics(
-    dreamer_learner, sample_batch: dict[str, Tensor]
-) -> None:
+def test_total_metrics_include_reconstruction_metrics(dreamer_learner, sample_batch: dict[str, Tensor]) -> None:
     """Total compute_loss metrics should include reconstruction."""
     _, metrics = dreamer_learner.compute_loss(**sample_batch)
 
@@ -515,7 +469,7 @@ def test_categorical_kl_with_free_bits() -> None:
 
     # Uniform posterior -> KL = 0 without free bits
     logits = torch.zeros(8, 32, 32)  # Uniform
-    
+
     kl_no_free = categorical_kl_loss(logits, None, free_bits=0.0)
     kl_with_free = categorical_kl_loss(logits, None, free_bits=1.0)
 

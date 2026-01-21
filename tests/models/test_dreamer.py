@@ -10,12 +10,11 @@ These tests verify the DreamerModel correctly:
 
 from dataclasses import dataclass
 
-import pytest
 import torch
+import pytest
 from torch import Tensor
 
 from mario_rl.models import Model
-
 
 # =============================================================================
 # Configuration
@@ -122,9 +121,7 @@ def test_encode_with_logits_returns_both(dreamer_model, sample_batch: Tensor, co
 # =============================================================================
 
 
-def test_imagine_step_returns_correct_shapes(
-    dreamer_model, config: DreamerTestConfig
-) -> None:
+def test_imagine_step_returns_correct_shapes(dreamer_model, config: DreamerTestConfig) -> None:
     """imagine_step should return next latent, hidden, reward, and continue predictions."""
     batch_size = 4
     z = torch.randn(batch_size, config.latent_dim)
@@ -138,9 +135,7 @@ def test_imagine_step_returns_correct_shapes(
     assert cont_pred.shape == (batch_size,)
 
 
-def test_imagine_trajectory_returns_correct_shapes(
-    dreamer_model, config: DreamerTestConfig
-) -> None:
+def test_imagine_trajectory_returns_correct_shapes(dreamer_model, config: DreamerTestConfig) -> None:
     """imagine_trajectory should return sequence of latents, rewards, conts, and logits."""
     batch_size = 4
     horizon = config.imagination_horizon
@@ -156,9 +151,7 @@ def test_imagine_trajectory_returns_correct_shapes(
     assert logits.shape == (batch_size, horizon, config.num_categoricals, config.num_classes)
 
 
-def test_imagine_trajectory_first_state_matches_start(
-    dreamer_model, config: DreamerTestConfig
-) -> None:
+def test_imagine_trajectory_first_state_matches_start(dreamer_model, config: DreamerTestConfig) -> None:
     """First state in imagined trajectory should match starting latent."""
     z_start = torch.randn(4, config.latent_dim)
 
@@ -167,9 +160,7 @@ def test_imagine_trajectory_first_state_matches_start(
     assert torch.equal(z_traj[:, 0], z_start)
 
 
-def test_imagine_trajectory_is_differentiable(
-    dreamer_model, config: DreamerTestConfig
-) -> None:
+def test_imagine_trajectory_is_differentiable(dreamer_model, config: DreamerTestConfig) -> None:
     """Imagined trajectory should support gradient computation."""
     z_start = torch.randn(4, config.latent_dim, requires_grad=True)
 
@@ -246,9 +237,7 @@ def test_critic_supports_gradient_flow(dreamer_model, config: DreamerTestConfig)
 # =============================================================================
 
 
-def test_forward_returns_action_logits(
-    dreamer_model, sample_batch: Tensor, config: DreamerTestConfig
-) -> None:
+def test_forward_returns_action_logits(dreamer_model, sample_batch: Tensor, config: DreamerTestConfig) -> None:
     """Forward pass should return action logits with shape (batch, num_actions)."""
     logits = dreamer_model(sample_batch)
 
@@ -376,9 +365,7 @@ def test_has_decoder(dreamer_model) -> None:
     assert hasattr(dreamer_model, "decoder")
 
 
-def test_decoder_returns_correct_shape(
-    dreamer_model, config: DreamerTestConfig
-) -> None:
+def test_decoder_returns_correct_shape(dreamer_model, config: DreamerTestConfig) -> None:
     """Decoder should reconstruct images with original input shape."""
     batch_size = 8
     z = torch.randn(batch_size, config.latent_dim)
@@ -389,9 +376,7 @@ def test_decoder_returns_correct_shape(
     assert reconstruction.shape == (batch_size, *config.input_shape)
 
 
-def test_decoder_supports_gradient_flow(
-    dreamer_model, config: DreamerTestConfig
-) -> None:
+def test_decoder_supports_gradient_flow(dreamer_model, config: DreamerTestConfig) -> None:
     """Gradients should flow through decoder."""
     z = torch.randn(8, config.latent_dim, requires_grad=True)
 
@@ -402,9 +387,7 @@ def test_decoder_supports_gradient_flow(
     assert z.grad is not None
 
 
-def test_encode_decode_roundtrip(
-    dreamer_model, sample_batch: Tensor, config: DreamerTestConfig
-) -> None:
+def test_encode_decode_roundtrip(dreamer_model, sample_batch: Tensor, config: DreamerTestConfig) -> None:
     """Encoding then decoding should produce same-shaped output."""
     normalized = sample_batch.abs() / (sample_batch.abs().max() + 1e-6)
 
@@ -435,7 +418,8 @@ def test_symexp_function_exists() -> None:
 
 def test_symlog_symexp_roundtrip() -> None:
     """symexp(symlog(x)) should equal x."""
-    from mario_rl.models.dreamer import symlog, symexp
+    from mario_rl.models.dreamer import symexp
+    from mario_rl.models.dreamer import symlog
 
     x = torch.randn(100) * 100  # Large range
 
@@ -510,7 +494,7 @@ def test_categorical_sample_is_one_hot_like(dreamer_model, config: DreamerTestCo
 
     # Reshape to check one-hot structure
     z_shaped = z.view(-1, config.num_categoricals, config.num_classes)
-    
+
     # Sum over classes should be ~1 for each categorical
     sums = z_shaped.sum(dim=-1)
     assert torch.allclose(sums, torch.ones_like(sums), atol=0.1)

@@ -15,13 +15,13 @@ Key components:
 - Protocols: PolicyAdapter, ValueAdapter, WorldModelAdapter interfaces
 """
 
-from mario_rl.mcts.node import EmulatorNode
-from mario_rl.mcts.node import LatentNode
 from mario_rl.mcts.node import MCTSNode
+from mario_rl.mcts.node import LatentNode
 from mario_rl.mcts.config import MCTSConfig
+from mario_rl.mcts.node import EmulatorNode
 from mario_rl.mcts.adapters import DDQNAdapter
-from mario_rl.mcts.adapters import MuZeroAdapter
 from mario_rl.mcts.explorer import MCTSExplorer
+from mario_rl.mcts.adapters import MuZeroAdapter
 from mario_rl.mcts.protocols import ValueAdapter
 from mario_rl.mcts.adapters import DreamerAdapter
 from mario_rl.mcts.protocols import PolicyAdapter

@@ -415,7 +415,7 @@ class TrainingUI:
 
                 # Format label based on magnitude
                 if abs(val) >= 1000:
-                    label = f"{val/1000:5.1f}k"
+                    label = f"{val / 1000:5.1f}k"
                 elif abs(val) >= 1:
                     label = f"{val:6.1f}"
                 else:
@@ -448,9 +448,9 @@ class TrainingUI:
             # Format function based on magnitude
             def fmt_steps(v: int) -> str:
                 if v >= 1_000_000:
-                    return f"{v/1_000_000:.1f}M"
+                    return f"{v / 1_000_000:.1f}M"
                 elif v >= 1000:
-                    return f"{v/1000:.0f}k"
+                    return f"{v / 1000:.0f}k"
                 else:
                     return f"{v:.0f}"
 
@@ -578,7 +578,15 @@ class TrainingUI:
         # Graphs section - show if we have distributed DDQN data and enough height
         has_graph_data = len(self.graph_reward_history) > 2
         # Calculate available space for graphs
-        used_height = header_height + world_model_height + ppo_height + learner_height + workers_total_height + convergence_height + 3
+        used_height = (
+            header_height
+            + world_model_height
+            + ppo_height
+            + learner_height
+            + workers_total_height
+            + convergence_height
+            + 3
+        )
         available_for_graphs_and_logs = height - used_height
         # Only show graphs if we have enough space (need at least 5 lines for logs)
         graphs_height = 12 if has_graph_data and available_for_graphs_and_logs > 17 else 0
@@ -662,7 +670,7 @@ class TrainingUI:
             reward_mean = ls.get("reward_mean", 0)
             steps_per_sec = ls.get("steps_per_sec", 0)
             queue_msgs_per_sec = ls.get("queue_msgs_per_sec", 0)
-            queue_kb_per_sec = ls.get("queue_kb_per_sec", 0)
+            ls.get("queue_kb_per_sec", 0)
             # New diagnostics from DDQN learner / new metrics system
             lr = ls.get("lr", ls.get("learning_rate", 0))
             grads_per_sec = ls.get("grads_per_sec", 0)
@@ -715,7 +723,9 @@ class TrainingUI:
                 actor_loss = ls.get("actor_loss", 0)
                 critic_loss = ls.get("critic_loss", 0)
                 entropy = ls.get("entropy", 0)
-                stdscr.addstr(y + 3, 4, f"WM: {wm_loss:.4f}  Actor: {actor_loss:.4f}  Critic: {critic_loss:.4f}  H: {entropy:.3f}")
+                stdscr.addstr(
+                    y + 3, 4, f"WM: {wm_loss:.4f}  Actor: {actor_loss:.4f}  Critic: {critic_loss:.4f}  H: {entropy:.3f}"
+                )
             else:
                 stdscr.addstr(y + 3, 4, f"Q: μ={q_mean:.2f}")
                 if q_max > 0:
@@ -966,7 +976,7 @@ class TrainingUI:
             # Main stats line with model-specific metrics and weight sync
             game_time = int(ws.get("game_time", 0))
             model_type = ws.get("model_type", "ddqn")
-            
+
             # Build model-specific metric string
             if model_type == "dreamer":
                 wm_loss = ws.get("wm_loss", 0)
@@ -974,7 +984,7 @@ class TrainingUI:
                 metric_str = f"WM: {wm_loss:.3f}  Act: {actor_loss:.3f}"
             else:
                 metric_str = f"Q: {q_mean:.1f}/{q_max:.1f}"
-            
+
             stats = f"Ep: {episode:4d}  Step: {step:4d}  X: {x_pos:4d}  ⏱ {game_time:3d}  Best: {best_x:4d}  {metric_str}  {steps_per_sec:.0f} sps  Wgt: {sync_str}"
             stdscr.addstr(y + 1, 4, stats)
 
@@ -1000,7 +1010,7 @@ class TrainingUI:
             avg_speed = ws.get("avg_speed", ws.get("speed", 0))
             avg_x_at_death = ws.get("avg_x_at_death", 0)
             avg_time_to_flag = ws.get("avg_time_to_flag", 0)
-            total_deaths = ws.get("total_deaths", ws.get("deaths", 0))
+            ws.get("total_deaths", ws.get("deaths", 0))
 
             # Buffer diagnostics
             buffer_fill_pct = ws.get("buffer_fill_pct", 0)
@@ -1033,7 +1043,7 @@ class TrainingUI:
             elite_size = ws.get("elite_size", 0)
             elite_capacity = ws.get("elite_capacity", 1000)
             if elite_size > 0:
-                elite_pct = elite_size / elite_capacity * 100
+                elite_size / elite_capacity * 100
                 stdscr.addstr(f" E={elite_size}", curses.color_pair(4))  # Cyan
 
             # Training indicator
@@ -1094,7 +1104,7 @@ class TrainingUI:
                     line_parts.append(left + "─" * (col_width - 1))
                 # Add right edge
                 right = "┐" if row == 0 else "┤"
-                stdscr.addstr(current_y, 0, "".join(line_parts)[:width-1] + right, curses.A_DIM)
+                stdscr.addstr(current_y, 0, "".join(line_parts)[: width - 1] + right, curses.A_DIM)
             except curses.error:
                 pass
             current_y += 1
@@ -1132,7 +1142,7 @@ class TrainingUI:
                 for col in range(num_cols):
                     left = "└" if col == 0 else "┴"
                     line_parts.append(left + "─" * (col_width - 1))
-                stdscr.addstr(current_y, 0, "".join(line_parts)[:width-1] + "┘", curses.A_DIM)
+                stdscr.addstr(current_y, 0, "".join(line_parts)[: width - 1] + "┘", curses.A_DIM)
             except curses.error:
                 pass
             current_y += 1
@@ -1164,7 +1174,7 @@ class TrainingUI:
             current_level = "?"
             device_short = ""
         header = f"W{worker_id}[{current_level}]" + (f"({device_short})" if device_short else "")
-        
+
         # Calculate heartbeat status
         last_heartbeat = ws.get("last_heartbeat", 0) if ws else 0
         if last_heartbeat > 0:
@@ -1181,7 +1191,7 @@ class TrainingUI:
         else:
             heartbeat_status = "⚪"  # No heartbeat data yet
             heartbeat_attr = curses.A_DIM
-        
+
         try:
             stdscr.addstr(y, x, header, curses.A_BOLD | curses.color_pair(5))
             stdscr.addstr(y, x + len(header), heartbeat_status, heartbeat_attr)
@@ -1218,7 +1228,7 @@ class TrainingUI:
         can_train = ws.get("can_train", buffer_size >= 32)
         # Support both old (avg_speed) and new (speed) field names
         avg_speed = ws.get("avg_speed", ws.get("speed", 0))
-        total_deaths = int(ws.get("total_deaths", ws.get("deaths", 0)))
+        int(ws.get("total_deaths", ws.get("deaths", 0)))
         snapshot_saves = int(ws.get("snapshot_saves", 0))
         snapshot_restores = int(ws.get("snapshot_restores", 0))
         last_weight_sync = ws.get("last_weight_sync", 0)
@@ -1425,7 +1435,7 @@ def send_learner_status(
             "queue_kb_per_sec": queue_kb_per_sec,
             "model_type": model_type,
         }
-        
+
         # Add Dreamer metrics if provided
         if wm_loss is not None:
             data["wm_loss"] = wm_loss
@@ -1435,7 +1445,7 @@ def send_learner_status(
             data["critic_loss"] = critic_loss
         if entropy is not None:
             data["entropy"] = entropy
-            
+
         queue.put_nowait(
             UIMessage(
                 msg_type=MessageType.LEARNER_STATUS,
@@ -1515,7 +1525,7 @@ def send_worker_status(
             # Model type for UI to know which metrics to show
             "model_type": model_type,
         }
-        
+
         # Add Dreamer metrics if provided
         if wm_loss is not None:
             data["wm_loss"] = wm_loss
@@ -1525,7 +1535,7 @@ def send_worker_status(
             data["critic_loss"] = critic_loss
         if entropy is not None:
             data["entropy"] = entropy
-            
+
         queue.put_nowait(
             UIMessage(
                 msg_type=MessageType.WORKER_STATUS,

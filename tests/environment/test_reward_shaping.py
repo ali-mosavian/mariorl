@@ -4,10 +4,9 @@ from __future__ import annotations
 
 import pytest
 
-from mario_rl.environment.mariogym import MILESTONES
-from mario_rl.environment.mariogym import Reward
-from mario_rl.environment.mariogym import State
-
+from mario_rl.environment.mariogym import State  # type: ignore[attr-defined]
+from mario_rl.environment.mariogym import Reward  # type: ignore[attr-defined]
+from mario_rl.environment.mariogym import MILESTONES  # type: ignore[attr-defined]
 
 # =============================================================================
 # Fixtures

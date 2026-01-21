@@ -19,22 +19,20 @@ The learner handles:
 - Target network updates
 """
 
-from dataclasses import dataclass
-from dataclasses import field
 from typing import Any
+from dataclasses import field
+from dataclasses import dataclass
 
-import numpy as np
 import torch
-import torch.nn.functional as F
+import numpy as np
 from torch import Tensor
+import torch.nn.functional as F
 
-from mario_rl.mcts import LatentNode
 from mario_rl.mcts import MCTSNode
-from mario_rl.models.muzero import MuZeroConfig
-from mario_rl.models.muzero import MuZeroModel
-from mario_rl.models.muzero import info_nce_loss
 from mario_rl.models.muzero import symexp
 from mario_rl.models.muzero import symlog
+from mario_rl.models.muzero import MuZeroModel
+from mario_rl.models.muzero import info_nce_loss
 
 
 def scale_gradient(tensor: Tensor, scale: float) -> Tensor:
@@ -179,9 +177,7 @@ class MuZeroLearner:
             z_scaled = scale_gradient(z, gradient_scale)
 
             # r and v are in symlog space
-            z_pred, r, policy_logits, v = self.model.recurrent_inference(
-                z_scaled, actions[:, k]
-            )
+            z_pred, r, policy_logits, v = self.model.recurrent_inference(z_scaled, actions[:, k])
 
             # Policy loss
             policy_loss_k = F.cross_entropy(
@@ -246,23 +242,40 @@ class MuZeroLearner:
 
         if consistency_losses:
             consistency_loss = torch.stack(consistency_losses, dim=1).mean(dim=1)
-            total_loss = total_loss + self.consistency_loss_weight * consistency_loss
-            consistency_loss_mean = (weights * consistency_loss).mean().item()
+            if self.consistency_loss_weight is not None:
+                total_loss = total_loss + self.consistency_loss_weight * consistency_loss
+            if weights is not None:
+                consistency_loss_mean = (weights * consistency_loss).mean().item()
+            else:
+                consistency_loss_mean = consistency_loss.mean().item()
 
         if contrastive_losses:
             contrastive_loss = torch.stack(contrastive_losses, dim=1).mean(dim=1)
-            total_loss = total_loss + self.contrastive_loss_weight * contrastive_loss
-            contrastive_loss_mean = (weights * contrastive_loss).mean().item()
+            if self.contrastive_loss_weight is not None:
+                total_loss = total_loss + self.contrastive_loss_weight * contrastive_loss
+            if weights is not None:
+                contrastive_loss_mean = (weights * contrastive_loss).mean().item()
+            else:
+                contrastive_loss_mean = contrastive_loss.mean().item()
 
         # Apply importance weights and average over batch
-        loss = (weights * total_loss).mean()
+        if weights is not None:
+            loss = (weights * total_loss).mean()
+            policy_loss_val = (weights * policy_loss).mean().item()
+            value_loss_val = (weights * value_loss).mean().item()
+            reward_loss_val = (weights * reward_loss).mean().item()
+        else:
+            loss = total_loss.mean()
+            policy_loss_val = policy_loss.mean().item()
+            value_loss_val = value_loss.mean().item()
+            reward_loss_val = reward_loss.mean().item()
 
         # Metrics - convert values back to real space for interpretability
         metrics = {
             "loss": loss.item(),
-            "policy_loss": (weights * policy_loss).mean().item(),
-            "value_loss": (weights * value_loss).mean().item(),
-            "reward_loss": (weights * reward_loss).mean().item(),
+            "policy_loss": policy_loss_val,
+            "value_loss": value_loss_val,
+            "reward_loss": reward_loss_val,
             "consistency_loss": consistency_loss_mean,
             "contrastive_loss": contrastive_loss_mean,
             # Convert from symlog space to real space for metrics
@@ -315,9 +328,7 @@ class MuZeroLearner:
             # Convert to real space for TD calculation
             v_target_real = symexp(v_target_symlog)
             # Bootstrap target in real space: r + γ * V(s') * (1 - done)
-            value_target_real = rewards + self.model.config.discount * v_target_real * (
-                1.0 - dones.float()
-            )
+            value_target_real = rewards + self.model.config.discount * v_target_real * (1.0 - dones.float())
             # Convert back to symlog space for loss
             value_target_symlog = symlog(value_target_real)
 
@@ -353,13 +364,11 @@ class MuZeroLearner:
         )
 
         # Combine losses
-        total_loss = (
-            value_loss
-            + reward_loss
-            + 0.01 * policy_loss
-            + self.consistency_loss_weight * consistency_loss
-            + self.contrastive_loss_weight * contrastive_loss
-        )
+        total_loss = value_loss + reward_loss + 0.01 * policy_loss
+        if self.consistency_loss_weight is not None:
+            total_loss = total_loss + self.consistency_loss_weight * consistency_loss
+        if self.contrastive_loss_weight is not None:
+            total_loss = total_loss + self.contrastive_loss_weight * contrastive_loss
 
         if weights is not None:
             loss = (weights * total_loss).mean()
@@ -475,6 +484,7 @@ def run_mcts(
             node = node.best_child(exploration=exploration, use_puct=True)
 
         # Expansion: expand all actions from leaf
+        value_to_backprop: float
         if not node.terminal:
             with torch.no_grad():
                 # Get policy from current node's latent state z
@@ -516,7 +526,7 @@ def run_mcts(
             current.total_value += value_to_backprop + cumulative_reward
             # Accumulate discounted reward going up
             cumulative_reward = current.reward + discount * cumulative_reward
-            current = current.parent
+            current = current.parent  # type: ignore[assignment]
 
     # Get policy from visit counts
     policy = root.get_policy_target(num_actions, temperature)
@@ -588,13 +598,13 @@ class MuZeroTrajectoryCollector:
 
     Usage:
         collector = MuZeroTrajectoryCollector(...)
-        
+
         # At start of episode
         collector.start_episode(initial_obs)
-        
+
         # After each step
         collector.add_step(action, reward, next_obs, done, policy, value)
-        
+
         # Get trajectory segments for storage
         trajectories = collector.get_trajectories()
     """
@@ -660,7 +670,7 @@ class MuZeroTrajectoryCollector:
         collected episode data. Each segment contains:
         - Initial observation
         - K actions
-        - K rewards  
+        - K rewards
         - K+1 policy targets (from MCTS visit counts)
         - K+1 value targets (computed from MCTS values using n-step returns)
         - K next observations (for grounding losses)
@@ -697,26 +707,28 @@ class MuZeroTrajectoryCollector:
             obs = self._obs[t]
             actions = np.array(self._actions[t : t + K], dtype=np.int64)
             rewards = np.array(self._rewards[t : t + K], dtype=np.float32)
-            
+
             # K+1 policies and value targets
             policies = np.stack(self._policies[t : t + K + 1], axis=0)
             values = np.array(value_targets[t : t + K + 1], dtype=np.float32)
-            
+
             # K next observations (for grounding)
             next_obs = np.stack(self._obs[t + 1 : t + K + 1], axis=0)
-            
+
             # K+1 done flags
             dones = np.array(self._dones[t : t + K + 1], dtype=np.float32)
 
-            trajectories.append({
-                "obs": obs,
-                "actions": actions,
-                "rewards": rewards,
-                "policies": policies,
-                "values": values,
-                "next_obs": next_obs,
-                "dones": dones,
-            })
+            trajectories.append(
+                {
+                    "obs": obs,
+                    "actions": actions,
+                    "rewards": rewards,
+                    "policies": policies,
+                    "values": values,
+                    "next_obs": next_obs,
+                    "dones": dones,
+                }
+            )
 
         return trajectories
 

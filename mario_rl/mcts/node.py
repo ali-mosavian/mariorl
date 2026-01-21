@@ -5,11 +5,11 @@ Supports both real MCTS (emulator snapshots) and imagined MCTS (latent states).
 
 from __future__ import annotations
 
-from dataclasses import dataclass
 from dataclasses import field
+from dataclasses import dataclass
 
-import numpy as np
 import torch
+import numpy as np
 
 
 @dataclass
@@ -87,13 +87,7 @@ class MCTSNode[S]:
             return self.value
 
         exploit = self.value
-        explore = (
-            exploration
-            * self.prior
-            * prior_weight
-            * float(np.sqrt(self.parent.visits))
-            / (1 + self.visits)
-        )
+        explore = exploration * self.prior * prior_weight * float(np.sqrt(self.parent.visits)) / (1 + self.visits)
         return exploit + explore
 
     def is_fully_expanded(self, num_actions: int) -> bool:

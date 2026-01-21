@@ -9,13 +9,12 @@ These tests verify the ReplayBuffer correctly:
 
 from dataclasses import dataclass
 
+import torch
 import pytest
 import numpy as np
-import torch
 from torch import Tensor
 
 from mario_rl.core.types import Transition
-
 
 # =============================================================================
 # Configuration
@@ -101,7 +100,7 @@ def test_add_increases_length(replay_buffer, sample_transition: Transition) -> N
     # With n_step=3, first transition appears after 3 adds
     replay_buffer.add(sample_transition)
     replay_buffer.add(sample_transition)
-    
+
     assert len(replay_buffer) >= 1
 
 
@@ -259,18 +258,24 @@ def test_nstep_handles_episode_boundary(config: BufferTestConfig) -> None:
     )
 
     # Add transitions where middle one is done
-    buffer.add(Transition(
-        state=np.zeros(config.obs_shape, dtype=np.float32),
-        action=0, reward=1.0,
-        next_state=np.zeros(config.obs_shape, dtype=np.float32),
-        done=False,
-    ))
-    buffer.add(Transition(
-        state=np.zeros(config.obs_shape, dtype=np.float32),
-        action=0, reward=2.0,
-        next_state=np.zeros(config.obs_shape, dtype=np.float32),
-        done=True,  # Episode ends here
-    ))
+    buffer.add(
+        Transition(
+            state=np.zeros(config.obs_shape, dtype=np.float32),
+            action=0,
+            reward=1.0,
+            next_state=np.zeros(config.obs_shape, dtype=np.float32),
+            done=False,
+        )
+    )
+    buffer.add(
+        Transition(
+            state=np.zeros(config.obs_shape, dtype=np.float32),
+            action=0,
+            reward=2.0,
+            next_state=np.zeros(config.obs_shape, dtype=np.float32),
+            done=True,  # Episode ends here
+        )
+    )
 
     # Should still produce valid transitions
     assert len(buffer) >= 1
@@ -288,13 +293,15 @@ def test_nstep_one_is_regular_buffer(config: BufferTestConfig) -> None:
     )
 
     # Add single transition
-    buffer.add(Transition(
-        state=np.ones(config.obs_shape, dtype=np.float32),
-        action=5,
-        reward=10.0,
-        next_state=np.ones(config.obs_shape, dtype=np.float32) * 2,
-        done=False,
-    ))
+    buffer.add(
+        Transition(
+            state=np.ones(config.obs_shape, dtype=np.float32),
+            action=5,
+            reward=10.0,
+            next_state=np.ones(config.obs_shape, dtype=np.float32) * 2,
+            done=False,
+        )
+    )
 
     # Should be immediately available (no n-step delay)
     assert len(buffer) == 1
@@ -410,18 +417,24 @@ def test_flush_at_episode_end(config: BufferTestConfig) -> None:
     )
 
     # Add 2 transitions (less than n_step)
-    buffer.add(Transition(
-        state=np.zeros(config.obs_shape, dtype=np.float32),
-        action=0, reward=1.0,
-        next_state=np.zeros(config.obs_shape, dtype=np.float32),
-        done=False,
-    ))
-    buffer.add(Transition(
-        state=np.zeros(config.obs_shape, dtype=np.float32),
-        action=0, reward=2.0,
-        next_state=np.zeros(config.obs_shape, dtype=np.float32),
-        done=True,  # Episode ends
-    ))
+    buffer.add(
+        Transition(
+            state=np.zeros(config.obs_shape, dtype=np.float32),
+            action=0,
+            reward=1.0,
+            next_state=np.zeros(config.obs_shape, dtype=np.float32),
+            done=False,
+        )
+    )
+    buffer.add(
+        Transition(
+            state=np.zeros(config.obs_shape, dtype=np.float32),
+            action=0,
+            reward=2.0,
+            next_state=np.zeros(config.obs_shape, dtype=np.float32),
+            done=True,  # Episode ends
+        )
+    )
 
     # Flush to get remaining transitions
     buffer.flush()

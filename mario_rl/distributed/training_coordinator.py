@@ -9,25 +9,26 @@ Combines:
 - Optional: MetricLogger for CSV/ZMQ metrics
 """
 
-from typing import Any, Protocol
-from pathlib import Path
-from dataclasses import field
-from dataclasses import dataclass
 import math
 import time
+from typing import Any
+from pathlib import Path
+from typing import Protocol
+from dataclasses import field
+from dataclasses import dataclass
 
 import torch
 from torch import Tensor
 from torch.optim import Adam
 
 from mario_rl.learners.base import Learner
-from mario_rl.distributed.shm_gradient_pool import SharedGradientPool
 from mario_rl.training.shared_gradient_tensor import GradientPacket
+from mario_rl.distributed.shm_gradient_pool import SharedGradientPool
 
 
 class MetricsLogger(Protocol):
     """Protocol for metrics logger (avoids hard dependency)."""
-    
+
     def count(self, name: str, n: int = 1) -> None: ...
     def gauge(self, name: str, value: float) -> None: ...
     def observe(self, name: str, value: float) -> None: ...
@@ -102,7 +103,7 @@ class TrainingCoordinator:
 
         # Collect trainable parameters (online network only)
         params = [p for n, p in self.model.named_parameters() if n.startswith("online.")]
-        
+
         # Create single optimizer for all parameters
         self.optimizer = Adam(
             params,

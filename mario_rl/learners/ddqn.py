@@ -153,10 +153,10 @@ class DDQNLearner:
             next_q_online = self.model(next_states, network="online", action_history=next_hist)
             next_q_target = self.model(next_states, network="target", action_history=next_hist)
 
-            best_actions = next_q_online.argmax(dim=1)  # (batch,)
+            best_actions = next_q_online.argmax(dim=1)  # type: ignore[union-attr]  # (batch,)
 
             # Value evaluation with target network (symlog-scaled)
-            next_q_selected_symlog = next_q_target.gather(1, best_actions.unsqueeze(1)).squeeze(1)
+            next_q_selected_symlog = next_q_target.gather(1, best_actions.unsqueeze(1)).squeeze(1)  # type: ignore[union-attr]
 
             # Convert to real space for Bellman update
             next_q_selected_real = symexp(next_q_selected_symlog)
@@ -186,7 +186,7 @@ class DDQNLearner:
 
         # Auxiliary danger prediction loss
         danger_loss = torch.tensor(0.0, device=states.device)
-        if has_danger_aux and danger_pred is not None:
+        if has_danger_aux and danger_pred is not None and danger_targets is not None:
             # Binary cross-entropy for danger prediction
             danger_loss = F.binary_cross_entropy(danger_pred, danger_targets)
 

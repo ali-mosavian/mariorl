@@ -3,11 +3,10 @@
 from __future__ import annotations
 
 import csv
-import time
 from pathlib import Path
 
-import pandas as pd
 import pytest
+import pandas as pd
 
 from mario_rl.metrics.tiered_writer import TieredMetricWriter
 
@@ -33,18 +32,14 @@ def writer(metrics_dir: Path) -> TieredMetricWriter:
 class TestBasicWrites:
     """Test basic CSV writing functionality."""
 
-    def test_write_creates_csv_file(
-        self, writer: TieredMetricWriter, metrics_dir: Path
-    ) -> None:
+    def test_write_creates_csv_file(self, writer: TieredMetricWriter, metrics_dir: Path) -> None:
         """First write should create the CSV file."""
         writer.write({"timestamp": 1.0, "steps": 100, "loss": 0.5})
 
         csv_path = metrics_dir / "worker_0.csv"
         assert csv_path.exists()
 
-    def test_write_includes_header(
-        self, writer: TieredMetricWriter, metrics_dir: Path
-    ) -> None:
+    def test_write_includes_header(self, writer: TieredMetricWriter, metrics_dir: Path) -> None:
         """CSV should have header row."""
         writer.write({"timestamp": 1.0, "steps": 100, "loss": 0.5})
 
@@ -58,9 +53,7 @@ class TestBasicWrites:
         assert rows[0]["steps"] == "100"
         assert rows[0]["loss"] == "0.5"
 
-    def test_multiple_writes_append(
-        self, writer: TieredMetricWriter, metrics_dir: Path
-    ) -> None:
+    def test_multiple_writes_append(self, writer: TieredMetricWriter, metrics_dir: Path) -> None:
         """Multiple writes should append to CSV."""
         writer.write({"timestamp": 1.0, "steps": 100})
         writer.write({"timestamp": 2.0, "steps": 200})
@@ -76,9 +69,7 @@ class TestBasicWrites:
 class TestRotation:
     """Test rotation from CSV to Parquet."""
 
-    def test_rotation_creates_parquet(
-        self, writer: TieredMetricWriter, metrics_dir: Path
-    ) -> None:
+    def test_rotation_creates_parquet(self, writer: TieredMetricWriter, metrics_dir: Path) -> None:
         """When max_csv_rows reached, should create Parquet shard."""
         # Write exactly max_csv_rows (5) to trigger rotation
         for i in range(5):
@@ -87,9 +78,7 @@ class TestRotation:
         parquet_path = metrics_dir / "worker_0_000000.parquet"
         assert parquet_path.exists()
 
-    def test_rotation_truncates_csv(
-        self, writer: TieredMetricWriter, metrics_dir: Path
-    ) -> None:
+    def test_rotation_truncates_csv(self, writer: TieredMetricWriter, metrics_dir: Path) -> None:
         """After rotation, CSV should be empty/reset."""
         # Write 5 rows to trigger rotation
         for i in range(5):
@@ -105,9 +94,7 @@ class TestRotation:
         assert len(df) == 1
         assert df["steps"].iloc[0] == 500
 
-    def test_parquet_contains_rotated_data(
-        self, writer: TieredMetricWriter, metrics_dir: Path
-    ) -> None:
+    def test_parquet_contains_rotated_data(self, writer: TieredMetricWriter, metrics_dir: Path) -> None:
         """Parquet shard should contain the rotated rows."""
         for i in range(5):
             writer.write({"timestamp": float(i), "steps": i * 100})
@@ -118,9 +105,7 @@ class TestRotation:
         assert len(df) == 5
         assert list(df["steps"]) == [0, 100, 200, 300, 400]
 
-    def test_multiple_rotations(
-        self, writer: TieredMetricWriter, metrics_dir: Path
-    ) -> None:
+    def test_multiple_rotations(self, writer: TieredMetricWriter, metrics_dir: Path) -> None:
         """Multiple rotations should create multiple shards."""
         # Write 12 rows: 5 + 5 + 2 = two rotations, 2 in CSV
         for i in range(12):
@@ -135,9 +120,7 @@ class TestRotation:
         assert len(csv_df) == 2
         assert list(csv_df["steps"]) == [1000, 1100]
 
-    def test_shard_index_increments(
-        self, writer: TieredMetricWriter, metrics_dir: Path
-    ) -> None:
+    def test_shard_index_increments(self, writer: TieredMetricWriter, metrics_dir: Path) -> None:
         """Shard index should increment with each rotation."""
         # Three rotations
         for i in range(15):
@@ -151,9 +134,7 @@ class TestRotation:
 class TestReadAll:
     """Test reading combined data from CSV and Parquet."""
 
-    def test_read_all_combines_parquet_and_csv(
-        self, writer: TieredMetricWriter, metrics_dir: Path
-    ) -> None:
+    def test_read_all_combines_parquet_and_csv(self, writer: TieredMetricWriter, metrics_dir: Path) -> None:
         """read_all should combine Parquet shards and CSV."""
         # Write 7 rows: 5 go to Parquet, 2 stay in CSV
         for i in range(7):
@@ -164,16 +145,12 @@ class TestReadAll:
         assert len(df) == 7
         assert list(df["steps"]) == [0, 100, 200, 300, 400, 500, 600]
 
-    def test_read_all_empty(
-        self, writer: TieredMetricWriter, metrics_dir: Path
-    ) -> None:
+    def test_read_all_empty(self, writer: TieredMetricWriter, metrics_dir: Path) -> None:
         """read_all on empty writer should return empty DataFrame."""
         df = writer.read_all()
         assert len(df) == 0
 
-    def test_read_all_csv_only(
-        self, writer: TieredMetricWriter, metrics_dir: Path
-    ) -> None:
+    def test_read_all_csv_only(self, writer: TieredMetricWriter, metrics_dir: Path) -> None:
         """read_all with only CSV data should work."""
         writer.write({"timestamp": 1.0, "steps": 100})
         writer.write({"timestamp": 2.0, "steps": 200})
@@ -183,9 +160,7 @@ class TestReadAll:
         assert len(df) == 2
         assert list(df["steps"]) == [100, 200]
 
-    def test_read_all_parquet_only(
-        self, writer: TieredMetricWriter, metrics_dir: Path
-    ) -> None:
+    def test_read_all_parquet_only(self, writer: TieredMetricWriter, metrics_dir: Path) -> None:
         """read_all with only Parquet data (CSV empty) should work."""
         # Exactly 5 rows triggers rotation, CSV is then empty
         for i in range(5):
@@ -199,9 +174,7 @@ class TestReadAll:
 class TestClose:
     """Test cleanup and close behavior."""
 
-    def test_close_flushes_csv(
-        self, writer: TieredMetricWriter, metrics_dir: Path
-    ) -> None:
+    def test_close_flushes_csv(self, writer: TieredMetricWriter, metrics_dir: Path) -> None:
         """close() should flush any pending CSV data."""
         writer.write({"timestamp": 1.0, "steps": 100})
         writer.close()
@@ -229,9 +202,7 @@ class TestClose:
 class TestSchemaHandling:
     """Test handling of varying schemas."""
 
-    def test_new_columns_added(
-        self, writer: TieredMetricWriter, metrics_dir: Path
-    ) -> None:
+    def test_new_columns_added(self, writer: TieredMetricWriter, metrics_dir: Path) -> None:
         """New columns appearing mid-stream should be handled."""
         writer.write({"timestamp": 1.0, "steps": 100})
         writer.write({"timestamp": 2.0, "steps": 200, "loss": 0.5})  # New column

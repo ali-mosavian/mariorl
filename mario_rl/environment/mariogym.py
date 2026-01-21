@@ -9,6 +9,7 @@ Uses the reward shaping from our forked gym-super-mario-bros:
 - death:          -500.0      Heavy penalty (increased from -25 to improve death learning)
 - flag:           +100.0      Ultimate goal
 """
+
 from typing import List
 from typing import Tuple
 from typing import Literal
@@ -26,7 +27,7 @@ LevelModes = Literal["sequential", "random"] | Tuple[Literal[1, 2, 3, 4, 5, 6, 7
 
 class MarioBrosLevel(SuperMarioBrosEnv):
     """Single level Mario environment using original gym-super-mario-bros rewards."""
-    
+
     def __init__(
         self,
         rom_mode: RomModes = "vanilla",
@@ -39,7 +40,7 @@ class MarioBrosLevel(SuperMarioBrosEnv):
 
 class SuperMarioBrosMultiLevel(gym.Env):
     """Multi-level Mario environment with random or sequential level selection."""
-    
+
     rand: np.random.RandomState
     level: LevelModes
     envs: List[List[Optional[MarioBrosLevel]]]

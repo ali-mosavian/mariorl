@@ -13,8 +13,9 @@ Combines:
 """
 
 import time
-from typing import Any, Protocol
+from typing import Any
 from pathlib import Path
+from typing import Protocol
 from dataclasses import field
 from dataclasses import dataclass
 
@@ -22,21 +23,21 @@ import torch
 import numpy as np
 from torch import Tensor
 
+# MCTS imports (optional)
+from mario_rl.mcts import MCTSConfig
+from mario_rl.mcts import MCTSExplorer
 from mario_rl.core.types import Transition
+from mario_rl.learners.base import Learner
 from mario_rl.core.env_runner import EnvRunner
 from mario_rl.core.replay_buffer import ReplayBuffer
-from mario_rl.core.replay_buffer import MuZeroReplayBuffer
-from mario_rl.learners.base import Learner
-from mario_rl.learners.muzero import MuZeroTrajectoryCollector
-
-# MCTS imports (optional)
-from mario_rl.mcts import MCTSExplorer, MCTSConfig
 from mario_rl.mcts.protocols import WorldModelAdapter
+from mario_rl.core.replay_buffer import MuZeroReplayBuffer
+from mario_rl.learners.muzero import MuZeroTrajectoryCollector
 
 
 class MetricsLogger(Protocol):
     """Protocol for metrics logger (avoids hard dependency)."""
-    
+
     def count(self, name: str, n: int = 1) -> None: ...
     def gauge(self, name: str, value: float) -> None: ...
     def observe(self, name: str, value: float) -> None: ...
@@ -128,6 +129,11 @@ class TrainingWorker:
     _muzero_last_policy: np.ndarray | None = field(init=False, default=None)
     _muzero_last_value: float = field(init=False, default=0.0)
 
+    # Level tracking (initialized in collect methods)
+    _current_x: int = field(init=False, default=0)
+    _current_level: tuple = field(init=False, default_factory=tuple)
+    _collect_state: Any = field(init=False, repr=False, default=None)
+
     def __post_init__(self) -> None:
         """Initialize buffer and env runner."""
         # Get obs shape from env and preprocess
@@ -145,9 +151,7 @@ class TrainingWorker:
             else:
                 # Create zero action history (history_len, num_actions)
                 num_actions = self.model.num_actions
-                self._current_action_history = np.zeros(
-                    (self.action_history_len, num_actions), dtype=np.float32
-                )
+                self._current_action_history = np.zeros((self.action_history_len, num_actions), dtype=np.float32)
                 action_history_shape = self._current_action_history.shape
 
         # Create buffer
@@ -170,8 +174,8 @@ class TrainingWorker:
         # Action window is initialized by default_factory in field definition
 
         # Initialize MCTS if enabled (adapter is injected via learner)
-        if self.mcts_enabled and self.learner.mcts_adapter is not None:
-            adapter = self.learner.mcts_adapter
+        if self.mcts_enabled and self.learner.mcts_adapter is not None:  # type: ignore[attr-defined]
+            adapter = self.learner.mcts_adapter  # type: ignore[attr-defined]
 
             # Check if adapter supports world model (Dreamer)
             world_model = adapter if isinstance(adapter, WorldModelAdapter) else None
@@ -180,6 +184,7 @@ class TrainingWorker:
             # This biases rollouts toward RIGHT (70%) to make them meaningful
             # Without this, random rollouts can't distinguish good vs bad actions
             from mario_rl.mcts.adapters import MarioRolloutAdapter
+
             rollout_adapter = MarioRolloutAdapter(num_actions=self.model.num_actions)
 
             self._mcts_explorer = MCTSExplorer(
@@ -187,7 +192,7 @@ class TrainingWorker:
                     num_simulations=self.mcts_num_simulations,
                     max_rollout_depth=self.mcts_max_depth,
                     rollout_policy="policy",  # Use rollout adapter
-                    value_source="rollout",   # Use actual rollout returns
+                    value_source="rollout",  # Use actual rollout returns
                     sequence_length=self.mcts_sequence_length,  # Return action sequences
                 ),
                 policy=rollout_adapter,  # RIGHT-biased rollouts
@@ -230,78 +235,78 @@ class TrainingWorker:
 
     def _preprocess_state(self, state) -> np.ndarray:
         """Convert state to uint8 numpy array for network input.
-        
+
         Handles LazyFrames (from env) or numpy arrays.
         Squeezes extra channel dimension if present: (4, 64, 64, 1) -> (4, 64, 64)
         """
         # Convert LazyFrames to numpy
-        if hasattr(state, '__array__'):
+        if hasattr(state, "__array__"):
             state = np.array(state)
-        
+
         # Squeeze extra channel dim if present
         if state.ndim == 4 and state.shape[-1] == 1:
             state = np.squeeze(state, axis=-1)
-        
+
         # Ensure uint8 (network expects this)
         if state.dtype != np.uint8:
             if state.max() <= 1.0:  # Normalized float
                 state = (state * 255).astype(np.uint8)
             else:
                 state = state.astype(np.uint8)
-        
+
         return state
 
     def _record_death(self, level: tuple, x_pos: int) -> None:
         """Record a death position for danger prediction supervision.
-        
+
         Args:
             level: (world, stage) tuple
             x_pos: X position where death occurred
         """
         if level not in self._death_positions:
             self._death_positions[level] = []
-        
+
         deaths = self._death_positions[level]
-        
+
         # Check if there's already a death nearby - if so, increment count
         for i, (dx, count) in enumerate(deaths):
             if abs(dx - x_pos) < self._death_merge_threshold:
                 deaths[i] = (dx, count + 1)
                 return
-        
+
         # New death location
         deaths.append((x_pos, 1))
-        
+
         # Limit memory size - keep most frequent deaths
         if len(deaths) > self._max_deaths_per_level:
             deaths.sort(key=lambda d: d[1], reverse=True)
-            self._death_positions[level] = deaths[:self._max_deaths_per_level]
+            self._death_positions[level] = deaths[: self._max_deaths_per_level]
 
     def _check_and_record_stuck(self) -> None:
         """Check if Mario is stuck (low progress) and record the position.
-        
+
         Called every _stuck_check_steps to detect areas where the agent
         fails to make forward progress (gets stuck at obstacles/enemies).
         """
         delta_x = self._current_x - self._x_at_stuck_check
-        
+
         if delta_x < self._stuck_min_progress:
             # Agent is stuck - record this position
             level_id = f"{self._current_level[0]}-{self._current_level[1]}"
             if level_id not in self._stuck_positions:
                 self._stuck_positions[level_id] = []
-            
+
             # Only record if we have a valid x position
             if self._current_x > 0:
                 self._stuck_positions[level_id].append(self._current_x)
-        
+
         # Reset for next check
         self._x_at_stuck_check = self._current_x
         self._steps_since_stuck_check = 0
 
     def get_stuck_positions(self) -> dict[str, list[int]]:
         """Get accumulated stuck positions and clear the buffer.
-        
+
         Returns:
             Dict mapping level_id -> list of x positions where agent got stuck.
         """
@@ -311,38 +316,38 @@ class TrainingWorker:
 
     def set_difficulty_ranges(self, ranges: dict[str, list[tuple[int, int]]]) -> None:
         """Set difficulty ranges for the replay buffer.
-        
+
         Transitions within these ranges (that don't die) are tracked as
         "difficult success" and sampled more frequently.
-        
+
         Args:
             ranges: Dict mapping level_id -> list of (start_x, end_x) tuples.
         """
         self._buffer.set_difficulty_ranges(ranges)
 
-    def _compute_danger_target(self, level: tuple, current_x: int) -> np.ndarray:
+    def _compute_danger_target(self, level: tuple, current_x: int) -> np.ndarray | None:
         """Compute danger target vector from recorded death positions.
-        
+
         Creates a vector where each bin represents danger level at a relative
         distance from the current position. This is used as supervision for
         the auxiliary danger prediction head.
-        
+
         Args:
             level: (world, stage) tuple
             current_x: Mario's current X position
-            
+
         Returns:
             danger_target: Array of shape (danger_prediction_bins,) with values in [0, 1]
         """
         if self.danger_prediction_bins == 0:
             return None
-            
+
         deaths = self._death_positions.get(level, [])
         danger_vector = np.zeros(self.danger_prediction_bins, dtype=np.float32)
-        
+
         if not deaths:
             return danger_vector
-        
+
         # Bin layout: 25% behind, 75% ahead (same as RelativeDeathMemory wrapper)
         max_lookahead = 256
         max_lookbehind = 64
@@ -350,32 +355,32 @@ class TrainingWorker:
         ahead_bins = self.danger_prediction_bins - behind_bins
         behind_bin_size = max_lookbehind / max(behind_bins, 1)
         ahead_bin_size = max_lookahead / max(ahead_bins, 1)
-        
+
         for death_x, count in deaths:
             relative_x = death_x - current_x
-            
+
             if -max_lookbehind <= relative_x < 0:
                 # Death is behind Mario
                 bin_idx = int((-relative_x) / behind_bin_size)
                 bin_idx = min(bin_idx, behind_bins - 1)
                 danger_vector[behind_bins - 1 - bin_idx] += count
-                
+
             elif 0 <= relative_x < max_lookahead:
                 # Death is ahead of Mario
                 bin_idx = int(relative_x / ahead_bin_size)
                 bin_idx = min(bin_idx, ahead_bins - 1)
                 danger_vector[behind_bins + bin_idx] += count
-        
+
         # Normalize to [0, 1]
         max_val = danger_vector.max()
         if max_val > 0:
             danger_vector = danger_vector / max_val
-        
+
         return danger_vector
 
     def _get_action(self, state: np.ndarray, info: dict | None = None) -> int:
         """Get action using epsilon-greedy policy or MuZero MCTS.
-        
+
         Args:
             state: Current observation
             info: Optional info dict from env (contains action_history if enabled)
@@ -385,7 +390,7 @@ class TrainingWorker:
             # MuZero uses its own exploration via MCTS + Dirichlet noise
             # Also stores MCTS policy/value targets for training
             state = self._preprocess_state(state)
-            action, policy, value = self.learner.mcts_adapter.get_action_with_targets(state)
+            action, policy, value = self.learner.mcts_adapter.get_action_with_targets(state)  # type: ignore[attr-defined]
             # Store for trajectory collection
             self._muzero_last_policy = policy
             self._muzero_last_value = value
@@ -400,15 +405,15 @@ class TrainingWorker:
                 with torch.no_grad():
                     # Network expects uint8, handles normalization internally
                     state_t = torch.from_numpy(state).unsqueeze(0).to(self.device)
-                    
+
                     # Prepare auxiliary inputs
                     action_hist_t = None
-                    
-                    if self._current_action_history is not None and hasattr(self.model, 'action_history_len'):
-                        action_hist_t = torch.from_numpy(
-                            self._current_action_history
-                        ).unsqueeze(0).float().to(self.device)
-                    
+
+                    if self._current_action_history is not None and hasattr(self.model, "action_history_len"):
+                        action_hist_t = (
+                            torch.from_numpy(self._current_action_history).unsqueeze(0).float().to(self.device)
+                        )
+
                     q_values = self.model(state_t, action_history=action_hist_t)
                     action = int(q_values.argmax(dim=1).item())
 
@@ -428,7 +433,7 @@ class TrainingWorker:
 
     def _collect_with_action_history(self, num_steps: int, collect_start: float) -> dict[str, Any]:
         """Collect experience while tracking action history and danger targets.
-        
+
         This method is used when action_history_len > 0 or danger_prediction_bins > 0
         to properly track and store auxiliary inputs and targets in transitions.
         """
@@ -439,7 +444,7 @@ class TrainingWorker:
         current_episode_reward = 0.0
 
         # Get current state and episode collector
-        if not hasattr(self, '_collect_state') or self._collect_state is None:
+        if not hasattr(self, "_collect_state") or self._collect_state is None:
             obs, info = self.env.reset()
             self._collect_state = obs
             self._current_level = (info.get("world", 1), info.get("stage", 1))
@@ -449,46 +454,46 @@ class TrainingWorker:
             self._current_episode = self._buffer.episode()
 
         obs = self._collect_state
-        
+
         for _ in range(num_steps):
             # Get current auxiliary inputs before taking action
             current_hist = self._current_action_history.copy() if self._current_action_history is not None else None
-            
+
             # Get current level and x position for danger target
-            current_level = getattr(self, '_current_level', (1, 1))
-            current_x = getattr(self, '_current_x', 0)
-            
+            current_level = getattr(self, "_current_level", (1, 1))
+            current_x = getattr(self, "_current_x", 0)
+
             # Compute danger target from recorded death positions
             danger_target = self._compute_danger_target(current_level, current_x)
-            
+
             # Get action
             action = self._get_action(obs)
-            
+
             # Step environment
             next_obs, reward, terminated, truncated, info = self.env.step(action)
             done = terminated or truncated
             current_episode_reward += reward
             step_infos.append(info)
-            
+
             # Update current position tracking
             self._current_level = (info.get("world", 1), info.get("stage", 1))
             self._current_x = info.get("x_pos", 0)
-            
+
             # Record death for danger prediction supervision
             if done and reward < 0:
                 self._record_death(self._current_level, info.get("x_pos", 0))
-            
+
             # Check for stuck (low progress over many steps)
             self._steps_since_stuck_check += 1
             if self._steps_since_stuck_check >= self._stuck_check_steps:
                 self._check_and_record_stuck()
-            
+
             # Get next action history from info
             next_hist = None
             if "action_history" in info:
                 self._current_action_history = info["action_history"].copy()
                 next_hist = self._current_action_history.copy()
-            
+
             # Create transition with auxiliary inputs and danger target
             # CRITICAL: Use actual_death flag if present (from snapshot wrapper)
             # This ensures TD targets treat deaths as terminal even if episode continues
@@ -509,49 +514,49 @@ class TrainingWorker:
                 x_pos=self._current_x,
             )
             self._current_episode.add(transition)
-            
+
             # Track action distribution
             self._action_window.append(action)
             if len(self._action_window) > self._action_window_size:
                 self._action_window.pop(0)
-            
+
             if done:
                 episodes_completed += 1
                 episode_rewards.append(current_episode_reward)
                 episode_end_infos.append(info)  # Track episode ending info for death/flag/timeout counting
                 current_episode_reward = 0.0
-                
+
                 # End current episode and start new one
                 self._current_episode.end()
-                
+
                 # Reset environment
                 obs, info = self.env.reset()
                 self._current_level = (info.get("world", 1), info.get("stage", 1))
                 self._current_x = info.get("x_pos", 40)
                 if "action_history" in info:
                     self._current_action_history = info["action_history"].copy()
-                
+
                 # Start new episode collector
                 self._current_episode = self._buffer.episode()
             else:
                 obs = next_obs
-            
+
             self._collect_state = obs
 
         # Update tracking
         self.total_steps += num_steps
         self._steps_since_flush += num_steps
         self.total_episodes += episodes_completed
-        
+
         # Update PER beta
         progress = min(1.0, self.total_steps / self.epsilon_decay_steps)
         self._buffer.update_beta(progress)
-        
+
         # Calculate timing
         collect_end = time.time()
         elapsed = collect_end - collect_start
         steps_per_sec = num_steps / max(elapsed, 0.001)
-        
+
         # Log metrics if logger provided
         if self.logger is not None:
             self.logger.count("steps", n=num_steps)
@@ -560,7 +565,7 @@ class TrainingWorker:
             self.logger.gauge("buffer_size", len(self._buffer))
             self.logger.gauge("steps_per_sec", steps_per_sec)
             self.logger.gauge("per_beta", self._buffer._current_beta)
-            
+
             # Log protected buffer stats
             stats = self._buffer.buffer_stats
             self.logger.gauge("buf_neg", stats["negative_size"])
@@ -590,7 +595,7 @@ class TrainingWorker:
             if self._steps_since_flush >= self.flush_every:
                 self.logger.flush()
                 self._steps_since_flush = 0
-        
+
         return {
             "steps": num_steps,
             "episodes_completed": episodes_completed,
@@ -633,7 +638,7 @@ class TrainingWorker:
         obs = self._preprocess_state(obs)
 
         # Run initial MCTS to get first policy/value
-        action, policy, value = self.learner.mcts_adapter.get_action_with_targets(obs)
+        action, policy, value = self.learner.mcts_adapter.get_action_with_targets(obs)  # type: ignore[attr-defined]
         self._muzero_collector.start_episode(obs, policy, value)
 
         while steps_collected < num_steps:
@@ -650,7 +655,7 @@ class TrainingWorker:
 
             # Get MCTS policy/value for next state (if not done)
             if not done:
-                next_action, next_policy, next_value = self.learner.mcts_adapter.get_action_with_targets(next_obs)
+                next_action, next_policy, next_value = self.learner.mcts_adapter.get_action_with_targets(next_obs)  # type: ignore[attr-defined]
             else:
                 # For terminal states, use uniform policy and zero value
                 next_policy = np.ones(self.model.num_actions) / self.model.num_actions
@@ -684,7 +689,7 @@ class TrainingWorker:
                 # Reset for next episode
                 obs, _ = self.env.reset()
                 obs = self._preprocess_state(obs)
-                action, policy, value = self.learner.mcts_adapter.get_action_with_targets(obs)
+                action, policy, value = self.learner.mcts_adapter.get_action_with_targets(obs)  # type: ignore[attr-defined]
                 self._muzero_collector.start_episode(obs, policy, value)
             else:
                 # Continue to next step
@@ -740,20 +745,20 @@ class TrainingWorker:
             Collection info dict
         """
         collect_start = time.time()
-        
+
         # If action history or death memory is enabled, do manual collection to track them
         if self.action_history_len > 0 or self.danger_prediction_bins > 0:
             return self._collect_with_action_history(num_steps, collect_start)
-        
+
         # Otherwise use standard EnvRunner collection
         transitions, info = self._env_runner.collect_with_info(num_steps)
 
         # Add to buffer using episode collector
-        # Note: env_runner handles episode boundaries internally, 
+        # Note: env_runner handles episode boundaries internally,
         # but we still need to signal episode ends for flag history
-        if not hasattr(self, '_current_episode') or self._current_episode is None:
+        if not hasattr(self, "_current_episode") or self._current_episode is None:
             self._current_episode = self._buffer.episode()
-        
+
         for t in transitions:
             self._current_episode.add(t)
             if t.done:
@@ -792,10 +797,10 @@ class TrainingWorker:
                 action_counts = np.zeros(self.model.num_actions, dtype=np.int64)
                 for a in self._action_window:
                     action_counts[a] += 1
-                
+
                 total_actions = action_counts.sum()
                 action_probs = action_counts / total_actions
-                
+
                 # Compute action entropy (entropy of actual taken actions)
                 # Avoid log(0) by filtering zero probabilities
                 nonzero = action_probs > 0
@@ -876,7 +881,7 @@ class TrainingWorker:
         episode_end_infos: list[dict] = []
         mcts_runs = 0
         actions_from_mcts = 0  # Track how many actions came from MCTS sequences
-        
+
         # Aggregate MCTS stats across all runs
         total_rollouts = 0
         total_expansions = 0
@@ -886,11 +891,11 @@ class TrainingWorker:
         # Get current observation
         obs = self._get_frame_stack_obs()
         done = False
-        
+
         # Ensure episode collector exists
-        if not hasattr(self, '_current_episode') or self._current_episode is None:
+        if not hasattr(self, "_current_episode") or self._current_episode is None:
             self._current_episode = self._buffer.episode()
-        
+
         # Action sequence from MCTS (like old implementation)
         action_sequence: list[int] = []
 
@@ -908,7 +913,7 @@ class TrainingWorker:
                     get_obs_fn=None,
                 )
                 mcts_runs += 1
-                
+
                 # Aggregate MCTS stats
                 stats = result.stats
                 total_rollouts += stats.get("rollouts_done", 0)
@@ -923,7 +928,7 @@ class TrainingWorker:
 
                 # Get the best action sequence from MCTS
                 action_sequence = list(result.best_sequence)
-                
+
                 # Fallback: if no sequence, use best_action
                 if not action_sequence:
                     action_sequence = [result.best_action]
@@ -940,6 +945,7 @@ class TrainingWorker:
 
             # Add the real transition to buffer
             from mario_rl.core.types import Transition
+
             real_transition = Transition(
                 state=obs,
                 action=action,
@@ -1048,9 +1054,7 @@ class TrainingWorker:
             ValueError: If not enough data in buffer
         """
         if not self.can_train():
-            raise ValueError(
-                f"Not enough data in buffer: {len(self._buffer)} < {self.batch_size}"
-            )
+            raise ValueError(f"Not enough data in buffer: {len(self._buffer)} < {self.batch_size}")
 
         # Zero gradients
         self.model.zero_grad()
@@ -1063,7 +1067,7 @@ class TrainingWorker:
         batch = self._buffer.sample(self.batch_size, device=str(self.device))
 
         # Compute loss with importance sampling weights for PER bias correction
-        loss, metrics = self.learner.compute_loss(
+        loss, metrics = self.learner.compute_loss(  # type: ignore[call-arg]
             states=batch.states,
             actions=batch.actions,
             rewards=batch.rewards,
@@ -1080,9 +1084,7 @@ class TrainingWorker:
 
         # Collect gradients
         gradients = {
-            name: param.grad.detach().clone()
-            for name, param in self.model.named_parameters()
-            if param.grad is not None
+            name: param.grad.detach().clone() for name, param in self.model.named_parameters() if param.grad is not None
         }
 
         # Update priorities if using PER - use actual TD errors from loss computation
@@ -1091,16 +1093,18 @@ class TrainingWorker:
             with torch.no_grad():
                 current_q = self.model(batch.states)
                 current_q_selected = current_q.gather(1, batch.actions.unsqueeze(1)).squeeze(1)
-                
+
                 next_q_online = self.model(batch.next_states)
                 best_actions = next_q_online.argmax(dim=1)
-                next_q_target = self.model(batch.next_states, network="target") if hasattr(self.model, "target") else next_q_online
+                next_q_target = (
+                    self.model(batch.next_states, network="target") if hasattr(self.model, "target") else next_q_online
+                )
                 next_q_selected = next_q_target.gather(1, best_actions.unsqueeze(1)).squeeze(1)
-                
-                n_step_gamma = self.gamma ** self.n_step
+
+                n_step_gamma = self.gamma**self.n_step
                 target_q = batch.rewards + n_step_gamma * next_q_selected * (1.0 - batch.dones.float())
                 td_errors = (current_q_selected - target_q).abs().cpu().numpy()
-            
+
             self._buffer.update_priorities(batch.indices, td_errors)
 
         # Track training metrics
@@ -1110,7 +1114,7 @@ class TrainingWorker:
                 self.logger.observe("loss", float(metrics["loss"]))
             if "entropy" in metrics:
                 self.logger.observe("entropy", float(metrics["entropy"]))
-            
+
             # DDQN-specific metrics
             if "q_mean" in metrics:
                 self.logger.observe("q_mean", float(metrics["q_mean"]))
@@ -1118,7 +1122,7 @@ class TrainingWorker:
                 self.logger.observe("td_error", float(metrics["td_error"]))
             if "q_max" in metrics:
                 self.logger.gauge("q_max", float(metrics["q_max"]))
-            
+
             # Dreamer-specific metrics
             if "wm_loss" in metrics:
                 self.logger.observe("wm_loss", float(metrics["wm_loss"]))
@@ -1168,10 +1172,10 @@ class TrainingWorker:
             (gradients, metrics) tuple
         """
         # Sample trajectory batch from MuZero buffer
-        batch = self._muzero_buffer.sample(self.batch_size, device=str(self.device))
+        batch = self._muzero_buffer.sample(self.batch_size, device=str(self.device))  # type: ignore[union-attr]
 
         # Compute loss using trajectory-based training
-        loss, metrics = self.learner.compute_trajectory_loss(
+        loss, metrics = self.learner.compute_trajectory_loss(  # type: ignore[attr-defined]
             s=batch.obs,
             actions=batch.actions,
             rewards=batch.rewards,
@@ -1187,16 +1191,14 @@ class TrainingWorker:
 
         # Collect gradients
         gradients = {
-            name: param.grad.detach().clone()
-            for name, param in self.model.named_parameters()
-            if param.grad is not None
+            name: param.grad.detach().clone() for name, param in self.model.named_parameters() if param.grad is not None
         }
 
         # Update priorities if using PER
-        if batch.indices is not None and hasattr(self._muzero_buffer, 'alpha') and self._muzero_buffer.alpha > 0:
+        if batch.indices is not None and hasattr(self._muzero_buffer, "alpha") and self._muzero_buffer.alpha > 0:  # type: ignore[union-attr]
             # Use total loss as priority (simplified)
             td_errors = np.full(len(batch.indices), metrics.get("loss", 1.0))
-            self._muzero_buffer.update_priorities(batch.indices, td_errors)
+            self._muzero_buffer.update_priorities(batch.indices, td_errors)  # type: ignore[union-attr]
 
         # Log MuZero-specific metrics
         if self.logger is not None:

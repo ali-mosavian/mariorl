@@ -82,10 +82,11 @@ def layer_init(layer: nn.Module, std: float = np.sqrt(2), bias_const: float = 0.
 # Self-Attention Module for Spatial Features
 # =============================================================================
 
+
 class SpatialAttention(nn.Module):
     """
     Self-Attention Module for Spatial Features - Classical Transformer-style attention.
-    
+
     ┌─────────────────────────────────────────────────────────────────────────┐
     │                    SELF-ATTENTION FOR VISION                            │
     │                                                                         │
@@ -128,9 +129,9 @@ class SpatialAttention(nn.Module):
     │  └─────────────────────────────────────────────────────────────────┘    │
     │                                                                         │
     └─────────────────────────────────────────────────────────────────────────┘
-    
+
     Architecture:
-    
+
     ┌─────────────────────────────────────────────────────────────────────────┐
     │   Input: Feature maps (B, C, H, W) from conv3                           │
     │          e.g., (32, 64, 4, 4) = batch 32, 64 channels, 4×4 spatial      │
@@ -165,23 +166,23 @@ class SpatialAttention(nn.Module):
     │   output = input + output  (helps gradient flow)                        │
     │                                                                         │
     └─────────────────────────────────────────────────────────────────────────┘
-    
+
     Why self-attention works better:
     - Softmax FORCES competition between positions (can't all be 1.0)
     - Learns spatial relationships (Mario position ↔ Enemy position)
     - Proven effective in Vision Transformers, Decision Transformer, Gato
     - For 4×4 feature map: only 16×16=256 attention weights (cheap!)
-    
+
     References:
     - "Attention Is All You Need" (Vaswani et al., 2017)
     - "An Image is Worth 16x16 Words" (Dosovitskiy et al., 2020)
     - "Decision Transformer" (Chen et al., 2021)
     """
-    
+
     def __init__(self, in_channels: int = 64, num_heads: int = 4, dropout: float = 0.0):
         """
         Initialize self-attention module.
-        
+
         Args:
             in_channels: Number of input channels (from conv3, typically 64)
             num_heads: Number of attention heads (parallel attention patterns)
@@ -190,52 +191,52 @@ class SpatialAttention(nn.Module):
             dropout: Dropout rate for attention weights (0 = no dropout)
         """
         super().__init__()
-        
+
         self.in_channels = in_channels
         self.num_heads = num_heads
         self.head_dim = in_channels // num_heads
-        self.scale = self.head_dim ** -0.5  # 1/√d for scaled dot-product attention
-        
+        self.scale = self.head_dim**-0.5  # 1/√d for scaled dot-product attention
+
         assert in_channels % num_heads == 0, f"in_channels ({in_channels}) must be divisible by num_heads ({num_heads})"
-        
+
         # Q, K, V projections (combined into one linear for efficiency)
         # Projects from C to 3*C, then split into Q, K, V
         self.qkv = nn.Linear(in_channels, 3 * in_channels, bias=False)
-        
+
         # Output projection
         self.proj = nn.Linear(in_channels, in_channels, bias=False)
-        
+
         # Dropout for attention weights
         self.attn_dropout = nn.Dropout(dropout)
-        
+
         # Initialize with small weights for stable start
         nn.init.xavier_normal_(self.qkv.weight, gain=0.1)
         nn.init.xavier_normal_(self.proj.weight, gain=0.1)
-        
+
         # Store attention map for visualization (shape: B, num_heads, H*W, H*W)
         self.last_attention_map: torch.Tensor | None = None
-    
+
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """
         Apply self-attention to spatial features.
-        
+
         Args:
             x: Input feature maps (B, C, H, W)
-        
+
         Returns:
             Attended features (B, C, H, W) - same shape as input
-        
+
         Side effect:
             Stores attention weights in self.last_attention_map for visualization
         """
         B, C, H, W = x.shape
         N = H * W  # Number of spatial positions (tokens)
-        
+
         # ─────────────────────────────────────────────────────────────────────
         # Step 1: Reshape to sequence (B, C, H, W) → (B, N, C)
         # ─────────────────────────────────────────────────────────────────────
         x_seq = x.flatten(2).transpose(1, 2)  # (B, N, C)
-        
+
         # ─────────────────────────────────────────────────────────────────────
         # Step 2: Project to Q, K, V
         # ─────────────────────────────────────────────────────────────────────
@@ -243,7 +244,7 @@ class SpatialAttention(nn.Module):
         qkv = qkv.reshape(B, N, 3, self.num_heads, self.head_dim)
         qkv = qkv.permute(2, 0, 3, 1, 4)  # (3, B, num_heads, N, head_dim)
         q, k, v = qkv[0], qkv[1], qkv[2]  # Each: (B, num_heads, N, head_dim)
-        
+
         # ─────────────────────────────────────────────────────────────────────
         # Step 3: Compute attention scores
         # ─────────────────────────────────────────────────────────────────────
@@ -251,74 +252,74 @@ class SpatialAttention(nn.Module):
         attn_scores = (q @ k.transpose(-2, -1)) * self.scale  # (B, num_heads, N, N)
         attn_weights = torch.softmax(attn_scores, dim=-1)  # Softmax over keys (last dim)
         attn_weights = self.attn_dropout(attn_weights)
-        
+
         # Store for visualization (average over heads for simpler viz)
         self.last_attention_map = attn_weights.mean(dim=1).detach()  # (B, N, N)
-        
+
         # ─────────────────────────────────────────────────────────────────────
         # Step 4: Apply attention to values
         # ─────────────────────────────────────────────────────────────────────
         attended = attn_weights @ v  # (B, num_heads, N, head_dim)
-        
+
         # ─────────────────────────────────────────────────────────────────────
         # Step 5: Combine heads and project
         # ─────────────────────────────────────────────────────────────────────
         attended = attended.transpose(1, 2).reshape(B, N, C)  # (B, N, C)
         output = self.proj(attended)  # (B, N, C)
-        
+
         # ─────────────────────────────────────────────────────────────────────
         # Step 6: Reshape back to spatial and add residual
         # ─────────────────────────────────────────────────────────────────────
         output = output.transpose(1, 2).reshape(B, C, H, W)  # (B, C, H, W)
         output = x + output  # Residual connection
-        
+
         return output
-    
+
     def get_attention_map(self) -> torch.Tensor | None:
         """
         Get the last computed attention map for visualization.
-        
+
         Returns:
             Attention map (B, N, N) where N = H*W (e.g., 16 for 4×4).
             Values in [0, 1], each row sums to 1.0.
-            
+
             To visualize as spatial heatmap for a specific query position:
             >>> attn = attention.get_attention_map()  # (B, 16, 16)
             >>> # How much does position 8 (center) attend to other positions?
             >>> center_attn = attn[0, 8, :].reshape(4, 4)  # (4, 4)
             >>> plt.imshow(center_attn, cmap='hot')
-            
+
             For overall attention "importance" (how much each position is attended to):
             >>> importance = attn[0].sum(dim=0).reshape(4, 4)  # Sum over queries
             >>> plt.imshow(importance, cmap='hot')
         """
         return self.last_attention_map
-    
+
     def get_spatial_importance(self, h: int = 4, w: int = 4) -> torch.Tensor | None:
         """
         Get spatial importance map (how much each position is attended to overall).
-        
+
         This is more intuitive for visualization than the full attention matrix.
         Positions that are attended to by many other positions are "important".
-        
+
         Args:
             h, w: Spatial dimensions to reshape to
-        
+
         Returns:
             Importance map (B, 1, H, W) suitable for overlay visualization.
             Higher values = position is attended to by more queries.
         """
         if self.last_attention_map is None:
             return None
-        
+
         # Sum attention received by each key position (column sum)
         # Shape: (B, N, N) → sum over dim=1 (queries) → (B, N)
         importance = self.last_attention_map.sum(dim=1)  # (B, N)
-        
+
         # Normalize to [0, 1] for visualization
         importance = importance - importance.min(dim=1, keepdim=True)[0]
         importance = importance / (importance.max(dim=1, keepdim=True)[0] + 1e-8)
-        
+
         # Reshape to spatial
         B = importance.shape[0]
         return importance.reshape(B, 1, h, w)
@@ -327,10 +328,10 @@ class SpatialAttention(nn.Module):
 class DDQNBackbone(nn.Module):
     """
     CNN + Self-Attention backbone for DDQN with 8×8 attention grid.
-    
+
     Uses 3 conv layers to get 8×8 spatial resolution, then applies
     self-attention over 64 positions for finer-grained spatial reasoning.
-    
+
     ┌─────────────────────────────────────────────────────────────────────────┐
     │          FINER-GRAINED 8×8 SELF-ATTENTION BACKBONE                      │
     │                                                                         │
@@ -392,20 +393,20 @@ class DDQNBackbone(nn.Module):
     │   Output: (B, 512) feature vector for dueling heads                    │
     │                                                                         │
     └─────────────────────────────────────────────────────────────────────────┘
-    
+
     Why 8×8 is better than 4×4:
     ───────────────────────────
     • 4× more spatial positions (64 vs 16)
     • Each cell covers 8×8 pixels (vs 16×16)
     • A goomba (~8-12 pixels) now fits in 1-2 cells instead of being smeared
     • Can learn "look at cell (3,5) for that enemy" vs "somewhere in quadrant"
-    
+
     Receptive Field (with 3×3 kernel, stride 2):
     ────────────────────────────────────────────
     After Conv1: 3×3 pixels
     After Conv2: 7×7 pixels
     After Conv3: 15×15 pixels
-    
+
     Each of 64 positions sees ~15×15 pixel context - enough for local features
     while attention provides global reasoning.
     """
@@ -421,7 +422,7 @@ class DDQNBackbone(nn.Module):
     ):
         """
         Initialize CNN + self-attention backbone with 8×8 attention.
-        
+
         Args:
             input_shape: (C, H, W) input shape, e.g., (4, 64, 64)
             feature_dim: Output feature dimension (default 512)
@@ -434,7 +435,7 @@ class DDQNBackbone(nn.Module):
         c, h, w = input_shape
         self.action_history_dim = action_history_dim
         self.embed_dim = embed_dim
-        
+
         # ─────────────────────────────────────────────────────────────────────
         # Convolutional stack: 3 layers with kernel=3, stride=2
         # 64×64 → 32×32 → 16×16 → 8×8 (stop here for finer attention)
@@ -443,31 +444,31 @@ class DDQNBackbone(nn.Module):
         self.conv2 = layer_init(nn.Conv2d(embed_dim, embed_dim, kernel_size=3, stride=2, padding=1))
         self.conv3 = layer_init(nn.Conv2d(embed_dim, embed_dim, kernel_size=3, stride=2, padding=1))
         # No conv4 - we want 8×8 spatial resolution for finer attention
-        
+
         # Calculate output spatial size: 64 / 8 = 8
         self.spatial_h = h // 8  # 64 // 8 = 8
         self.spatial_w = w // 8  # 64 // 8 = 8
         self.num_positions = self.spatial_h * self.spatial_w  # 64
-        
+
         # ─────────────────────────────────────────────────────────────────────
         # Self-Attention over 64 spatial positions (8×8 grid)
         # Attention cost: 64² = 4096 (still very fast)
         # ─────────────────────────────────────────────────────────────────────
         self.attention = SpatialAttention(in_channels=embed_dim, num_heads=num_heads, dropout=dropout)
-        
+
         # ─────────────────────────────────────────────────────────────────────
         # Output layers: 8×8×32 = 2048 → 512
         # ─────────────────────────────────────────────────────────────────────
         flat_size = self.num_positions * embed_dim  # 64 × 32 = 2048
-        
+
         # Two-stage projection: 2048 → 512 → 512
         self.fc1 = layer_init(nn.Linear(flat_size, feature_dim))
         self.layer_norm = nn.LayerNorm(feature_dim)
-        
+
         fc_input_dim = feature_dim + action_history_dim
         self.fc2 = layer_init(nn.Linear(fc_input_dim, feature_dim))
         self.feature_dim = feature_dim
-        
+
         self.dropout_layer = nn.Dropout(dropout) if dropout > 0 else nn.Identity()
 
     def forward(
@@ -477,11 +478,11 @@ class DDQNBackbone(nn.Module):
     ) -> torch.Tensor:
         """
         Forward pass through CNN + 8×8 attention backbone.
-        
+
         Args:
             x: Input frames (B, C, H, W), MUST be uint8 [0, 255]
             action_history: Optional action history (B, history_len, num_actions)
-        
+
         Returns:
             Feature vector (B, feature_dim) for dueling heads
         """
@@ -490,7 +491,7 @@ class DDQNBackbone(nn.Module):
         # ─────────────────────────────────────────────────────────────────────
         assert x.dtype == torch.uint8, f"Input must be uint8, got {x.dtype}"
         x = x.float() / 255.0
-        
+
         # ─────────────────────────────────────────────────────────────────────
         # Convolutional feature extraction: 3 layers to 8×8
         # ─────────────────────────────────────────────────────────────────────
@@ -498,12 +499,12 @@ class DDQNBackbone(nn.Module):
         x = torch.nn.functional.gelu(self.conv2(x))  # (B, 32, 16, 16)
         x = torch.nn.functional.gelu(self.conv3(x))  # (B, 32, 8, 8)
         # No conv4 - keep 8×8 for finer attention
-        
+
         # ─────────────────────────────────────────────────────────────────────
         # Self-attention over 64 spatial positions (8×8 grid)
         # ─────────────────────────────────────────────────────────────────────
         x = self.attention(x)  # (B, 32, 8, 8) with residual connection
-        
+
         # ─────────────────────────────────────────────────────────────────────
         # Flatten and project: 2048 → 512 → 512
         # ─────────────────────────────────────────────────────────────────────
@@ -511,7 +512,7 @@ class DDQNBackbone(nn.Module):
         x = torch.nn.functional.gelu(self.fc1(x))  # (B, 512)
         x = self.layer_norm(x)
         x = self.dropout_layer(x)
-        
+
         # Concatenate action history if provided
         if action_history is not None:
             if action_history.dim() == 3:
@@ -519,22 +520,19 @@ class DDQNBackbone(nn.Module):
             x = torch.cat([x, action_history], dim=1)
         elif self.action_history_dim > 0:
             x = torch.cat([x, torch.zeros(x.shape[0], self.action_history_dim, device=x.device)], dim=1)
-        
+
         x = torch.nn.functional.gelu(self.fc2(x))
         return x
-    
+
     def get_attention_map(self) -> torch.Tensor | None:
         """
         Get the spatial importance map for visualization.
-        
+
         Returns:
             Importance map (B, 1, 8, 8) showing which positions are attended to.
             Higher values = position is attended to by more queries.
         """
-        return self.attention.get_spatial_importance(
-            h=self.spatial_h, 
-            w=self.spatial_w
-        )
+        return self.attention.get_spatial_importance(h=self.spatial_h, w=self.spatial_w)
 
 
 class DuelingHead(nn.Module):
@@ -614,16 +612,15 @@ class DDQNNet(nn.Module):
         self.action_history_len = action_history_len
         self.danger_prediction_bins = danger_prediction_bins
         self.num_actions = num_actions
-        
+
         # Calculate action history dimension (flattened one-hot)
         action_history_dim = action_history_len * num_actions if action_history_len > 0 else 0
-        
-        self.backbone = DDQNBackbone(
-            input_shape, feature_dim, dropout, action_history_dim
-        )
+
+        self.backbone = DDQNBackbone(input_shape, feature_dim, dropout, action_history_dim)
         self.head = DuelingHead(feature_dim, num_actions, hidden_dim)
-        
+
         # Auxiliary danger prediction head (predicts danger probability per distance bin)
+        self.danger_head: nn.Sequential | None
         if danger_prediction_bins > 0:
             self.danger_head = nn.Sequential(
                 layer_init(nn.Linear(feature_dim, hidden_dim)),
@@ -658,7 +655,7 @@ class DDQNNet(nn.Module):
         if return_danger and self.danger_head is not None:
             danger_pred = torch.sigmoid(self.danger_head(features))
             return q_values, danger_pred
-        
+
         return q_values
 
     def get_action(
@@ -686,7 +683,7 @@ class DDQNNet(nn.Module):
             # Greedy action
             with torch.no_grad():
                 q_values = self.forward(x, action_history)
-                return q_values.argmax(dim=1)
+                return q_values.argmax(dim=1)  # type: ignore[union-attr]
 
 
 class DoubleDQN(nn.Module):
@@ -721,12 +718,10 @@ class DoubleDQN(nn.Module):
     ):
         super().__init__()
         self.online = DDQNNet(
-            input_shape, num_actions, feature_dim, hidden_dim, dropout,
-            action_history_len, danger_prediction_bins
+            input_shape, num_actions, feature_dim, hidden_dim, dropout, action_history_len, danger_prediction_bins
         )
         self.target = DDQNNet(
-            input_shape, num_actions, feature_dim, hidden_dim, dropout,
-            action_history_len, danger_prediction_bins
+            input_shape, num_actions, feature_dim, hidden_dim, dropout, action_history_len, danger_prediction_bins
         )
         self.num_actions = num_actions
         self.action_history_len = action_history_len

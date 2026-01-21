@@ -26,12 +26,11 @@ Key components:
 
 from dataclasses import dataclass
 
-import numpy as np
 import torch
-import torch.nn.functional as F
-from torch import Tensor
+import numpy as np
 from torch import nn
-
+from torch import Tensor
+import torch.nn.functional as F
 
 # =============================================================================
 # Symlog Transform (V3 key feature)
@@ -40,7 +39,7 @@ from torch import nn
 
 def symlog(x: Tensor) -> Tensor:
     """Symmetric logarithm: sign(x) * ln(|x| + 1).
-    
+
     Compresses large values while preserving small values and sign.
     Used for scale-invariant predictions of rewards, values, and reconstruction.
     """
@@ -77,17 +76,17 @@ class DreamerConfig:
 
     input_shape: tuple[int, int, int]
     num_actions: int
-    
+
     # Categorical latent space (V3 style)
     num_categoricals: int = 32  # Number of categorical distributions
-    num_classes: int = 32       # Classes per categorical
-    
+    num_classes: int = 32  # Classes per categorical
+
     # Network dimensions
     hidden_dim: int = 256
-    
+
     # KL regularization
-    free_bits: float = 1.0      # Minimum KL per categorical
-    
+    free_bits: float = 1.0  # Minimum KL per categorical
+
     @property
     def latent_dim(self) -> int:
         """Effective latent dimension (for compatibility)."""
@@ -160,10 +159,10 @@ class CategoricalEncoder(nn.Module):
 
     def sample(self, logits: Tensor) -> Tensor:
         """Sample from categorical with straight-through gradients.
-        
+
         Args:
             logits: (batch, num_categoricals, num_classes)
-            
+
         Returns:
             z: One-hot samples (batch, num_categoricals, num_classes)
                Gradients flow through softmax probabilities.
@@ -178,11 +177,11 @@ class CategoricalEncoder(nn.Module):
 
     def encode(self, x: Tensor, deterministic: bool = True) -> Tensor:
         """Get flattened latent representation.
-        
+
         Args:
             x: Frames (batch, C, H, W) in [0, 1]
             deterministic: If True, use mode; if False, sample
-            
+
         Returns:
             z: Flattened latent (batch, num_categoricals * num_classes)
         """
@@ -262,7 +261,7 @@ class CategoricalDynamics(nn.Module):
 
         # Predict next latent logits
         logits = self.fc_out(h_next).view(-1, self.num_categoricals, self.num_classes)
-        
+
         # Sample with straight-through
         probs = F.softmax(logits, dim=-1)
         samples = F.one_hot(probs.argmax(dim=-1), self.num_classes).float()
@@ -455,10 +454,10 @@ class DreamerModel(nn.Module):
 
     def encode_with_logits(self, x: Tensor) -> tuple[Tensor, Tensor]:
         """Encode and return both latent and logits (for KL computation).
-        
+
         Args:
             x: Observations (batch, C, H, W) in [0, 255] range
-            
+
         Returns:
             z: Sampled latent (batch, latent_dim)
             logits: Categorical logits (batch, num_categoricals, num_classes)

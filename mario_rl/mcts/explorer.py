@@ -110,7 +110,7 @@ class MCTSExplorer:
             ExplorationResult containing all transitions and best action
         """
         all_transitions: list[Transition] = []
-        
+
         # Track best rollout sequence (like old MCTS)
         best_sequence: list[int] = []
         best_sequence_reward: float = float("-inf")
@@ -155,12 +155,10 @@ class MCTSExplorer:
 
                 if child and not child.terminal:
                     # Rollout: simulate to terminal or max depth
-                    rollout_value, rollout_transitions, rollout_actions = self._rollout(
-                        child, env, get_obs_fn
-                    )
+                    rollout_value, rollout_transitions, rollout_actions = self._rollout(child, env, get_obs_fn)
                     all_transitions.extend(rollout_transitions)
                     rollouts_done += 1
-                    
+
                     # Track best sequence (like old MCTS)
                     # Include the expand action + rollout actions
                     if rollout_value > best_sequence_reward:
@@ -185,7 +183,7 @@ class MCTSExplorer:
 
         # Get best action from visit counts
         best_action = self._get_best_action(root)
-        
+
         # Truncate sequence to configured length
         sequence_len = self.config.sequence_length
         if sequence_len > 1 and best_sequence:
@@ -201,7 +199,7 @@ class MCTSExplorer:
         visit_counts = {child.action: child.visits for child in root.children}
         best_action_visits = visit_counts.get(best_action, 0)
         total_child_visits = sum(visit_counts.values())
-        
+
         # Root value estimate
         root_value = root.value if root.visits > 0 else 0.0
 
@@ -454,7 +452,7 @@ class MCTSExplorer:
         Rollout from node to estimate value and collect transitions.
 
         Uses policy/random mix for action selection based on config.
-        
+
         Returns:
             tuple: (total_reward, transitions, action_sequence)
         """

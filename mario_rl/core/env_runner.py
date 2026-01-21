@@ -28,7 +28,7 @@ class CollectionInfo:
     total_reward: float
     episodes_completed: int
     episode_rewards: list[float] = field(default_factory=list)
-    
+
     # Raw step infos from environment (for collectors to process)
     step_infos: list[dict[str, Any]] = field(default_factory=list)
     episode_end_infos: list[dict[str, Any]] = field(default_factory=list)
@@ -43,7 +43,7 @@ class EnvRunner:
     - Reward processing (scaling, clipping)
     - Episode boundary handling (reset)
     - Optional callbacks for step/episode events
-    
+
     Game-specific metrics should be extracted by MetricCollectors
     that receive the step_infos, not by this runner.
     """
@@ -138,7 +138,7 @@ class EnvRunner:
 
             # Store step info for collectors
             step_infos.append(info)
-            
+
             # Callback for step (collectors can observe)
             if self.on_step is not None:
                 self.on_step(info)
@@ -147,10 +147,10 @@ class EnvRunner:
                 episodes_completed += 1
                 episode_rewards.append(episode_reward)
                 episode_reward = 0.0
-                
+
                 # Store episode end info for collectors
                 episode_end_infos.append(info)
-                
+
                 # Callback for episode end
                 if self.on_episode_end is not None:
                     self.on_episode_end(info)

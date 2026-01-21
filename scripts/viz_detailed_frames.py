@@ -9,16 +9,15 @@ Creates a 4-column visualization for each frame:
 """
 
 import argparse
-from pathlib import Path
 
-import matplotlib.pyplot as plt
-import numpy as np
 import torch
+import numpy as np
+import matplotlib.pyplot as plt
 from scipy.ndimage import zoom
 
+from mario_rl.models.ddqn import symexp
 from mario_rl.agent.ddqn_net import DoubleDQN
 from mario_rl.environment.factory import create_mario_env
-from mario_rl.models.ddqn import symexp
 
 
 def parse_args() -> argparse.Namespace:
@@ -87,9 +86,9 @@ def load_model(
     danger_bins: int = 16,
 ) -> tuple[DoubleDQN, int]:
     """Load the DoubleDQN model from weights.
-    
+
     Auto-detects action_history_len from checkpoint fc2 weight shape if not specified.
-    
+
     Returns:
         Tuple of (model, action_history_len)
     """
@@ -217,7 +216,7 @@ def create_visualization(
     for i, (_, data) in enumerate(sorted_data):
         # Col 1: Raw frame
         axes[i, 0].imshow(data["frame"], cmap="gray")
-        axes[i, 0].set_title(f'X={data["x"]}', fontsize=9)
+        axes[i, 0].set_title(f"X={data['x']}", fontsize=9)
         axes[i, 0].axis("off")
 
         # Col 2: Frame + attention overlay
@@ -244,26 +243,26 @@ def create_visualization(
         num_bins = len(danger)
         behind_bins = num_bins // 4  # 4 bins behind
         ahead_bins = num_bins - behind_bins  # 12 bins ahead
-        
+
         # Color behind bins differently from ahead bins
         colors = ["#9467bd"] * behind_bins + ["#ff7f0e"] * ahead_bins
         x_bins = np.arange(num_bins)
         axes[i, 3].bar(x_bins, danger, color=colors, alpha=0.8)
-        
+
         # Add vertical line separating behind/ahead
         axes[i, 3].axvline(behind_bins - 0.5, color="white", linewidth=1.5, linestyle="--")
-        
+
         # Custom x-ticks showing distance in pixels
         # Behind: 4 bins cover -64 to 0 (16px each), Ahead: 12 bins cover 0 to 256 (~21px each)
         tick_positions = [0, behind_bins - 1, behind_bins, num_bins - 1]
         tick_labels = ["-64px", "0", "0", "+256px"]
         axes[i, 3].set_xticks(tick_positions)
         axes[i, 3].set_xticklabels(tick_labels, fontsize=6)
-        
+
         # Annotate regions
         axes[i, 3].text(behind_bins / 2 - 0.5, 0.95, "Behind", ha="center", fontsize=6, color="#9467bd")
         axes[i, 3].text(behind_bins + ahead_bins / 2 - 0.5, 0.95, "Ahead", ha="center", fontsize=6, color="#ff7f0e")
-        
+
         axes[i, 3].set_title(f"Danger (peak bin {danger.argmax()})", fontsize=9)
         axes[i, 3].set_xlim(-0.5, num_bins - 0.5)
         axes[i, 3].set_ylim(0, 1.05)

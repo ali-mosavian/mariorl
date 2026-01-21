@@ -14,10 +14,11 @@ import torch
 import numpy as np
 import torch.nn.functional as F
 
-from mario_rl.agent.ddqn_net import DoubleDQN
 from mario_rl.models.muzero import symexp
+from mario_rl.agent.ddqn_net import DoubleDQN
 
 if TYPE_CHECKING:
+    from mario_rl.models.muzero import MuZeroModel
     from mario_rl.agent.world_model import DreamerDDQN
 
 
@@ -449,7 +450,7 @@ class MuZeroAdapter:
         return torch.from_numpy(state).float().to(self.device)
 
 
-@dataclass 
+@dataclass
 class MarioRolloutAdapter:
     """
     Mario-specific adapter for MCTS rollouts.
@@ -489,14 +490,14 @@ class MarioRolloutAdapter:
     def get_action_probs(self, state: np.ndarray) -> np.ndarray:
         """Get RIGHT-biased action probabilities."""
         probs = np.ones(self.num_actions) * 0.01  # Small base probability
-        
+
         # 70% for RIGHT variants
         for action in self.RIGHT_ACTIONS:
             probs[action] = 0.70 / len(self.RIGHT_ACTIONS)
-        
+
         # 20% for jump
         probs[self.JUMP_ACTION] = 0.20
-        
+
         # Normalize
         return probs / probs.sum()
 

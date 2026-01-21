@@ -6,9 +6,11 @@ import pandas as pd
 import streamlit as st
 import plotly.graph_objects as go
 
-from mario_rl.dashboard.chart_helpers import COLORS, DARK_LAYOUT, GRID_STYLE, make_heatmap
+from mario_rl.dashboard.chart_helpers import COLORS
 from mario_rl.dashboard.aggregators import sample_data
-
+from mario_rl.dashboard.chart_helpers import GRID_STYLE
+from mario_rl.dashboard.chart_helpers import DARK_LAYOUT
+from mario_rl.dashboard.chart_helpers import make_heatmap
 
 # Action names for Mario (SIMPLE_MOVEMENT: 7 actions)
 ACTION_NAMES = ["NOOP", "→", "→A", "→B", "→AB", "A", "←"]
@@ -43,11 +45,13 @@ def render_workers_tab(workers: dict[int, pd.DataFrame]) -> None:
 
     # Comparison charts
     colors = list(COLORS.values())
-    
+
     # Row 1: Reward and Speed (common)
     col1, col2 = st.columns(2)
     with col1:
-        _render_worker_chart(workers, "reward", "Rolling Avg Reward by Worker", colors, x_column="steps", show_legend=True)
+        _render_worker_chart(
+            workers, "reward", "Rolling Avg Reward by Worker", colors, x_column="steps", show_legend=True
+        )
     with col2:
         _render_worker_chart(workers, "speed", "Speed by Worker", colors, x_column="steps")
 
@@ -93,10 +97,12 @@ def render_workers_tab(workers: dict[int, pd.DataFrame]) -> None:
         col_e1, col_e2 = st.columns(2)
         # Dreamer: Reconstruction and SSIM (world model quality)
         with col_e1:
-            _render_worker_chart(workers, "recon_loss", "Reconstruction Loss by Worker", colors, x_column="steps", key="recon_loss")
+            _render_worker_chart(
+                workers, "recon_loss", "Reconstruction Loss by Worker", colors, x_column="steps", key="recon_loss"
+            )
         with col_e2:
             _render_worker_chart(workers, "ssim", "SSIM by Worker", colors, x_column="steps", key="ssim")
-    
+
     # Row 5b: Replay buffer charts (DDQN only)
     if model_type != "dreamer":
         st.divider()
@@ -120,13 +126,19 @@ def render_workers_tab(workers: dict[int, pd.DataFrame]) -> None:
     if model_type == "dreamer":
         # Dreamer: Policy entropy (from actor loss)
         with col_g1:
-            _render_worker_chart(workers, "entropy", "Policy Entropy (Actor)", colors, x_column="steps", key="dreamer_entropy")
+            _render_worker_chart(
+                workers, "entropy", "Policy Entropy (Actor)", colors, x_column="steps", key="dreamer_entropy"
+            )
         with col_g2:
-            _render_worker_chart(workers, "action_entropy", "Action Entropy (Empirical)", colors, x_column="steps", key="action_entropy")
+            _render_worker_chart(
+                workers, "action_entropy", "Action Entropy (Empirical)", colors, x_column="steps", key="action_entropy"
+            )
     else:
         # DDQN: Action entropy only
         with col_g1:
-            _render_worker_chart(workers, "action_entropy", "Action Entropy (Empirical)", colors, x_column="steps", key="action_entropy")
+            _render_worker_chart(
+                workers, "action_entropy", "Action Entropy (Empirical)", colors, x_column="steps", key="action_entropy"
+            )
         with col_g2:
             pass
 
@@ -142,13 +154,13 @@ def _render_summary_table(workers: dict[int, pd.DataFrame], model_type: str = "d
     """Render the worker summary table."""
     rows = []
     current_time = time.time()
-    
+
     for wid, df in sorted(workers.items()):
         if len(df) == 0:
             continue
         latest = df.iloc[-1]
         best_x = latest.get("best_x_ever", latest.get("best_x", 0))
-        
+
         # Calculate heartbeat status
         last_timestamp = latest.get("timestamp", 0)
         if last_timestamp > 0:
@@ -161,12 +173,12 @@ def _render_summary_table(workers: dict[int, pd.DataFrame], model_type: str = "d
                 heartbeat = "💔"
         else:
             heartbeat = "⚪"
-        
+
         # Get level info
         level = latest.get("current_level", "?")
         if level == "?" and "world" in latest and "stage" in latest:
             level = f"{int(latest['world'])}-{int(latest['stage'])}"
-        
+
         # Common columns
         row = {
             "Status": heartbeat,
@@ -179,40 +191,48 @@ def _render_summary_table(workers: dict[int, pd.DataFrame], model_type: str = "d
             "Speed": f"{latest.get('speed', 0):.2f}",
             "Loss": f"{latest.get('loss', 0):.3f}",
         }
-        
+
         # Model-specific columns
         if model_type == "dreamer":
-            row.update({
-                "WM Loss": f"{latest.get('wm_loss', 0):.3f}",
-                "Recon": f"{latest.get('recon_loss', 0):.3f}",
-                "SSIM": f"{latest.get('ssim', 0):.3f}",
-                "Entropy": f"{latest.get('entropy', 0):.3f}",
-            })
+            row.update(
+                {
+                    "WM Loss": f"{latest.get('wm_loss', 0):.3f}",
+                    "Recon": f"{latest.get('recon_loss', 0):.3f}",
+                    "SSIM": f"{latest.get('ssim', 0):.3f}",
+                    "Entropy": f"{latest.get('entropy', 0):.3f}",
+                }
+            )
         else:
-            row.update({
-                "ε": f"{latest.get('epsilon', 1.0):.3f}",
-                "Q Mean": f"{latest.get('q_mean', 0):.1f}",
-                "TD Err": f"{latest.get('td_error', 0):.3f}",
-            })
+            row.update(
+                {
+                    "ε": f"{latest.get('epsilon', 1.0):.3f}",
+                    "Q Mean": f"{latest.get('q_mean', 0):.1f}",
+                    "TD Err": f"{latest.get('td_error', 0):.3f}",
+                }
+            )
             # Buffer stats (DDQN only)
             buf_size = int(latest.get("buffer_size", 0))
             buf_neg = int(latest.get("buf_neg", 0))
             buf_pos = int(latest.get("buf_pos", 0))
             buf_diff = int(latest.get("buf_diff", 0))
-            row.update({
-                "📦 Buffer": buf_size if buf_size > 0 else "-",
-                "💀 Death": buf_neg if buf_neg > 0 else "-",
-                "🏁 Flag": buf_pos if buf_pos > 0 else "-",
-                "⚠ Hard": buf_diff if buf_diff > 0 else "-",
-            })
-        
+            row.update(
+                {
+                    "📦 Buffer": buf_size if buf_size > 0 else "-",
+                    "💀 Death": buf_neg if buf_neg > 0 else "-",
+                    "🏁 Flag": buf_pos if buf_pos > 0 else "-",
+                    "⚠ Hard": buf_diff if buf_diff > 0 else "-",
+                }
+            )
+
         # Common trailing columns
-        row.update({
-            "Deaths": int(latest.get("deaths", 0)),
-            "Flags": int(latest.get("flags", 0)),
-            "Grads": int(latest.get("grads_sent", 0)),
-        })
-        
+        row.update(
+            {
+                "Deaths": int(latest.get("deaths", 0)),
+                "Flags": int(latest.get("flags", 0)),
+                "Grads": int(latest.get("grads_sent", 0)),
+            }
+        )
+
         rows.append(row)
 
     if rows:
@@ -242,72 +262,78 @@ def _render_worker_chart(
     """Render a comparison chart for a single metric across workers."""
     # Check if any worker has this column
     has_data = any(len(df) > 0 and column in df.columns for df in workers.values())
-    
+
     if not has_data:
         st.caption(f"📊 {title}")
         st.info(f"No data for '{column}' (metric not tracked in this run)")
         return
-    
+
     # Use column name as key if not provided
     chart_key = key or f"worker_chart_{column}"
-    
+
     # Log scale toggle using a small toggle in the title row
     log_scale = st.toggle("📈", key=f"{chart_key}_log", help="Log Y scale")
-    
+
     fig = go.Figure()
-    
+
     for i, (wid, df) in enumerate(sorted(workers.items())):
         if len(df) > 0 and column in df.columns:
             x = df.get(x_column, range(len(df)))
-            fig.add_trace(go.Scatter(
-                x=x, y=df[column],
-                name=f"W{wid}",
-                line=dict(color=colors[i % len(colors)], width=1.5),
-                opacity=0.8,
-            ))
-    
+            fig.add_trace(
+                go.Scatter(
+                    x=x,
+                    y=df[column],
+                    name=f"W{wid}",
+                    line={"color": colors[i % len(colors)], "width": 1.5},
+                    opacity=0.8,
+                )
+            )
+
     x_title = "Episode" if x_column == "episodes" else "Steps"
     y_type = "log" if log_scale else "linear"
     fig.update_layout(
-        title=dict(text=title, font=dict(size=12)),
+        title={"text": title, "font": {"size": 12}},
         height=280,
-        margin=dict(l=0, r=0, t=30, b=0),
+        margin={"l": 0, "r": 0, "t": 30, "b": 0},
         **DARK_LAYOUT,
         xaxis=dict(title=x_title, **GRID_STYLE),
         yaxis=dict(type=y_type, **GRID_STYLE),
         showlegend=show_legend,
     )
-    
+
     if show_legend:
-        fig.update_layout(legend=dict(orientation="h", yanchor="bottom", y=1.02))
-    
+        fig.update_layout(legend={"orientation": "h", "yanchor": "bottom", "y": 1.02})
+
     st.plotly_chart(fig, use_container_width=True, key=chart_key)
 
 
 def _render_epsilon_chart(workers: dict[int, pd.DataFrame], colors: list[str]) -> None:
     """Render epsilon decay chart by worker."""
     fig = go.Figure()
-    
+
     for i, (wid, df) in enumerate(sorted(workers.items())):
         if len(df) > 0 and "epsilon" in df.columns:
             x_axis = df["steps"] if "steps" in df.columns else df.get("episodes", range(len(df)))
-            fig.add_trace(go.Scatter(
-                x=x_axis, y=df["epsilon"],
-                name=f"W{wid}",
-                line=dict(color=colors[i % len(colors)], width=1.5),
-                opacity=0.8,
-            ))
-    
+            fig.add_trace(
+                go.Scatter(
+                    x=x_axis,
+                    y=df["epsilon"],
+                    name=f"W{wid}",
+                    line={"color": colors[i % len(colors)], "width": 1.5},
+                    opacity=0.8,
+                )
+            )
+
     fig.update_layout(
         title="Epsilon by Worker (vs Steps)",
         height=280,
-        margin=dict(l=0, r=0, t=30, b=0),
+        margin={"l": 0, "r": 0, "t": 30, "b": 0},
         **DARK_LAYOUT,
         xaxis=dict(title="Steps", **GRID_STYLE),
         yaxis=dict(title="ε", range=[0, 1.05], **GRID_STYLE),
-        legend=dict(orientation="h", yanchor="bottom", y=1.02),
+        legend={"orientation": "h", "yanchor": "bottom", "y": 1.02},
     )
-    
+
     st.plotly_chart(fig, use_container_width=True)
 
 
@@ -315,23 +341,26 @@ def _render_beta_or_buffer_chart(workers: dict[int, pd.DataFrame], colors: list[
     """Render PER beta chart (or fallback to buffer size)."""
     fig = go.Figure()
     has_beta = False
-    
+
     for i, (wid, df) in enumerate(sorted(workers.items())):
         if len(df) > 0 and "per_beta" in df.columns:
             has_beta = True
             x_axis = df["steps"] if "steps" in df.columns else df.get("episodes", range(len(df)))
-            fig.add_trace(go.Scatter(
-                x=x_axis, y=df["per_beta"],
-                name=f"W{wid}",
-                line=dict(color=colors[i % len(colors)], width=1.5),
-                opacity=0.8,
-            ))
-    
+            fig.add_trace(
+                go.Scatter(
+                    x=x_axis,
+                    y=df["per_beta"],
+                    name=f"W{wid}",
+                    line={"color": colors[i % len(colors)], "width": 1.5},
+                    opacity=0.8,
+                )
+            )
+
     if has_beta:
         fig.update_layout(
             title="PER Beta by Worker (vs Steps)",
             height=280,
-            margin=dict(l=0, r=0, t=30, b=0),
+            margin={"l": 0, "r": 0, "t": 30, "b": 0},
             **DARK_LAYOUT,
             xaxis=dict(title="Steps", **GRID_STYLE),
             yaxis=dict(title="β", range=[0, 1.05], **GRID_STYLE),
@@ -343,17 +372,20 @@ def _render_beta_or_buffer_chart(workers: dict[int, pd.DataFrame], colors: list[
         fig = go.Figure()
         for i, (wid, df) in enumerate(sorted(workers.items())):
             if len(df) > 0 and "buffer_size" in df.columns:
-                fig.add_trace(go.Scatter(
-                    x=df.get("episodes", range(len(df))), y=df["buffer_size"],
-                    name=f"W{wid}",
-                    line=dict(color=colors[i % len(colors)], width=1.5),
-                    opacity=0.8,
-                ))
-        
+                fig.add_trace(
+                    go.Scatter(
+                        x=df.get("episodes", range(len(df))),
+                        y=df["buffer_size"],
+                        name=f"W{wid}",
+                        line={"color": colors[i % len(colors)], "width": 1.5},
+                        opacity=0.8,
+                    )
+                )
+
         fig.update_layout(
             title="Buffer Size by Worker",
             height=280,
-            margin=dict(l=0, r=0, t=30, b=0),
+            margin={"l": 0, "r": 0, "t": 30, "b": 0},
             **DARK_LAYOUT,
             xaxis=dict(title="Episode", **GRID_STYLE),
             yaxis=dict(**GRID_STYLE),
@@ -366,109 +398,120 @@ def _render_protected_buffer_charts(workers: dict[int, pd.DataFrame], colors: li
     """Render charts for the four replay buffer partitions (main, negative, positive, difficult)."""
     # Check if any worker has protected buffer data
     has_protected_data = any(
-        len(df) > 0 and any(col in df.columns for col in ["buf_neg", "buf_pos", "buf_diff"])
-        for df in workers.values()
+        len(df) > 0 and any(col in df.columns for col in ["buf_neg", "buf_pos", "buf_diff"]) for df in workers.values()
     )
-    
+
     if not has_protected_data:
         st.info("⏳ Protected buffer tracking not yet available...")
         return
-    
+
     # Create 4 columns for the buffer charts
     col1, col2, col3, col4 = st.columns(4)
-    
+
     # Main buffer (buffer_size)
     with col1:
         fig = go.Figure()
         for i, (wid, df) in enumerate(sorted(workers.items())):
             if len(df) > 0 and "buffer_size" in df.columns:
                 x_axis = df["steps"] if "steps" in df.columns else range(len(df))
-                fig.add_trace(go.Scatter(
-                    x=x_axis, y=df["buffer_size"],
-                    name=f"W{wid}",
-                    line=dict(color=colors[i % len(colors)], width=1.5),
-                    opacity=0.8,
-                ))
+                fig.add_trace(
+                    go.Scatter(
+                        x=x_axis,
+                        y=df["buffer_size"],
+                        name=f"W{wid}",
+                        line={"color": colors[i % len(colors)], "width": 1.5},
+                        opacity=0.8,
+                    )
+                )
         fig.update_layout(
             title="📦 Main Buffer",
             height=220,
-            margin=dict(l=0, r=0, t=30, b=0),
+            margin={"l": 0, "r": 0, "t": 30, "b": 0},
             **DARK_LAYOUT,
             xaxis=dict(title="Steps", **GRID_STYLE),
             yaxis=dict(title="Size", **GRID_STYLE),
             showlegend=False,
         )
         st.plotly_chart(fig, use_container_width=True, key="buf_main")
-    
+
     # Negative buffer (deaths)
     with col2:
         fig = go.Figure()
         for i, (wid, df) in enumerate(sorted(workers.items())):
             if len(df) > 0 and "buf_neg" in df.columns:
                 x_axis = df["steps"] if "steps" in df.columns else range(len(df))
-                fig.add_trace(go.Scatter(
-                    x=x_axis, y=df["buf_neg"],
-                    name=f"W{wid}",
-                    line=dict(color=colors[i % len(colors)], width=1.5),
-                    opacity=0.8,
-                ))
+                fig.add_trace(
+                    go.Scatter(
+                        x=x_axis,
+                        y=df["buf_neg"],
+                        name=f"W{wid}",
+                        line={"color": colors[i % len(colors)], "width": 1.5},
+                        opacity=0.8,
+                    )
+                )
         fig.update_layout(
             title="💀 Death Buffer",
             height=220,
-            margin=dict(l=0, r=0, t=30, b=0),
+            margin={"l": 0, "r": 0, "t": 30, "b": 0},
             **DARK_LAYOUT,
             xaxis=dict(title="Steps", **GRID_STYLE),
             yaxis=dict(title="Size", **GRID_STYLE),
             showlegend=False,
         )
         st.plotly_chart(fig, use_container_width=True, key="buf_neg")
-    
+
     # Positive buffer (flags)
     with col3:
         fig = go.Figure()
         for i, (wid, df) in enumerate(sorted(workers.items())):
             if len(df) > 0 and "buf_pos" in df.columns:
                 x_axis = df["steps"] if "steps" in df.columns else range(len(df))
-                fig.add_trace(go.Scatter(
-                    x=x_axis, y=df["buf_pos"],
-                    name=f"W{wid}",
-                    line=dict(color=colors[i % len(colors)], width=1.5),
-                    opacity=0.8,
-                ))
+                fig.add_trace(
+                    go.Scatter(
+                        x=x_axis,
+                        y=df["buf_pos"],
+                        name=f"W{wid}",
+                        line={"color": colors[i % len(colors)], "width": 1.5},
+                        opacity=0.8,
+                    )
+                )
         fig.update_layout(
             title="🏁 Flag Buffer",
             height=220,
-            margin=dict(l=0, r=0, t=30, b=0),
+            margin={"l": 0, "r": 0, "t": 30, "b": 0},
             **DARK_LAYOUT,
             xaxis=dict(title="Steps", **GRID_STYLE),
             yaxis=dict(title="Size", **GRID_STYLE),
             showlegend=False,
         )
         st.plotly_chart(fig, use_container_width=True, key="buf_pos")
-    
+
     # Difficult buffer (hard sections passed)
     with col4:
         fig = go.Figure()
         for i, (wid, df) in enumerate(sorted(workers.items())):
             if len(df) > 0 and "buf_diff" in df.columns:
                 x_axis = df["steps"] if "steps" in df.columns else range(len(df))
-                fig.add_trace(go.Scatter(
-                    x=x_axis, y=df["buf_diff"],
-                    name=f"W{wid}",
-                    line=dict(color=colors[i % len(colors)], width=1.5),
-                    opacity=0.8,
-                ))
+                fig.add_trace(
+                    go.Scatter(
+                        x=x_axis,
+                        y=df["buf_diff"],
+                        name=f"W{wid}",
+                        line={"color": colors[i % len(colors)], "width": 1.5},
+                        opacity=0.8,
+                    )
+                )
         fig.update_layout(
             title="⚠️ Hard Section Buffer",
             height=220,
-            margin=dict(l=0, r=0, t=30, b=0),
+            margin={"l": 0, "r": 0, "t": 30, "b": 0},
             **DARK_LAYOUT,
             xaxis=dict(title="Steps", **GRID_STYLE),
             yaxis=dict(title="Size", **GRID_STYLE),
             showlegend=False,
         )
         st.plotly_chart(fig, use_container_width=True, key="buf_diff")
-    
+
     # Summary bar chart showing current buffer sizes per worker
     st.caption("📊 Current Buffer Sizes by Worker")
     _render_buffer_summary_barchart(workers, colors)
@@ -481,7 +524,7 @@ def _render_buffer_summary_barchart(workers: dict[int, pd.DataFrame], colors: li
     neg_sizes = []
     pos_sizes = []
     diff_sizes = []
-    
+
     for wid, df in sorted(workers.items()):
         if len(df) > 0:
             latest = df.iloc[-1]
@@ -490,47 +533,55 @@ def _render_buffer_summary_barchart(workers: dict[int, pd.DataFrame], colors: li
             neg_sizes.append(int(latest.get("buf_neg", 0)))
             pos_sizes.append(int(latest.get("buf_pos", 0)))
             diff_sizes.append(int(latest.get("buf_diff", 0)))
-    
+
     if not worker_ids:
         return
-    
+
     fig = go.Figure()
-    
-    fig.add_trace(go.Bar(
-        name="📦 Main Buffer",
-        x=worker_ids,
-        y=main_sizes,
-        marker_color=COLORS["blue"],
-    ))
-    fig.add_trace(go.Bar(
-        name="💀 Death Buffer",
-        x=worker_ids,
-        y=neg_sizes,
-        marker_color=COLORS["red"],
-    ))
-    fig.add_trace(go.Bar(
-        name="🏁 Flag Buffer",
-        x=worker_ids,
-        y=pos_sizes,
-        marker_color=COLORS["green"],
-    ))
-    fig.add_trace(go.Bar(
-        name="⚠️ Hard Section Buffer",
-        x=worker_ids,
-        y=diff_sizes,
-        marker_color=COLORS["yellow"],
-    ))
-    
+
+    fig.add_trace(
+        go.Bar(
+            name="📦 Main Buffer",
+            x=worker_ids,
+            y=main_sizes,
+            marker_color=COLORS["blue"],
+        )
+    )
+    fig.add_trace(
+        go.Bar(
+            name="💀 Death Buffer",
+            x=worker_ids,
+            y=neg_sizes,
+            marker_color=COLORS["red"],
+        )
+    )
+    fig.add_trace(
+        go.Bar(
+            name="🏁 Flag Buffer",
+            x=worker_ids,
+            y=pos_sizes,
+            marker_color=COLORS["green"],
+        )
+    )
+    fig.add_trace(
+        go.Bar(
+            name="⚠️ Hard Section Buffer",
+            x=worker_ids,
+            y=diff_sizes,
+            marker_color=COLORS["yellow"],
+        )
+    )
+
     fig.update_layout(
         barmode="group",
         height=250,
-        margin=dict(l=0, r=0, t=10, b=0),
+        margin={"l": 0, "r": 0, "t": 10, "b": 0},
         **DARK_LAYOUT,
         xaxis=dict(title="Worker", **GRID_STYLE),
         yaxis=dict(title="Transitions", **GRID_STYLE),
-        legend=dict(orientation="h", yanchor="bottom", y=1.02),
+        legend={"orientation": "h", "yanchor": "bottom", "y": 1.02},
     )
-    
+
     st.plotly_chart(fig, use_container_width=True, key="buf_summary")
 
 
@@ -538,27 +589,30 @@ def _render_action_entropy_chart(workers: dict[int, pd.DataFrame], colors: list[
     """Render action entropy chart by worker."""
     fig = go.Figure()
     has_data = False
-    
+
     for i, (wid, df) in enumerate(sorted(workers.items())):
         if len(df) > 0 and "action_entropy" in df.columns:
             has_data = True
             x_axis = df["steps"] if "steps" in df.columns else df.get("episodes", range(len(df)))
-            fig.add_trace(go.Scatter(
-                x=x_axis, y=df["action_entropy"],
-                name=f"W{wid}",
-                line=dict(color=colors[i % len(colors)], width=1.5),
-                opacity=0.8,
-            ))
-    
+            fig.add_trace(
+                go.Scatter(
+                    x=x_axis,
+                    y=df["action_entropy"],
+                    name=f"W{wid}",
+                    line={"color": colors[i % len(colors)], "width": 1.5},
+                    opacity=0.8,
+                )
+            )
+
     if has_data:
         fig.update_layout(
             title="Action Entropy by Worker (0=deterministic, 1=uniform)",
             height=280,
-            margin=dict(l=0, r=0, t=30, b=0),
+            margin={"l": 0, "r": 0, "t": 30, "b": 0},
             **DARK_LAYOUT,
             xaxis=dict(title="Steps", **GRID_STYLE),
             yaxis=dict(title="Entropy", range=[0, 1.05], **GRID_STYLE),
-            legend=dict(orientation="h", yanchor="bottom", y=1.02),
+            legend={"orientation": "h", "yanchor": "bottom", "y": 1.02},
         )
         st.plotly_chart(fig, use_container_width=True)
     else:
@@ -569,7 +623,7 @@ def _render_action_distribution_heatmap(workers: dict[int, pd.DataFrame]) -> Non
     """Render action distribution heatmap over time."""
     # Collect all action_dist data with timestamps
     all_action_data = []
-    for wid, df in sorted(workers.items()):
+    for _wid, df in sorted(workers.items()):
         if len(df) > 0 and "action_dist" in df.columns:
             for idx, row in df.iterrows():
                 dist_str = row.get("action_dist", "")
@@ -581,18 +635,18 @@ def _render_action_distribution_heatmap(workers: dict[int, pd.DataFrame]) -> Non
                             all_action_data.append((steps, pcts))
                     except (ValueError, TypeError):
                         pass
-    
+
     if all_action_data:
         # Sort by steps and sample
         all_action_data.sort(key=lambda x: x[0])
         sampled_data = sample_data(all_action_data, max_points=50)
-        
+
         # Build heatmap matrix
-        x_labels = [f"{int(d[0]//1000)}k" for d in sampled_data]
+        x_labels = [f"{int(d[0] // 1000)}k" for d in sampled_data]
         num_actions = len(sampled_data[0][1]) if sampled_data else len(ACTION_NAMES)
         z_data = [[d[1][action_idx] for d in sampled_data] for action_idx in range(num_actions)]
         y_labels = ACTION_NAMES[:num_actions]
-        
+
         fig = make_heatmap(
             z_data=z_data,
             x_labels=x_labels,
@@ -600,7 +654,7 @@ def _render_action_distribution_heatmap(workers: dict[int, pd.DataFrame]) -> Non
             title="Action Distribution Over Time (%)",
             height=280,
         )
-        fig.update_layout(xaxis=dict(title="Steps"))
+        fig.update_layout(xaxis={"title": "Steps"})
         st.plotly_chart(fig, use_container_width=True)
     else:
         st.info("⏳ Action distribution tracking not yet available...")

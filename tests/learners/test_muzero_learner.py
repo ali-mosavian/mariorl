@@ -1,14 +1,14 @@
 """Tests for MuZero learner components."""
 
-import pytest
 import torch
+import pytest
 
+from mario_rl.learners.muzero import run_mcts
+from mario_rl.models.muzero import MuZeroModel
+from mario_rl.models.muzero import MuZeroConfig
 from mario_rl.learners.muzero import MuZeroLearner
 from mario_rl.learners.muzero import MuZeroTrajectory
 from mario_rl.learners.muzero import compute_value_target
-from mario_rl.learners.muzero import run_mcts
-from mario_rl.models.muzero import MuZeroConfig
-from mario_rl.models.muzero import MuZeroModel
 
 
 @pytest.fixture
@@ -53,14 +53,10 @@ class TestMuZeroLearner:
 
         actions = torch.randint(0, config.num_actions, (batch_size, K))
         rewards = torch.randn(batch_size, K)
-        target_policies = torch.softmax(
-            torch.randn(batch_size, K + 1, config.num_actions), dim=-1
-        )
+        target_policies = torch.softmax(torch.randn(batch_size, K + 1, config.num_actions), dim=-1)
         target_values = torch.randn(batch_size, K + 1)
 
-        loss, metrics = learner.compute_trajectory_loss(
-            small_obs, actions, rewards, target_policies, target_values
-        )
+        loss, metrics = learner.compute_trajectory_loss(small_obs, actions, rewards, target_policies, target_values)
 
         assert loss.ndim == 0
         assert not torch.isnan(loss)
@@ -78,9 +74,7 @@ class TestMuZeroLearner:
 
         actions = torch.randint(0, config.num_actions, (batch_size, K))
         rewards = torch.randn(batch_size, K)
-        target_policies = torch.softmax(
-            torch.randn(batch_size, K + 1, config.num_actions), dim=-1
-        )
+        target_policies = torch.softmax(torch.randn(batch_size, K + 1, config.num_actions), dim=-1)
         target_values = torch.randn(batch_size, K + 1)
         weights = torch.tensor([0.5, 1.5])
 
@@ -91,9 +85,7 @@ class TestMuZeroLearner:
         assert loss.ndim == 0
         assert not torch.isnan(loss)
 
-    def test_compute_loss(
-        self, learner: MuZeroLearner, config: MuZeroConfig
-    ) -> None:
+    def test_compute_loss(self, learner: MuZeroLearner, config: MuZeroConfig) -> None:
         """Single-step loss computation (Learner protocol)."""
         batch_size = 2
 
@@ -103,9 +95,7 @@ class TestMuZeroLearner:
         next_states = torch.randint(0, 256, (batch_size, 4, 84, 84), dtype=torch.float32)
         dones = torch.zeros(batch_size)
 
-        loss, metrics = learner.compute_loss(
-            states, actions, rewards, next_states, dones
-        )
+        loss, metrics = learner.compute_loss(states, actions, rewards, next_states, dones)
 
         assert loss.ndim == 0
         assert not torch.isnan(loss)
@@ -123,6 +113,7 @@ class TestMuZeroLearner:
         for online_p, target_p in zip(
             learner.model.online.parameters(),
             learner.model.target.parameters(),
+            strict=False,
         ):
             assert torch.allclose(online_p, target_p)
 
@@ -147,9 +138,7 @@ class TestRunMCTS:
         """MCTS returns valid probability distribution."""
         obs = torch.randint(0, 256, (1, 4, 84, 84), dtype=torch.float32)
 
-        policy, value, root = run_mcts(
-            model, obs, num_simulations=10, add_noise=False
-        )
+        policy, value, root = run_mcts(model, obs, num_simulations=10, add_noise=False)
 
         assert policy.shape == (model.num_actions,)
         assert abs(policy.sum() - 1.0) < 1e-5
@@ -179,10 +168,7 @@ class TestRunMCTS:
         obs = torch.randint(0, 256, (1, 4, 84, 84), dtype=torch.float32)
 
         # Run multiple times - noise should cause variation
-        policies = [
-            run_mcts(model, obs, num_simulations=5, add_noise=True)[0]
-            for _ in range(5)
-        ]
+        policies = [run_mcts(model, obs, num_simulations=5, add_noise=True)[0] for _ in range(5)]
 
         # With noise, policies should vary (probabilistic, so just check it runs)
         assert all(p.shape == (model.num_actions,) for p in policies)
@@ -192,13 +178,9 @@ class TestRunMCTS:
         obs = torch.randint(0, 256, (1, 4, 84, 84), dtype=torch.float32)
 
         # Low temperature should be sharper
-        policy_cold, _, _ = run_mcts(
-            model, obs, num_simulations=10, temperature=0.1, add_noise=False
-        )
+        policy_cold, _, _ = run_mcts(model, obs, num_simulations=10, temperature=0.1, add_noise=False)
         # High temperature should be flatter
-        policy_hot, _, _ = run_mcts(
-            model, obs, num_simulations=10, temperature=2.0, add_noise=False
-        )
+        policy_hot, _, _ = run_mcts(model, obs, num_simulations=10, temperature=2.0, add_noise=False)
 
         # Cold policy should have higher max
         assert policy_cold.max() >= policy_hot.max() - 0.2  # Allow some variance
@@ -289,14 +271,10 @@ class TestLatentGroundingLoss:
 
         actions = torch.randint(0, config.num_actions, (batch_size, K))
         rewards = torch.randn(batch_size, K)
-        target_policies = torch.softmax(
-            torch.randn(batch_size, K + 1, config.num_actions), dim=-1
-        )
+        target_policies = torch.softmax(torch.randn(batch_size, K + 1, config.num_actions), dim=-1)
         target_values = torch.randn(batch_size, K + 1)
         # Next states for grounding: (N, K, C, H, W)
-        next_states = torch.randint(
-            0, 256, (batch_size, K, 4, 84, 84), dtype=torch.float32
-        )
+        next_states = torch.randint(0, 256, (batch_size, K, 4, 84, 84), dtype=torch.float32)
 
         loss, metrics = learner.compute_trajectory_loss(
             small_obs,
@@ -325,9 +303,7 @@ class TestLatentGroundingLoss:
 
         actions = torch.randint(0, config.num_actions, (batch_size, K))
         rewards = torch.randn(batch_size, K)
-        target_policies = torch.softmax(
-            torch.randn(batch_size, K + 1, config.num_actions), dim=-1
-        )
+        target_policies = torch.softmax(torch.randn(batch_size, K + 1, config.num_actions), dim=-1)
         target_values = torch.randn(batch_size, K + 1)
 
         loss, metrics = learner.compute_trajectory_loss(
@@ -345,23 +321,17 @@ class TestLatentGroundingLoss:
         assert metrics["consistency_loss"] == 0.0
         assert metrics["contrastive_loss"] == 0.0
 
-    def test_compute_loss_includes_grounding(
-        self, learner: MuZeroLearner, config: MuZeroConfig
-    ) -> None:
+    def test_compute_loss_includes_grounding(self, learner: MuZeroLearner, config: MuZeroConfig) -> None:
         """Single-step compute_loss includes grounding losses."""
         batch_size = 2
 
         states = torch.randint(0, 256, (batch_size, 4, 84, 84), dtype=torch.float32)
         actions = torch.randint(0, config.num_actions, (batch_size,))
         rewards = torch.randn(batch_size)
-        next_states = torch.randint(
-            0, 256, (batch_size, 4, 84, 84), dtype=torch.float32
-        )
+        next_states = torch.randint(0, 256, (batch_size, 4, 84, 84), dtype=torch.float32)
         dones = torch.zeros(batch_size)
 
-        loss, metrics = learner.compute_loss(
-            states, actions, rewards, next_states, dones
-        )
+        loss, metrics = learner.compute_loss(states, actions, rewards, next_states, dones)
 
         assert loss.ndim == 0
         assert not torch.isnan(loss)
@@ -413,7 +383,7 @@ class TestScaleGradient:
 
         # Forward
         scaled = scale_gradient(x, scale)
-        loss = (scaled ** 2).sum()
+        loss = (scaled**2).sum()
 
         # Backward
         loss.backward()
@@ -429,7 +399,7 @@ class TestScaleGradient:
 
         x = torch.randn(4, 8, requires_grad=True)
         scaled = scale_gradient(x, 1.0)
-        loss = (scaled ** 2).sum()
+        loss = (scaled**2).sum()
         loss.backward()
 
         # Full gradient: 2x
@@ -442,7 +412,7 @@ class TestScaleGradient:
 
         x = torch.randn(4, 8, requires_grad=True)
         scaled = scale_gradient(x, 0.0)
-        loss = (scaled ** 2).sum()
+        loss = (scaled**2).sum()
         loss.backward()
 
         # Gradient should be zero
@@ -455,8 +425,8 @@ class TestMuZeroTrajectoryCollector:
 
     def test_collector_creation(self) -> None:
         """Collector can be created with valid config."""
+
         from mario_rl.learners.muzero import MuZeroTrajectoryCollector
-        import numpy as np
 
         collector = MuZeroTrajectoryCollector(
             unroll_steps=5,
@@ -470,8 +440,9 @@ class TestMuZeroTrajectoryCollector:
 
     def test_start_episode(self) -> None:
         """Start episode initializes trajectory data."""
-        from mario_rl.learners.muzero import MuZeroTrajectoryCollector
         import numpy as np
+
+        from mario_rl.learners.muzero import MuZeroTrajectoryCollector
 
         collector = MuZeroTrajectoryCollector(
             unroll_steps=3,
@@ -490,8 +461,9 @@ class TestMuZeroTrajectoryCollector:
 
     def test_add_step(self) -> None:
         """Adding steps accumulates trajectory data."""
-        from mario_rl.learners.muzero import MuZeroTrajectoryCollector
         import numpy as np
+
+        from mario_rl.learners.muzero import MuZeroTrajectoryCollector
 
         collector = MuZeroTrajectoryCollector(
             unroll_steps=3,
@@ -503,7 +475,7 @@ class TestMuZeroTrajectoryCollector:
         value = 1.5
 
         collector.start_episode(obs, policy, value)
-        
+
         # Add a step
         next_obs = np.random.rand(4, 84, 84).astype(np.float32)
         next_policy = np.array([0.1, 0.2, 0.3, 0.4])
@@ -523,8 +495,9 @@ class TestMuZeroTrajectoryCollector:
 
     def test_get_trajectories_returns_segments(self) -> None:
         """Get trajectories returns proper K-step segments."""
-        from mario_rl.learners.muzero import MuZeroTrajectoryCollector
         import numpy as np
+
+        from mario_rl.learners.muzero import MuZeroTrajectoryCollector
 
         K = 3
         collector = MuZeroTrajectoryCollector(
@@ -533,7 +506,7 @@ class TestMuZeroTrajectoryCollector:
         )
 
         obs_shape = (4, 84, 84)
-        
+
         # Start episode
         obs = np.random.rand(*obs_shape).astype(np.float32)
         policy = np.ones(4) / 4
@@ -568,8 +541,9 @@ class TestMuZeroTrajectoryCollector:
 
     def test_get_trajectories_requires_minimum_steps(self) -> None:
         """Get trajectories returns empty if not enough steps."""
-        from mario_rl.learners.muzero import MuZeroTrajectoryCollector
         import numpy as np
+
+        from mario_rl.learners.muzero import MuZeroTrajectoryCollector
 
         K = 5
         collector = MuZeroTrajectoryCollector(
@@ -597,8 +571,9 @@ class TestMuZeroTrajectoryCollector:
 
     def test_reset_clears_data(self) -> None:
         """Reset clears all collected data."""
-        from mario_rl.learners.muzero import MuZeroTrajectoryCollector
         import numpy as np
+
+        from mario_rl.learners.muzero import MuZeroTrajectoryCollector
 
         collector = MuZeroTrajectoryCollector(
             unroll_steps=3,

@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-import numpy as np
 import pytest
+import numpy as np
 
 from mario_rl.core.types import Transition
 from mario_rl.buffers.prioritized import PrioritizedReplayBuffer
@@ -114,7 +114,7 @@ def test_flag_priority_preserved_on_update(
 
     # Sample to get indices
     batch = buffer.sample(1)
-    initial_priority = buffer.tree.tree[batch.indices[0]]
+    _initial_priority = buffer.tree.tree[batch.indices[0]]
 
     # Update priority with TD error
     td_errors = np.array([1.0])
@@ -219,8 +219,8 @@ def test_transition_frozen() -> None:
         done=False,
     )
 
-    with pytest.raises(Exception):  # FrozenInstanceError
-        transition.flag_get = True
+    with pytest.raises((AttributeError, TypeError)):  # FrozenInstanceError
+        transition.flag_get = True  # type: ignore[misc]
 
 
 def test_buffer_config_defaults() -> None:

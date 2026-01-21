@@ -1,18 +1,18 @@
 """Tests for MuZero model components."""
 
-import numpy as np
-import pytest
 import torch
+import pytest
+import numpy as np
 
-from mario_rl.models.muzero import DynamicsNetwork
-from mario_rl.models.muzero import MuZeroConfig
 from mario_rl.models.muzero import MuZeroModel
+from mario_rl.models.muzero import MuZeroConfig
 from mario_rl.models.muzero import MuZeroNetwork
-from mario_rl.models.muzero import PredictionNetwork
+from mario_rl.models.muzero import info_nce_loss
+from mario_rl.models.muzero import DynamicsNetwork
 from mario_rl.models.muzero import PredictorNetwork
 from mario_rl.models.muzero import ProjectorNetwork
+from mario_rl.models.muzero import PredictionNetwork
 from mario_rl.models.muzero import RepresentationNetwork
-from mario_rl.models.muzero import info_nce_loss
 
 
 @pytest.fixture
@@ -162,9 +162,7 @@ class TestMuZeroNetwork:
         assert (action >= 0).all()
         assert (action < config.num_actions).all()
 
-    def test_select_action_stochastic(
-        self, config: MuZeroConfig, small_obs: torch.Tensor
-    ) -> None:
+    def test_select_action_stochastic(self, config: MuZeroConfig, small_obs: torch.Tensor) -> None:
         """Stochastic action selection samples from policy."""
         net = MuZeroNetwork(config)
 
@@ -172,7 +170,7 @@ class TestMuZeroNetwork:
         actions = [net.select_action(small_obs, greedy=False) for _ in range(10)]
 
         # At least some should be different (probabilistic)
-        unique_actions = set(tuple(a.tolist()) for a in actions)
+        unique_actions = {tuple(a.tolist()) for a in actions}
         # With temperature=1.0 and 7 actions, we should see some variation
         assert len(unique_actions) >= 1  # At minimum, should work
 
@@ -191,9 +189,7 @@ class TestMuZeroModel:
         # Sync should copy online to target
         model.sync_target()
 
-        for online_p, target_p in zip(
-            model.online.parameters(), model.target.parameters()
-        ):
+        for online_p, target_p in zip(model.online.parameters(), model.target.parameters(), strict=False):
             assert torch.allclose(online_p, target_p)
 
     def test_soft_update(self, config: MuZeroConfig) -> None:
@@ -221,15 +217,11 @@ class TestMuZeroModel:
         batch_size = 2
 
         actions = torch.randint(0, config.num_actions, (batch_size, K))
-        target_policies = torch.softmax(
-            torch.randn(batch_size, K + 1, config.num_actions), dim=-1
-        )
+        target_policies = torch.softmax(torch.randn(batch_size, K + 1, config.num_actions), dim=-1)
         target_values = torch.randn(batch_size, K + 1)
         target_rewards = torch.randn(batch_size, K)
 
-        loss, info = model.compute_loss(
-            small_obs, actions, target_policies, target_values, target_rewards
-        )
+        loss, info = model.compute_loss(small_obs, actions, target_policies, target_values, target_rewards)
 
         assert loss.ndim == 0  # Scalar
         assert not torch.isnan(loss)

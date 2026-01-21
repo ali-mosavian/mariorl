@@ -1,9 +1,8 @@
 """Common chart styling and helper functions for the dashboard."""
 
+import pandas as pd
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
-import pandas as pd
-
 
 # Color palette (Catppuccin Mocha)
 COLORS = {
@@ -31,7 +30,7 @@ def apply_dark_style(fig: go.Figure, height: int = 280, margin: dict | None = No
     """Apply standard dark styling to a figure."""
     if margin is None:
         margin = {"l": 0, "r": 0, "t": 30, "b": 0}
-    
+
     fig.update_layout(
         height=height,
         **DARK_LAYOUT,
@@ -51,7 +50,7 @@ def make_metric_chart(
 ) -> go.Figure:
     """
     Create a line chart for multiple metrics.
-    
+
     Args:
         df: DataFrame with the data
         metrics: List of (column_name, display_name, color) tuples
@@ -60,29 +59,31 @@ def make_metric_chart(
         x_col: Column to use for x-axis (None for index)
     """
     fig = go.Figure()
-    
+
     for col, name, color in metrics:
         if col in df.columns:
             x = df[x_col] if x_col and x_col in df.columns else df.index
-            fig.add_trace(go.Scatter(
-                x=x,
-                y=df[col],
-                name=name,
-                line=dict(color=color, width=2),
-                mode="lines",
-            ))
-    
+            fig.add_trace(
+                go.Scatter(
+                    x=x,
+                    y=df[col],
+                    name=name,
+                    line={"color": color, "width": 2},
+                    mode="lines",
+                )
+            )
+
     fig.update_layout(
         title=title,
         height=height,
         **DARK_LAYOUT,
         xaxis=dict(**GRID_STYLE),
         yaxis=dict(**GRID_STYLE),
-        margin=dict(l=0, r=0, t=30, b=0),
-        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+        margin={"l": 0, "r": 0, "t": 30, "b": 0},
+        legend={"orientation": "h", "yanchor": "bottom", "y": 1.02, "xanchor": "right", "x": 1},
         showlegend=True,
     )
-    
+
     return fig
 
 
@@ -96,24 +97,26 @@ def make_heatmap(
     show_scale: bool = False,
 ) -> go.Figure:
     """Create a heatmap with standard styling."""
-    fig = go.Figure(data=go.Heatmap(
-        z=z_data,
-        x=x_labels,
-        y=y_labels,
-        colorscale=colorscale,
-        showscale=show_scale,
-        hovertemplate="%{y}<br>%{x}<br>%{z:.1f}<extra></extra>",
-    ))
-    
+    fig = go.Figure(
+        data=go.Heatmap(
+            z=z_data,
+            x=x_labels,
+            y=y_labels,
+            colorscale=colorscale,
+            showscale=show_scale,
+            hovertemplate="%{y}<br>%{x}<br>%{z:.1f}<extra></extra>",
+        )
+    )
+
     fig.update_layout(
         title=title,
         height=height,
         **DARK_LAYOUT,
         xaxis=dict(**GRID_STYLE),
         yaxis=dict(**GRID_STYLE),
-        margin=dict(l=0, r=0, t=30, b=0),
+        margin={"l": 0, "r": 0, "t": 30, "b": 0},
     )
-    
+
     return fig
 
 
@@ -128,21 +131,21 @@ def make_bar_chart(
     y_title: str = "",
 ) -> go.Figure:
     """Create a bar chart with standard styling.
-    
+
     For vertical (default): x=categories, y=values (bar heights)
     For horizontal: x=values (bar lengths), y=categories
     """
     fig = go.Figure(data=go.Bar(x=x, y=y, orientation=orientation, marker_color=color))
-    
+
     fig.update_layout(
         title=title,
         height=height,
         **DARK_LAYOUT,
         xaxis=dict(title=x_title, **GRID_STYLE),
         yaxis=dict(title=y_title, **GRID_STYLE),
-        margin=dict(l=0, r=0, t=30, b=0),
+        margin={"l": 0, "r": 0, "t": 30, "b": 0},
     )
-    
+
     return fig
 
 
@@ -164,53 +167,72 @@ def make_dual_axis_chart(
 ) -> go.Figure:
     """Create a dual Y-axis line chart with optional extra series on y1."""
     fig = make_subplots(specs=[[{"secondary_y": True}]])
-    
-    fig.add_trace(go.Scatter(
-        x=x, y=y1, name=name1,
-        line=dict(color=color1, width=2),
-        hovertemplate=f"{name1}: %{{y:.2f}}<extra></extra>",
-    ), secondary_y=False)
-    
+
+    fig.add_trace(
+        go.Scatter(
+            x=x,
+            y=y1,
+            name=name1,
+            line={"color": color1, "width": 2},
+            hovertemplate=f"{name1}: %{{y:.2f}}<extra></extra>",
+        ),
+        secondary_y=False,
+    )
+
     # Optional extra series on y1 axis (e.g., timeouts alongside deaths)
     if y1_extra is not None:
-        fig.add_trace(go.Scatter(
-            x=x, y=y1_extra, name=name1_extra,
-            line=dict(color=color1_extra, width=2, dash="dot"),
-            hovertemplate=f"{name1_extra}: %{{y:.2f}}<extra></extra>",
-        ), secondary_y=False)
-    
-    fig.add_trace(go.Scatter(
-        x=x, y=y2, name=name2,
-        line=dict(color=color2, width=2),
-        hovertemplate=f"{name2}: %{{y:.1f}}%<extra></extra>",
-    ), secondary_y=True)
-    
+        fig.add_trace(
+            go.Scatter(
+                x=x,
+                y=y1_extra,
+                name=name1_extra,
+                line={"color": color1_extra, "width": 2, "dash": "dot"},
+                hovertemplate=f"{name1_extra}: %{{y:.2f}}<extra></extra>",
+            ),
+            secondary_y=False,
+        )
+
+    fig.add_trace(
+        go.Scatter(
+            x=x,
+            y=y2,
+            name=name2,
+            line={"color": color2, "width": 2},
+            hovertemplate=f"{name2}: %{{y:.1f}}%<extra></extra>",
+        ),
+        secondary_y=True,
+    )
+
     # Calculate ranges - include y1_extra in range calculation
     all_y1 = y1 + (y1_extra or [])
     y1_max = max(all_y1) * 1.1 if all_y1 and max(all_y1) > 0 else 1
     y2_max = max(y2) * 1.1 if y2 and max(y2) > 0 else 100
-    
+
     fig.update_layout(
         title=title,
         height=height,
         **DARK_LAYOUT,
         xaxis=dict(**GRID_STYLE),
-        margin=dict(l=0, r=0, t=30, b=0),
-        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+        margin={"l": 0, "r": 0, "t": 30, "b": 0},
+        legend={"orientation": "h", "yanchor": "bottom", "y": 1.02, "xanchor": "right", "x": 1},
         showlegend=True,
     )
-    
+
     fig.update_yaxes(
-        title_text=y1_title, secondary_y=False,
-        gridcolor="#313244", range=[0, y1_max],
-        title_font=dict(color=color1),
+        title_text=y1_title,
+        secondary_y=False,
+        gridcolor="#313244",
+        range=[0, y1_max],
+        title_font={"color": color1},
     )
     fig.update_yaxes(
-        title_text=y2_title, secondary_y=True,
-        gridcolor="#313244", range=[0, y2_max],
-        title_font=dict(color=color2),
+        title_text=y2_title,
+        secondary_y=True,
+        gridcolor="#313244",
+        range=[0, y2_max],
+        title_font={"color": color2},
     )
-    
+
     return fig
 
 
@@ -224,17 +246,19 @@ def make_box_plot(
 ) -> go.Figure:
     """Create a box plot for multiple categories."""
     fig = go.Figure()
-    
+
     for category, values in data_by_category.items():
         if values:
-            fig.add_trace(go.Box(
-                y=values,
-                name=category,
-                boxpoints="outliers",
-                marker_color=color,
-                line_color=line_color,
-            ))
-    
+            fig.add_trace(
+                go.Box(
+                    y=values,
+                    name=category,
+                    boxpoints="outliers",
+                    marker_color=color,
+                    line_color=line_color,
+                )
+            )
+
     fig.update_layout(
         title=title,
         yaxis_title=y_title,
@@ -242,8 +266,8 @@ def make_box_plot(
         **DARK_LAYOUT,
         xaxis=dict(**GRID_STYLE),
         yaxis=dict(**GRID_STYLE),
-        margin=dict(l=0, r=0, t=50, b=0),
+        margin={"l": 0, "r": 0, "t": 50, "b": 0},
         showlegend=False,
     )
-    
+
     return fig

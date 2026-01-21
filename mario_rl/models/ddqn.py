@@ -180,7 +180,7 @@ class DuelingHead(nn.Module):
 
         # Dueling aggregation: Q = V + (A - mean(A))
         q_values = value + (advantages - advantages.mean(dim=1, keepdim=True))
-        return q_values
+        return q_values  # type: ignore[no-any-return]
 
 
 class DDQNNet(nn.Module):
@@ -221,7 +221,7 @@ class DDQNNet(nn.Module):
         q_values = self.head(features)
 
         # Raw linear output (no activation)
-        return q_values
+        return q_values  # type: ignore[no-any-return]
 
     def select_action(self, x: Tensor, epsilon: float = 0.0) -> Tensor:
         """Get action using epsilon-greedy policy.

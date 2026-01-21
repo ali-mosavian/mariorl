@@ -9,12 +9,11 @@ These tests verify the DoubleDQN model correctly:
 
 from dataclasses import dataclass
 
-import pytest
 import torch
+import pytest
 from torch import Tensor
 
 from mario_rl.models import Model
-
 
 # =============================================================================
 # Configuration
@@ -194,6 +193,7 @@ def test_sync_target_copies_weights(ddqn_model) -> None:
     for online_p, target_p in zip(
         ddqn_model.online.parameters(),
         ddqn_model.target.parameters(),
+        strict=False,
     ):
         assert torch.equal(online_p.data, target_p.data)
 
@@ -240,6 +240,7 @@ def test_soft_update_with_tau_one_equals_hard_sync(ddqn_model) -> None:
     for online_p, target_p in zip(
         ddqn_model.online.parameters(),
         ddqn_model.target.parameters(),
+        strict=False,
     ):
         assert torch.allclose(online_p.data, target_p.data)
 
@@ -341,7 +342,8 @@ def test_symexp_function_exists() -> None:
 
 def test_symlog_symexp_roundtrip() -> None:
     """symexp(symlog(x)) should equal x."""
-    from mario_rl.models.ddqn import symlog, symexp
+    from mario_rl.models.ddqn import symexp
+    from mario_rl.models.ddqn import symlog
 
     x = torch.randn(100) * 100  # Large range
 

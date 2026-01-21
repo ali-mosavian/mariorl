@@ -6,11 +6,12 @@ checks for stale workers that haven't updated recently.
 """
 
 import mmap
-import struct
 import time
+import struct
+from typing import Any
 from pathlib import Path
-from dataclasses import dataclass
 from dataclasses import field
+from dataclasses import dataclass
 
 
 @dataclass
@@ -27,7 +28,7 @@ class SharedHeartbeat:
 
     # Internal state
     _mmap: mmap.mmap | None = field(init=False, default=None, repr=False)
-    _fd: object | None = field(init=False, default=None, repr=False)
+    _fd: Any = field(init=False, default=None, repr=False)
     _shm_path: Path = field(init=False, repr=False)
     _buffer_size: int = field(init=False, default=0)
 
@@ -54,6 +55,8 @@ class SharedHeartbeat:
 
     def _create(self) -> None:
         """Create new shared memory file."""
+        if self.shm_dir is None:
+            raise ValueError("shm_dir must be set when creating shared memory")
         self.shm_dir.mkdir(parents=True, exist_ok=True)
 
         # Create file with zeros
@@ -159,9 +162,7 @@ class SharedHeartbeat:
         Returns:
             List of stale worker IDs
         """
-        return [
-            i for i in range(self.num_workers) if self.is_stale(i, timeout)
-        ]
+        return [i for i in range(self.num_workers) if self.is_stale(i, timeout)]
 
     def close(self) -> None:
         """Close mmap and file descriptor."""

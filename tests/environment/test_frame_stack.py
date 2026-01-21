@@ -1,13 +1,12 @@
 """Comprehensive tests for LazyFrames and FrameStack."""
 
-import numpy as np
 import pytest
+import numpy as np
 import gymnasium as gym
 from gymnasium.spaces import Box
 
 from mario_rl.environment.frame_stack import FrameStack
 from mario_rl.environment.frame_stack import LazyFrames
-
 
 # =============================================================================
 # Fixtures
@@ -55,7 +54,7 @@ class SimpleEnv(gym.Env):
     def step(self, action: int) -> tuple[np.ndarray, float, bool, bool, dict]:
         """Take a step with incrementing observation values."""
         self._step_count += 1
-        obs = np.full(self.obs_shape, self._step_count * 10, dtype=self._dtype)
+        obs: np.ndarray = np.full(self.obs_shape, self._step_count * 10, dtype=self._dtype)
         return obs, 1.0, False, False, {}
 
 
@@ -397,7 +396,7 @@ def test_framestack_step_shifts_buffer(simple_env: SimpleEnv) -> None:
 
     # Last frame should be from step (value 10), first frames from reset (value 0)
     assert obs[-1].max() == 10  # Step 1 produces value 10
-    assert obs[0].max() == 0   # Still initial observation
+    assert obs[0].max() == 0  # Still initial observation
 
 
 def test_framestack_multiple_steps_maintain_buffer_size(simple_env: SimpleEnv) -> None:

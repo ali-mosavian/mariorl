@@ -20,8 +20,11 @@ from torch import Tensor
 import torch.nn.functional as F
 
 from mario_rl.models import DreamerModel
-from mario_rl.models.dreamer import symlog, symexp
-from mario_rl.mcts.protocols import PolicyAdapter, ValueAdapter, WorldModelAdapter
+from mario_rl.models.dreamer import symexp
+from mario_rl.models.dreamer import symlog
+from mario_rl.mcts.protocols import ValueAdapter
+from mario_rl.mcts.protocols import PolicyAdapter
+from mario_rl.mcts.protocols import WorldModelAdapter
 
 
 def categorical_kl_loss(
@@ -30,42 +33,42 @@ def categorical_kl_loss(
     free_bits: float = 1.0,
 ) -> Tensor:
     """Compute KL divergence between categorical distributions with free bits.
-    
+
     Args:
         posterior_logits: (batch, num_cat, num_classes) - encoder output
         prior_logits: (batch, num_cat, num_classes) - prior (uniform if None)
         free_bits: Minimum KL per categorical (prevents posterior collapse)
-        
+
     Returns:
         KL loss (scalar)
     """
     posterior = F.softmax(posterior_logits, dim=-1)
-    
+
     if prior_logits is None:
         # Uniform prior
         num_classes = posterior_logits.shape[-1]
         prior = torch.ones_like(posterior) / num_classes
     else:
         prior = F.softmax(prior_logits, dim=-1)
-    
+
     # KL per categorical: sum over classes
     kl_per_cat = (posterior * (posterior.log() - prior.log() + 1e-8)).sum(dim=-1)
-    
+
     # Free bits: only penalize KL above threshold per categorical
     kl_per_cat = torch.maximum(kl_per_cat, torch.tensor(free_bits, device=kl_per_cat.device))
-    
+
     # Mean over batch and categoricals
     return kl_per_cat.mean()
 
 
 def percentile_normalize(x: Tensor, low_pct: float = 5.0, high_pct: float = 95.0) -> Tensor:
     """Normalize tensor using percentiles (V3 style return normalization).
-    
+
     Args:
         x: Input tensor
         low_pct: Lower percentile (default 5%)
         high_pct: Upper percentile (default 95%)
-        
+
     Returns:
         Normalized tensor in approximately [0, 1] range
     """
@@ -99,7 +102,7 @@ class DreamerLearner:
     critic_scale: float = 1.0
     entropy_scale: float = 0.001
     kl_scale: float = 0.1
-    
+
     # KL configuration (V3 style - simple free bits)
     free_bits: float = 1.0
 
@@ -113,9 +116,7 @@ class DreamerLearner:
         weights: Tensor | None = None,
     ) -> tuple[Tensor, dict[str, Any]]:
         """Compute combined world model and behavior loss."""
-        wm_loss, wm_metrics = self.compute_world_model_loss(
-            states, actions, rewards, next_states, dones
-        )
+        wm_loss, wm_metrics = self.compute_world_model_loss(states, actions, rewards, next_states, dones)
 
         z = self.model.encode(states, deterministic=False)
         behavior_loss, behavior_metrics = self.compute_behavior_loss(z)
@@ -144,26 +145,26 @@ class DreamerLearner:
         """Compute world model loss with V3-style symlog reconstruction."""
         # Normalize to [0, 1]
         states_norm = states / 255.0
-        
+
         # Encode with logits for KL
         z, posterior_logits = self.model.encode_with_logits(states)
-        
+
         # 1. Reconstruction loss (symlog MSE)
         recon = self.model.decoder(z)
         recon_loss = F.mse_loss(recon, symlog(states_norm))
-        
+
         # 2. KL loss with free bits (vs uniform prior)
         kl_loss = categorical_kl_loss(posterior_logits, None, self.free_bits)
-        
+
         # 3. Dynamics loss
         z_next_target = self.model.encode(next_states, deterministic=True).detach()
         z_next_pred, _, dynamics_logits = self.model.dynamics(z, actions)
-        
+
         # Dynamics KL (predicted distribution vs encoded next state)
         # Get target logits by encoding next_states
         _, target_logits = self.model.encode_with_logits(next_states)
         dynamics_kl = categorical_kl_loss(dynamics_logits, target_logits.detach(), self.free_bits)
-        
+
         # Also MSE on flattened latents for direct supervision
         dynamics_mse = F.mse_loss(z_next_pred, z_next_target)
         dynamics_loss = dynamics_kl + dynamics_mse
@@ -171,7 +172,7 @@ class DreamerLearner:
         # 4. Reward prediction loss (symlog target)
         reward_pred = self.model.reward_pred(z_next_pred)
         reward_loss = F.mse_loss(reward_pred, symlog(rewards))
-        
+
         # 5. Continue prediction loss
         continue_pred = self.model.continue_pred(z_next_pred)
         continue_target = 1.0 - dones.float()
@@ -205,24 +206,22 @@ class DreamerLearner:
     ) -> tuple[Tensor, dict[str, Any]]:
         """Compute actor-critic loss on imagined trajectories."""
         # Imagine trajectory
-        z_traj, rewards, conts, _ = self.model.imagine_trajectory(
-            z_start, horizon=self.imagination_horizon
-        )
+        z_traj, rewards, conts, _ = self.model.imagine_trajectory(z_start, horizon=self.imagination_horizon)
 
         batch_size, horizon_plus_one, latent_dim = z_traj.shape
-        
+
         # Get values for all states in trajectory
         z_flat = z_traj.view(-1, latent_dim)
         values_symlog = self.model.critic(z_flat)
         values_symlog = values_symlog.view(batch_size, horizon_plus_one)
-        
+
         # Convert symlog predictions to actual values for return computation
         values = symexp(values_symlog)
         rewards_actual = symexp(rewards)
 
         # Compute lambda-returns
         returns = self._compute_lambda_returns(rewards_actual, values, conts)
-        
+
         # Normalize returns (V3 style)
         returns_norm = percentile_normalize(returns)
 
@@ -241,13 +240,13 @@ class DreamerLearner:
 
         # Policy gradient with entropy bonus
         entropy = -(probs * log_probs).sum(dim=-1)
-        
+
         # Reinforce-style policy loss
         action_dist = torch.distributions.Categorical(probs=probs)
         actions_sampled = action_dist.sample()
         log_prob_actions = log_probs.gather(1, actions_sampled.unsqueeze(-1)).squeeze(-1)
         policy_loss = -(log_prob_actions * advantages_flat).mean()
-        
+
         entropy_bonus = entropy.mean()
         actor_loss = self.actor_scale * policy_loss - self.entropy_scale * entropy_bonus
 

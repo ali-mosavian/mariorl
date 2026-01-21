@@ -5,7 +5,8 @@ import streamlit as st
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 
-from mario_rl.dashboard.chart_helpers import COLORS, DARK_LAYOUT, GRID_STYLE
+from mario_rl.dashboard.chart_helpers import COLORS
+from mario_rl.dashboard.chart_helpers import DARK_LAYOUT
 
 
 def _detect_model_type(df: pd.DataFrame) -> str:
@@ -33,18 +34,18 @@ def render_analysis_tab(df: pd.DataFrame, workers: dict[int, pd.DataFrame]) -> N
             model_type = _detect_model_type(wdf)
             if model_type != "unknown":
                 break
-    
+
     # Fall back to coordinator data
     if model_type == "unknown":
         model_type = _detect_model_type(df)
 
     st.subheader("Training Health")
     _render_health_indicators(df, model_type)
-    
+
     st.divider()
     st.subheader("Worker Comparison")
     _render_worker_comparison(workers, model_type)
-    
+
     st.divider()
     st.subheader("Progress Timeline")
     _render_progress_timeline(df)
@@ -110,7 +111,7 @@ def _render_worker_comparison(workers: dict[int, pd.DataFrame], model_type: str 
     if not workers:
         st.info("No worker data available")
         return
-    
+
     worker_stats = []
     for wid, wdf in sorted(workers.items()):
         if len(wdf) > 0:
@@ -122,21 +123,25 @@ def _render_worker_comparison(workers: dict[int, pd.DataFrame], model_type: str 
                 "Avg Reward": wdf["reward"].mean() if "reward" in wdf.columns else 0,
                 "Avg Loss": wdf["loss"].mean() if "loss" in wdf.columns else 0,
             }
-            
+
             if model_type == "dreamer":
-                row.update({
-                    "WM Loss": wdf["wm_loss"].mean() if "wm_loss" in wdf.columns else 0,
-                    "Actor Loss": wdf["actor_loss"].mean() if "actor_loss" in wdf.columns else 0,
-                    "Critic Loss": wdf["critic_loss"].mean() if "critic_loss" in wdf.columns else 0,
-                })
+                row.update(
+                    {
+                        "WM Loss": wdf["wm_loss"].mean() if "wm_loss" in wdf.columns else 0,
+                        "Actor Loss": wdf["actor_loss"].mean() if "actor_loss" in wdf.columns else 0,
+                        "Critic Loss": wdf["critic_loss"].mean() if "critic_loss" in wdf.columns else 0,
+                    }
+                )
             else:
-                row.update({
-                    "Avg Q": wdf["q_mean"].mean() if "q_mean" in wdf.columns else 0,
-                    "TD Error": wdf["td_error"].mean() if "td_error" in wdf.columns else 0,
-                })
-            
+                row.update(
+                    {
+                        "Avg Q": wdf["q_mean"].mean() if "q_mean" in wdf.columns else 0,
+                        "TD Error": wdf["td_error"].mean() if "td_error" in wdf.columns else 0,
+                    }
+                )
+
             worker_stats.append(row)
-    
+
     if worker_stats:
         st.dataframe(pd.DataFrame(worker_stats), hide_index=True, use_container_width=True)
 
@@ -146,22 +151,33 @@ def _render_progress_timeline(df: pd.DataFrame) -> None:
     fig = make_subplots(rows=1, cols=2, subplot_titles=("Average Reward", "Learning Rate"))
 
     if "avg_reward" in df.columns:
-        fig.add_trace(go.Scatter(
-            x=df["elapsed_min"], y=df["avg_reward"],
-            fill="tozeroy", line=dict(color=COLORS["green"]),
-        ), row=1, col=1)
+        fig.add_trace(
+            go.Scatter(
+                x=df["elapsed_min"],
+                y=df["avg_reward"],
+                fill="tozeroy",
+                line={"color": COLORS["green"]},
+            ),
+            row=1,
+            col=1,
+        )
 
     if "learning_rate" in df.columns:
-        fig.add_trace(go.Scatter(
-            x=df["elapsed_min"], y=df["learning_rate"],
-            line=dict(color=COLORS["mauve"]),
-        ), row=1, col=2)
+        fig.add_trace(
+            go.Scatter(
+                x=df["elapsed_min"],
+                y=df["learning_rate"],
+                line={"color": COLORS["mauve"]},
+            ),
+            row=1,
+            col=2,
+        )
 
     fig.update_layout(
         height=250,
         showlegend=False,
         **DARK_LAYOUT,
-        margin=dict(l=0, r=0, t=30, b=0),
+        margin={"l": 0, "r": 0, "t": 30, "b": 0},
     )
     fig.update_xaxes(title_text="Time (min)", gridcolor="#313244")
     fig.update_yaxes(gridcolor="#313244")

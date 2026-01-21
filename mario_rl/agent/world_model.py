@@ -209,10 +209,10 @@ def ssim(
 class SimpleEncoder(nn.Module):
     """
     Simple encoder for (N, C, H, W) input format (channels-first).
-    
+
     Compatible with the distributed DDQN's input format where C is the
     frame stack (e.g., 4 grayscale frames stacked in channel dimension).
-    
+
     Input: (N, C, H, W) float32 in [0, 1]
     Output: latent vector (N, latent_dim)
     """
@@ -861,7 +861,7 @@ class LatentDDQN(nn.Module):
 class _EncoderWrappedQNet(nn.Module):
     """
     Wrapper that combines encoder + latent Q-network.
-    
+
     Allows calling .online(frames) or .target(frames) directly,
     making DreamerDDQN a true drop-in replacement for DoubleDQN.
     """
@@ -874,16 +874,16 @@ class _EncoderWrappedQNet(nn.Module):
     def forward(self, x: Tensor) -> Tensor:
         """
         Forward pass: frames → latent → Q-values.
-        
+
         Args:
             x: Frames tensor (N, C, H, W) float32 in [0, 1]
-        
+
         Returns:
             Q-values (N, num_actions)
         """
         z = self.encoder.encode(x, deterministic=True)
         q_values = self.q_net(z)
-        
+
         # Raw linear output (no activation)
         return q_values
 
@@ -891,18 +891,18 @@ class _EncoderWrappedQNet(nn.Module):
 class DreamerDDQN(nn.Module):
     """
     Dreamer-style DDQN: World Model encoder + Latent Q-network.
-    
+
     Drop-in replacement for DoubleDQN that operates on learned latent space
     instead of raw pixels. Compatible with distributed DDQN training.
-    
+
     Architecture:
         Frame (4,64,64) → Encoder → z (latent) → LatentDDQN → Q(a)
-    
+
     Benefits over pixel-based DDQN:
     - Smaller Q-network (MLP vs CNN)
     - Learned representations can generalize across levels
     - Can optionally use imagination for planning
-    
+
     Note: .online and .target are wrapped to accept raw frames, not latents.
     This makes DreamerDDQN compatible with code that calls .online() directly.
     """
@@ -920,24 +920,24 @@ class DreamerDDQN(nn.Module):
         self.num_actions = num_actions
         self.latent_dim = latent_dim
         self.freeze_encoder = freeze_encoder
-        
+
         # Encoder: frames → latent (uses SimpleEncoder for (C, H, W) input format)
         self.encoder = SimpleEncoder(input_shape, latent_dim)
-        
+
         # Raw Q-networks operating on latent space (internal use)
         self._online_q = LatentDuelingDQN(latent_dim, num_actions, hidden_dim)
         self._target_q = LatentDuelingDQN(latent_dim, num_actions, hidden_dim)
-        
+
         # Wrapped Q-networks that accept frames (for compatibility with DDQN code)
         # These share the encoder, so gradients flow through correctly
         self.online = _EncoderWrappedQNet(self.encoder, self._online_q)
         self.target = _EncoderWrappedQNet(self.encoder, self._target_q)
-        
+
         # Copy weights and freeze target Q-network
         self._target_q.load_state_dict(self._online_q.state_dict())
         for p in self._target_q.parameters():
             p.requires_grad = False
-        
+
         if freeze_encoder:
             for p in self.encoder.parameters():
                 p.requires_grad = False
@@ -949,17 +949,17 @@ class DreamerDDQN(nn.Module):
     def forward(self, x: Tensor, network: str = "online") -> Tensor:
         """
         Forward pass: frames → latent → Q-values.
-        
+
         Args:
             x: Observation tensor (N, C, H, W) normalized to [0, 1]
             network: "online" or "target"
-        
+
         Returns:
             Q-values for each action (N, num_actions)
         """
         # Encode frames to latent (always deterministic for Q-learning)
         z = self.encoder.encode(x, deterministic=True)
-        
+
         # Compute Q-values from latent (use internal Q-networks directly)
         if network == "online":
             q_values = self._online_q(z)
@@ -967,23 +967,23 @@ class DreamerDDQN(nn.Module):
             q_values = self._target_q(z)
         else:
             raise ValueError(f"Unknown network: {network}")
-        
+
         # Raw linear output (no activation)
         return q_values
 
     def get_action(self, x: Tensor, epsilon: float = 0.0) -> Tensor:
         """
         Get action using epsilon-greedy policy.
-        
+
         Args:
             x: Observation tensor (N, C, H, W)
             epsilon: Exploration rate (0 = greedy, 1 = random)
-        
+
         Returns:
             action: Selected action indices (N,)
         """
         import numpy as np
-        
+
         if np.random.random() < epsilon:
             batch_size = x.shape[0]
             return torch.randint(0, self.num_actions, (batch_size,), device=x.device)
@@ -995,15 +995,11 @@ class DreamerDDQN(nn.Module):
     def sync_target(self):
         """Copy online network weights to target network."""
         self._target_q.load_state_dict(self._online_q.state_dict())
-    
+
     def soft_update(self, tau: float = 0.005):
         """Soft update target network: θ_target = τ*θ_online + (1-τ)*θ_target."""
-        for target_param, online_param in zip(
-            self._target_q.parameters(), self._online_q.parameters()
-        ):
-            target_param.data.copy_(
-                tau * online_param.data + (1.0 - tau) * target_param.data
-            )
+        for target_param, online_param in zip(self._target_q.parameters(), self._online_q.parameters(), strict=False):
+            target_param.data.copy_(tau * online_param.data + (1.0 - tau) * target_param.data)
 
     def compute_loss(
         self,
@@ -1016,7 +1012,7 @@ class DreamerDDQN(nn.Module):
     ) -> Tuple[Tensor, dict]:
         """
         Compute Double DQN loss in latent space.
-        
+
         Returns:
             loss: Scalar loss tensor
             metrics: Dict with q_mean, td_error, etc.
@@ -1024,27 +1020,27 @@ class DreamerDDQN(nn.Module):
         # Encode states to latent
         z = self.encoder.encode(states, deterministic=True)
         z_next = self.encoder.encode(next_states, deterministic=True)
-        
+
         # Current Q-values (use internal Q-networks with latent input)
         q_values = self._online_q(z)
         q_current = q_values.gather(1, actions.unsqueeze(1)).squeeze(1)
-        
+
         # Double DQN: use online network to select action, target to evaluate
         with torch.no_grad():
             q_next_online = self._online_q(z_next)
             best_actions = q_next_online.argmax(dim=1)
-            
+
             q_next_target = self._target_q(z_next)
             q_next = q_next_target.gather(1, best_actions.unsqueeze(1)).squeeze(1)
-            
+
             # Target: r + γ * Q_target(s', argmax Q_online(s'))
             q_target = rewards + gamma * q_next * (1 - dones.float())
-        
+
         # Huber loss (more stable than MSE for RL)
         loss = F.smooth_l1_loss(q_current, q_target)
-        
+
         # Metrics
         td_error = (q_current - q_target).abs().mean().item()
         q_mean = q_values.mean().item()
-        
+
         return loss, {"q_mean": q_mean, "td_error": td_error}

@@ -7,14 +7,12 @@ These tests verify the SharedHeartbeat interface:
 """
 
 import time
-
 from pathlib import Path
 from typing import Iterator
 
 import pytest
 
 from mario_rl.distributed.shm_heartbeat import SharedHeartbeat
-
 
 # =============================================================================
 # Fixtures

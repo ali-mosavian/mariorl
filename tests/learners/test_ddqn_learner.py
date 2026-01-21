@@ -10,13 +10,12 @@ These tests verify the DDQNLearner correctly:
 
 from dataclasses import dataclass
 
-import pytest
 import torch
+import pytest
 from torch import Tensor
 
 from mario_rl.learners import Learner
 from mario_rl.models import DoubleDQN
-
 
 # =============================================================================
 # Configuration
@@ -136,9 +135,7 @@ def test_compute_loss_allows_backprop(ddqn_learner, sample_batch: dict[str, Tens
     loss.backward()
 
     # Check that online network has gradients
-    has_grad = any(
-        p.grad is not None and p.grad.abs().sum() > 0 for p in ddqn_learner.model.online.parameters()
-    )
+    has_grad = any(p.grad is not None and p.grad.abs().sum() > 0 for p in ddqn_learner.model.online.parameters())
     assert has_grad
 
 
@@ -148,9 +145,7 @@ def test_compute_loss_target_has_no_grad(ddqn_learner, sample_batch: dict[str, T
     loss.backward()
 
     # Target network should have no gradients (frozen)
-    target_has_grad = any(
-        p.grad is not None and p.grad.abs().sum() > 0 for p in ddqn_learner.model.target.parameters()
-    )
+    target_has_grad = any(p.grad is not None and p.grad.abs().sum() > 0 for p in ddqn_learner.model.target.parameters())
     assert not target_has_grad
 
 
@@ -242,6 +237,7 @@ def test_update_targets_hard_sync(ddqn_learner) -> None:
     for online_p, target_p in zip(
         ddqn_learner.model.online.parameters(),
         ddqn_learner.model.target.parameters(),
+        strict=False,
     ):
         assert torch.allclose(online_p.data, target_p.data)
 

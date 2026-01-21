@@ -6,15 +6,14 @@ new modular training infrastructure.
 
 from typing import Any
 from pathlib import Path
-from dataclasses import dataclass
 from dataclasses import field
+from dataclasses import dataclass
 
-import torch
 from torch import nn
 from torch import Tensor
 
-from mario_rl.training.shared_gradient_tensor import SharedGradientTensor
 from mario_rl.training.shared_gradient_tensor import GradientPacket
+from mario_rl.training.shared_gradient_tensor import SharedGradientTensor
 
 
 @dataclass

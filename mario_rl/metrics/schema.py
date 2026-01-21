@@ -5,29 +5,30 @@ Defines metric types and model-specific metric schemas.
 Follows Open/Closed principle: extend by adding new schema classes.
 """
 
-from enum import Enum, auto
+from enum import Enum
+from enum import auto
 from dataclasses import dataclass
 
 
 class MetricType(Enum):
     """Type of metric tracking."""
-    
-    COUNTER = auto()   # Monotonically increasing (episodes, deaths)
-    GAUGE = auto()     # Current value (epsilon, learning_rate)
-    ROLLING = auto()   # Rolling average (reward, loss)
-    TEXT = auto()      # Arbitrary text (e.g., comma-separated positions)
+
+    COUNTER = auto()  # Monotonically increasing (episodes, deaths)
+    GAUGE = auto()  # Current value (epsilon, learning_rate)
+    ROLLING = auto()  # Rolling average (reward, loss)
+    TEXT = auto()  # Arbitrary text (e.g., comma-separated positions)
 
 
 @dataclass(frozen=True)
 class MetricDef:
     """Definition of a single metric.
-    
+
     Attributes:
         name: Metric identifier (used as CSV column, dict key)
         metric_type: How the metric is tracked
         window: Size of rolling window (only for ROLLING type)
     """
-    
+
     name: str
     metric_type: MetricType
     window: int = 100
@@ -40,7 +41,7 @@ class MetricDef:
 
 class CommonMetrics:
     """Metrics shared by all model types."""
-    
+
     EPISODES = MetricDef("episodes", MetricType.COUNTER)
     STEPS = MetricDef("steps", MetricType.COUNTER)
     REWARD = MetricDef("reward", MetricType.ROLLING)  # Rolling average of episode rewards
@@ -48,7 +49,7 @@ class CommonMetrics:
     EPISODE_LENGTH = MetricDef("episode_length", MetricType.ROLLING)
     EPSILON = MetricDef("epsilon", MetricType.GAUGE)
     STEPS_PER_SEC = MetricDef("steps_per_sec", MetricType.GAUGE)
-    
+
     # Mario-specific metrics (game state)
     X_POS = MetricDef("x_pos", MetricType.GAUGE)
     BEST_X = MetricDef("best_x", MetricType.GAUGE)
@@ -61,22 +62,22 @@ class CommonMetrics:
     TIMEOUTS = MetricDef("timeouts", MetricType.COUNTER)
     FLAGS = MetricDef("flags", MetricType.COUNTER)
     GRADS_SENT = MetricDef("grads_sent", MetricType.COUNTER)
-    
+
     # Snapshot metrics
     SNAPSHOT_SAVES = MetricDef("snapshot_saves", MetricType.COUNTER)
     SNAPSHOT_RESTORES = MetricDef("snapshot_restores", MetricType.COUNTER)
-    
+
     # Death/timeout tracking (positions stored as comma-separated string)
     DEATH_POSITIONS = MetricDef("death_positions", MetricType.TEXT)
     TIMEOUT_POSITIONS = MetricDef("timeout_positions", MetricType.TEXT)
-    
+
     # MCTS metrics
     MCTS_USED = MetricDef("mcts_used", MetricType.GAUGE)
     MCTS_RUNS = MetricDef("mcts_runs", MetricType.GAUGE)
     MCTS_AVG_ROLLOUTS = MetricDef("mcts_avg_rollouts", MetricType.GAUGE)
     MCTS_AVG_TREE_DEPTH = MetricDef("mcts_avg_tree_depth", MetricType.GAUGE)
     MCTS_AVG_TREE_SIZE = MetricDef("mcts_avg_tree_size", MetricType.GAUGE)
-    
+
     @classmethod
     def definitions(cls) -> list[MetricDef]:
         """Return list of all common metric definitions."""
@@ -118,7 +119,7 @@ class CommonMetrics:
 
 class DDQNMetrics(CommonMetrics):
     """DDQN-specific metrics (extends CommonMetrics)."""
-    
+
     LOSS = MetricDef("loss", MetricType.ROLLING)
     Q_MEAN = MetricDef("q_mean", MetricType.ROLLING)
     Q_MAX = MetricDef("q_max", MetricType.GAUGE)
@@ -128,12 +129,12 @@ class DDQNMetrics(CommonMetrics):
     PER_BETA = MetricDef("per_beta", MetricType.GAUGE)
     ACTION_ENTROPY = MetricDef("action_entropy", MetricType.GAUGE)
     ACTION_DIST = MetricDef("action_dist", MetricType.TEXT)
-    
+
     # Protected buffer sizes (partitioned replay buffer)
     BUF_NEG = MetricDef("buf_neg", MetricType.GAUGE)  # Negative (death) buffer
     BUF_POS = MetricDef("buf_pos", MetricType.GAUGE)  # Positive (flag) buffer
     BUF_DIFF = MetricDef("buf_diff", MetricType.GAUGE)  # Difficult (hard sections) buffer
-    
+
     @classmethod
     def definitions(cls) -> list[MetricDef]:
         """Return list of all DDQN metric definitions."""
@@ -160,11 +161,11 @@ class DDQNMetrics(CommonMetrics):
 
 class DreamerMetrics(CommonMetrics):
     """Dreamer-specific metrics (extends CommonMetrics)."""
-    
+
     # Total loss
     LOSS = MetricDef("loss", MetricType.ROLLING)
     GRAD_NORM = MetricDef("grad_norm", MetricType.ROLLING)
-    
+
     # World model losses
     WM_LOSS = MetricDef("wm_loss", MetricType.ROLLING)
     RECON_LOSS = MetricDef("recon_loss", MetricType.ROLLING)
@@ -172,21 +173,21 @@ class DreamerMetrics(CommonMetrics):
     KL_LOSS = MetricDef("kl_loss", MetricType.ROLLING)
     DYNAMICS_LOSS = MetricDef("dynamics_loss", MetricType.ROLLING)
     REWARD_LOSS = MetricDef("reward_loss", MetricType.ROLLING)
-    
+
     # Behavior/Actor-Critic losses
     BEHAVIOR_LOSS = MetricDef("behavior_loss", MetricType.ROLLING)
     ACTOR_LOSS = MetricDef("actor_loss", MetricType.ROLLING)
     CRITIC_LOSS = MetricDef("critic_loss", MetricType.ROLLING)
     ENTROPY = MetricDef("entropy", MetricType.ROLLING)
-    
+
     # Value estimates
     VALUE_MEAN = MetricDef("value_mean", MetricType.ROLLING)
     RETURN_MEAN = MetricDef("return_mean", MetricType.ROLLING)
-    
+
     # Action tracking (from data collection, same as DDQN)
     ACTION_ENTROPY = MetricDef("action_entropy", MetricType.GAUGE)
     ACTION_DIST = MetricDef("action_dist", MetricType.TEXT)
-    
+
     @classmethod
     def definitions(cls) -> list[MetricDef]:
         """Return list of all Dreamer metric definitions."""
@@ -272,7 +273,7 @@ class MuZeroMetrics(CommonMetrics):
 
 class CoordinatorMetrics:
     """Metrics specific to the training coordinator."""
-    
+
     UPDATE_COUNT = MetricDef("update_count", MetricType.COUNTER)
     GRADS_PER_SEC = MetricDef("grads_per_sec", MetricType.GAUGE)
     LEARNING_RATE = MetricDef("learning_rate", MetricType.GAUGE)
@@ -280,7 +281,7 @@ class CoordinatorMetrics:
     WEIGHT_VERSION = MetricDef("weight_version", MetricType.COUNTER)
     LOSS = MetricDef("loss", MetricType.ROLLING)
     GRAD_NORM = MetricDef("grad_norm", MetricType.ROLLING)
-    
+
     # Aggregated metrics from workers (for graphs/UI)
     AVG_REWARD = MetricDef("avg_reward", MetricType.GAUGE)
     AVG_SPEED = MetricDef("avg_speed", MetricType.GAUGE)
@@ -288,7 +289,7 @@ class CoordinatorMetrics:
     Q_MEAN = MetricDef("q_mean", MetricType.GAUGE)
     TD_ERROR = MetricDef("td_error", MetricType.GAUGE)
     TOTAL_EPISODES = MetricDef("total_episodes", MetricType.COUNTER)
-    
+
     @classmethod
     def definitions(cls) -> list[MetricDef]:
         """Return list of all coordinator metric definitions."""

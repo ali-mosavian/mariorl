@@ -7,20 +7,14 @@ for various data patterns and edge cases.
 from __future__ import annotations
 
 import pandas as pd
-import pytest
 
-from mario_rl.dashboard.aggregators import (
-    LevelStats,
-    RatePoint,
-    ActionDistPoint,
-    aggregate_level_stats,
-    aggregate_action_distribution,
-    aggregate_rate_data,
-    aggregate_death_hotspots_from_csv,
-    level_sort_key,
-    sample_data,
-)
-
+from mario_rl.dashboard.aggregators import RatePoint
+from mario_rl.dashboard.aggregators import sample_data
+from mario_rl.dashboard.aggregators import level_sort_key
+from mario_rl.dashboard.aggregators import aggregate_rate_data
+from mario_rl.dashboard.aggregators import aggregate_level_stats
+from mario_rl.dashboard.aggregators import aggregate_action_distribution
+from mario_rl.dashboard.aggregators import aggregate_death_hotspots_from_csv
 
 # =============================================================================
 # RatePoint Tests
@@ -135,19 +129,21 @@ class TestAggregateLevelStats:
     def test_single_worker_single_level(self) -> None:
         """Should aggregate stats for single worker, single level."""
         workers = {
-            0: pd.DataFrame({
-                "world": [1, 1, 1],
-                "stage": [1, 1, 1],
-                "deaths": [1, 2, 3],
-                "flags": [0, 1, 0],
-                "best_x": [100, 200, 300],
-                "reward": [10.0, 20.0, 30.0],
-                "speed": [1.0, 1.5, 2.0],
-            })
+            0: pd.DataFrame(
+                {
+                    "world": [1, 1, 1],
+                    "stage": [1, 1, 1],
+                    "deaths": [1, 2, 3],
+                    "flags": [0, 1, 0],
+                    "best_x": [100, 200, 300],
+                    "reward": [10.0, 20.0, 30.0],
+                    "speed": [1.0, 1.5, 2.0],
+                }
+            )
         }
-        
+
         result = aggregate_level_stats(workers)
-        
+
         assert "1-1" in result
         stats = result["1-1"]
         assert stats.episodes == 3
@@ -161,20 +157,32 @@ class TestAggregateLevelStats:
     def test_multiple_workers_same_level(self) -> None:
         """Should aggregate across multiple workers for same level."""
         workers = {
-            0: pd.DataFrame({
-                "world": [1], "stage": [1],
-                "deaths": [5], "flags": [1],
-                "best_x": [100], "reward": [10.0], "speed": [1.0],
-            }),
-            1: pd.DataFrame({
-                "world": [1], "stage": [1],
-                "deaths": [3], "flags": [2],
-                "best_x": [200], "reward": [20.0], "speed": [2.0],
-            }),
+            0: pd.DataFrame(
+                {
+                    "world": [1],
+                    "stage": [1],
+                    "deaths": [5],
+                    "flags": [1],
+                    "best_x": [100],
+                    "reward": [10.0],
+                    "speed": [1.0],
+                }
+            ),
+            1: pd.DataFrame(
+                {
+                    "world": [1],
+                    "stage": [1],
+                    "deaths": [3],
+                    "flags": [2],
+                    "best_x": [200],
+                    "reward": [20.0],
+                    "speed": [2.0],
+                }
+            ),
         }
-        
+
         result = aggregate_level_stats(workers)
-        
+
         assert "1-1" in result
         stats = result["1-1"]
         assert stats.deaths == 8  # 5 + 3
@@ -184,19 +192,21 @@ class TestAggregateLevelStats:
     def test_multiple_levels(self) -> None:
         """Should separate stats by level."""
         workers = {
-            0: pd.DataFrame({
-                "world": [1, 1, 2],
-                "stage": [1, 2, 1],
-                "deaths": [1, 2, 3],
-                "flags": [1, 0, 1],
-                "best_x": [100, 150, 200],
-                "reward": [10.0, 15.0, 20.0],
-                "speed": [1.0, 1.2, 1.5],
-            })
+            0: pd.DataFrame(
+                {
+                    "world": [1, 1, 2],
+                    "stage": [1, 2, 1],
+                    "deaths": [1, 2, 3],
+                    "flags": [1, 0, 1],
+                    "best_x": [100, 150, 200],
+                    "reward": [10.0, 15.0, 20.0],
+                    "speed": [1.0, 1.2, 1.5],
+                }
+            )
         }
-        
+
         result = aggregate_level_stats(workers)
-        
+
         assert len(result) == 3
         assert "1-1" in result
         assert "1-2" in result
@@ -205,15 +215,17 @@ class TestAggregateLevelStats:
     def test_missing_columns_fallback(self) -> None:
         """Should handle CSVs without world/stage columns."""
         workers = {
-            0: pd.DataFrame({
-                "deaths": [5],
-                "flags": [1],
-                "reward": [100.0],
-            })
+            0: pd.DataFrame(
+                {
+                    "deaths": [5],
+                    "flags": [1],
+                    "reward": [100.0],
+                }
+            )
         }
-        
+
         result = aggregate_level_stats(workers)
-        
+
         # Should fallback to "1-1" as default level
         assert "1-1" in result
 
@@ -234,23 +246,25 @@ class TestAggregateRateData:
     def test_single_worker_bucketing(self) -> None:
         """Should bucket data by step intervals."""
         workers = {
-            0: pd.DataFrame({
-                "world": [1, 1, 1],
-                "stage": [1, 1, 1],
-                "steps": [5000, 15000, 25000],
-                "deaths": [1, 2, 3],
-                "flags": [0, 1, 1],
-                "episodes": [5, 10, 15],
-                "timeouts": [0, 1, 0],
-            })
+            0: pd.DataFrame(
+                {
+                    "world": [1, 1, 1],
+                    "stage": [1, 1, 1],
+                    "steps": [5000, 15000, 25000],
+                    "deaths": [1, 2, 3],
+                    "flags": [0, 1, 1],
+                    "episodes": [5, 10, 15],
+                    "timeouts": [0, 1, 0],
+                }
+            )
         }
-        
+
         result = aggregate_rate_data(workers, step_bucket_size=10000)
-        
+
         assert "1-1" in result
         points = result["1-1"]
         assert len(points) == 3
-        
+
         # Check buckets are correct
         buckets = [p.steps for p in points]
         assert 0 in buckets
@@ -260,23 +274,35 @@ class TestAggregateRateData:
     def test_multiple_workers_aggregation(self) -> None:
         """Should sum across workers at each bucket."""
         workers = {
-            0: pd.DataFrame({
-                "world": [1], "stage": [1],
-                "steps": [5000],
-                "deaths": [5], "flags": [1], "episodes": [10], "timeouts": [1],
-            }),
-            1: pd.DataFrame({
-                "world": [1], "stage": [1],
-                "steps": [7000],
-                "deaths": [3], "flags": [2], "episodes": [8], "timeouts": [0],
-            }),
+            0: pd.DataFrame(
+                {
+                    "world": [1],
+                    "stage": [1],
+                    "steps": [5000],
+                    "deaths": [5],
+                    "flags": [1],
+                    "episodes": [10],
+                    "timeouts": [1],
+                }
+            ),
+            1: pd.DataFrame(
+                {
+                    "world": [1],
+                    "stage": [1],
+                    "steps": [7000],
+                    "deaths": [3],
+                    "flags": [2],
+                    "episodes": [8],
+                    "timeouts": [0],
+                }
+            ),
         }
-        
+
         result = aggregate_rate_data(workers, step_bucket_size=10000)
-        
+
         assert "1-1" in result
         point = result["1-1"][0]
-        
+
         # Should sum across workers
         assert point.deaths == 8  # 5 + 3
         assert point.flags == 3  # 1 + 2
@@ -286,16 +312,22 @@ class TestAggregateRateData:
     def test_rate_calculations(self) -> None:
         """Should calculate rates correctly from aggregated data."""
         workers = {
-            0: pd.DataFrame({
-                "world": [1], "stage": [1],
-                "steps": [10000],
-                "deaths": [20], "flags": [5], "episodes": [100], "timeouts": [10],
-            })
+            0: pd.DataFrame(
+                {
+                    "world": [1],
+                    "stage": [1],
+                    "steps": [10000],
+                    "deaths": [20],
+                    "flags": [5],
+                    "episodes": [100],
+                    "timeouts": [10],
+                }
+            )
         }
-        
+
         result = aggregate_rate_data(workers)
         point = result["1-1"][0]
-        
+
         assert point.deaths_per_episode == 0.2  # 20/100
         assert point.timeouts_per_episode == 0.1  # 10/100
         assert point.completion_rate == 5.0  # 5/100 * 100
@@ -317,11 +349,15 @@ class TestAggregateActionDistribution:
     def test_no_action_dist_column(self) -> None:
         """Should return empty dict if action_dist column missing."""
         workers = {
-            0: pd.DataFrame({
-                "world": [1], "stage": [1], "steps": [1000],
-            })
+            0: pd.DataFrame(
+                {
+                    "world": [1],
+                    "stage": [1],
+                    "steps": [1000],
+                }
+            )
         }
-        
+
         result = aggregate_action_distribution(workers)
         assert result == {}
 
@@ -329,17 +365,20 @@ class TestAggregateActionDistribution:
         """Should parse comma-separated action distribution."""
         # 12 action percentages
         dist_str = ",".join(str(i * 0.08) for i in range(1, 13))  # 0.08,0.16,...,0.96
-        
+
         workers = {
-            0: pd.DataFrame({
-                "world": [1], "stage": [1],
-                "steps": [1000],
-                "action_dist": [dist_str],
-            })
+            0: pd.DataFrame(
+                {
+                    "world": [1],
+                    "stage": [1],
+                    "steps": [1000],
+                    "action_dist": [dist_str],
+                }
+            )
         }
-        
+
         result = aggregate_action_distribution(workers)
-        
+
         assert "1-1" in result
         assert len(result["1-1"]) == 1
         assert len(result["1-1"][0].percentages) == 12
@@ -361,24 +400,29 @@ class TestAggregateDeathHotspots:
     def test_no_death_positions_column(self) -> None:
         """Should return empty dict if death_positions column missing."""
         workers = {
-            0: pd.DataFrame({
-                "world": [1], "stage": [1],
-            })
+            0: pd.DataFrame(
+                {
+                    "world": [1],
+                    "stage": [1],
+                }
+            )
         }
-        
+
         result = aggregate_death_hotspots_from_csv(workers)
         assert result == {}
 
     def test_parses_death_positions(self) -> None:
         """Should parse death positions from 'level:pos1,pos2' format."""
         workers = {
-            0: pd.DataFrame({
-                "death_positions": ["1-1:100,150,200"],
-            })
+            0: pd.DataFrame(
+                {
+                    "death_positions": ["1-1:100,150,200"],
+                }
+            )
         }
-        
+
         result = aggregate_death_hotspots_from_csv(workers)
-        
+
         assert "1-1" in result
         # Positions bucketed by 25: 100->100, 150->150, 200->200
         assert 100 in result["1-1"]
@@ -388,13 +432,15 @@ class TestAggregateDeathHotspots:
     def test_buckets_by_25(self) -> None:
         """Should bucket death positions by 25 pixels."""
         workers = {
-            0: pd.DataFrame({
-                "death_positions": ["1-1:101,102,103,110,140"],
-            })
+            0: pd.DataFrame(
+                {
+                    "death_positions": ["1-1:101,102,103,110,140"],
+                }
+            )
         }
-        
+
         result = aggregate_death_hotspots_from_csv(workers)
-        
+
         # 101,102,103,110 -> bucket 100, 140 -> bucket 125
         assert result["1-1"][100] == 4
         assert result["1-1"][125] == 1
@@ -405,9 +451,9 @@ class TestAggregateDeathHotspots:
             0: pd.DataFrame({"death_positions": ["1-1:100,100"]}),
             1: pd.DataFrame({"death_positions": ["1-1:100"]}),
         }
-        
+
         result = aggregate_death_hotspots_from_csv(workers)
-        
+
         assert result["1-1"][100] == 3
 
 
@@ -422,7 +468,7 @@ class TestEdgeCases:
     def test_empty_dataframe(self) -> None:
         """Should handle empty dataframes gracefully."""
         workers = {0: pd.DataFrame()}
-        
+
         assert aggregate_level_stats(workers) == {}
         assert aggregate_rate_data(workers) == {}
         assert aggregate_action_distribution(workers) == {}
@@ -430,13 +476,18 @@ class TestEdgeCases:
     def test_nan_values_in_data(self) -> None:
         """Should handle NaN values without crashing."""
         workers = {
-            0: pd.DataFrame({
-                "world": [1], "stage": [1],
-                "deaths": [None], "flags": [1],
-                "reward": [float("nan")], "speed": [None],
-            })
+            0: pd.DataFrame(
+                {
+                    "world": [1],
+                    "stage": [1],
+                    "deaths": [None],
+                    "flags": [1],
+                    "reward": [float("nan")],
+                    "speed": [None],
+                }
+            )
         }
-        
+
         # Should not raise
         result = aggregate_level_stats(workers)
         assert "1-1" in result
@@ -444,20 +495,30 @@ class TestEdgeCases:
     def test_mixed_level_data(self) -> None:
         """Should handle workers with different levels."""
         workers = {
-            0: pd.DataFrame({
-                "world": [1, 2], "stage": [1, 1],
-                "deaths": [5, 3], "flags": [1, 2],
-                "reward": [10.0, 20.0], "speed": [1.0, 1.5],
-            }),
-            1: pd.DataFrame({
-                "world": [1, 3], "stage": [2, 1],
-                "deaths": [2, 4], "flags": [1, 0],
-                "reward": [15.0, 25.0], "speed": [1.2, 1.8],
-            }),
+            0: pd.DataFrame(
+                {
+                    "world": [1, 2],
+                    "stage": [1, 1],
+                    "deaths": [5, 3],
+                    "flags": [1, 2],
+                    "reward": [10.0, 20.0],
+                    "speed": [1.0, 1.5],
+                }
+            ),
+            1: pd.DataFrame(
+                {
+                    "world": [1, 3],
+                    "stage": [2, 1],
+                    "deaths": [2, 4],
+                    "flags": [1, 0],
+                    "reward": [15.0, 25.0],
+                    "speed": [1.2, 1.8],
+                }
+            ),
         }
-        
+
         result = aggregate_level_stats(workers)
-        
+
         # Should have all 4 unique levels
         assert len(result) == 4
         assert "1-1" in result

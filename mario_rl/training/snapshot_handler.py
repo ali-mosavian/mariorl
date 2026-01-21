@@ -10,18 +10,18 @@ This module provides a high-level handler that:
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-from dataclasses import field
-from pathlib import Path
 from typing import Any
+from pathlib import Path
+from dataclasses import field
+from dataclasses import dataclass
 
 import numpy as np
 
 from mario_rl.training.snapshot import SnapshotManager
+from mario_rl.metrics.levels import DeathHotspotAggregate
 from mario_rl.training.snapshot_state_machine import SnapshotAction
 from mario_rl.training.snapshot_state_machine import SnapshotContext
 from mario_rl.training.snapshot_state_machine import SnapshotStateMachine
-from mario_rl.metrics.levels import DeathHotspotAggregate
 
 
 @dataclass
@@ -89,7 +89,7 @@ class SnapshotHandler:
     _last_hotspot_load: float = field(default=0.0, init=False)
     _best_x: int = field(default=0, init=False)
     _current_level: str = field(default="1-1", init=False)
-    
+
     # Statistics (for metrics/UI)
     total_saves: int = field(default=0, init=False)
     total_restores: int = field(default=0, init=False)
@@ -152,9 +152,7 @@ class SnapshotHandler:
             hotspot_positions = tuple(positions)
 
             if is_dead:
-                suggested_restore_x = self._hotspots.suggest_restore_position(
-                    level_id, x_pos
-                )
+                suggested_restore_x = self._hotspots.suggest_restore_position(level_id, x_pos)
 
         # Build context for state machine
         ctx = SnapshotContext(
@@ -181,6 +179,7 @@ class SnapshotHandler:
                 break
             # If state machine returned NONE and we're in a stable state, stop
             from mario_rl.training.snapshot_state_machine import SnapshotState
+
             stable_states = {
                 SnapshotState.RUNNING,
                 SnapshotState.APPROACHING_HOTSPOT,
@@ -233,10 +232,10 @@ class SnapshotHandler:
         self._best_x = 0
         self.saves_this_episode = 0
         self.restores_this_episode = 0
-    
+
     def get_stats(self) -> dict[str, int]:
         """Get current snapshot statistics.
-        
+
         Returns:
             Dict with save/restore counts (for metrics logging)
         """
@@ -269,9 +268,7 @@ class SnapshotHandler:
         Returns:
             Restored observation if successful, None otherwise
         """
-        restored_state, success = self.snapshot_manager.try_restore(
-            info, self._best_x
-        )
+        restored_state, success = self.snapshot_manager.try_restore(info, self._best_x)
 
         if success and restored_state.size > 0:
             return restored_state

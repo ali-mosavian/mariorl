@@ -69,10 +69,10 @@ The complete transition table is defined in TRANSITIONS. Each entry maps
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-from dataclasses import field
 from enum import Enum
 from enum import auto
+from dataclasses import field
+from dataclasses import dataclass
 
 
 class SnapshotState(Enum):
@@ -387,9 +387,7 @@ class SnapshotStateMachine:
             return Event.PROGRESS_MADE
         return Event.NO_PROGRESS
 
-    def _on_exit(
-        self, state: SnapshotState, event: Event, ctx: SnapshotContext
-    ) -> None:
+    def _on_exit(self, state: SnapshotState, event: Event, ctx: SnapshotContext) -> None:
         """Handle side effects when exiting a state."""
         match state:
             case SnapshotState.APPROACHING_HOTSPOT:

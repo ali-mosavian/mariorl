@@ -8,17 +8,18 @@ Usage:
     uv run python scripts/train_auxiliary_encoder.py --steps 50000
 """
 
+from collections import deque
+from dataclasses import dataclass
+
 import click
 import torch
-import torch.nn as nn
-import torch.nn.functional as F
 import numpy as np
-from dataclasses import dataclass
-from collections import deque
+import torch.nn as nn
 from tqdm import tqdm
+import torch.nn.functional as F
 
-from mario_rl.environment.factory import create_mario_env
 from mario_rl.models.ddqn import DoubleDQN
+from mario_rl.environment.factory import create_mario_env
 
 
 def symlog(x: torch.Tensor) -> torch.Tensor:
@@ -132,11 +133,13 @@ def collect_data(
 
         next_state, reward, done, truncated, info = env.step(action)
 
-        transitions.append(Transition(
-            state=state.copy(),
-            x_pos=info.get("x_pos", 0),
-            reward=reward,
-        ))
+        transitions.append(
+            Transition(
+                state=state.copy(),
+                x_pos=info.get("x_pos", 0),
+                reward=reward,
+            )
+        )
 
         state = next_state
         if done or truncated:
@@ -273,7 +276,7 @@ def main(
     print("=" * 60)
     print("AUXILIARY ENCODER TRAINING")
     print("=" * 60)
-    print(f"Goal: Learn latent z that predicts x_pos and reward")
+    print("Goal: Learn latent z that predicts x_pos and reward")
     print(f"Steps: {steps}, Batch: {batch_size}, LR: {lr}")
     print(f"Latent dim: {latent_dim}")
     print()
@@ -327,12 +330,14 @@ def main(
         # Update progress bar
         if len(metrics_window) > 0:
             avg_metrics = {k: np.mean([m[k] for m in metrics_window]) for k in metrics.keys()}
-            pbar.set_postfix({
-                "loss": f"{avg_metrics['loss']:.4f}",
-                "x_mae": f"{avg_metrics['x_pos_mae']:.1f}",
-                "r_mae": f"{avg_metrics['reward_mae']:.3f}",
-                "z_std": f"{avg_metrics['z_std']:.3f}",
-            })
+            pbar.set_postfix(
+                {
+                    "loss": f"{avg_metrics['loss']:.4f}",
+                    "x_mae": f"{avg_metrics['x_pos_mae']:.1f}",
+                    "r_mae": f"{avg_metrics['reward_mae']:.3f}",
+                    "z_std": f"{avg_metrics['z_std']:.3f}",
+                }
+            )
 
         # Evaluate
         if step % eval_interval == 0 and step > 0:
@@ -343,11 +348,14 @@ def main(
             )
 
     # Save model
-    torch.save({
-        "model_state_dict": model.state_dict(),
-        "latent_dim": latent_dim,
-        "step": steps,
-    }, save_path)
+    torch.save(
+        {
+            "model_state_dict": model.state_dict(),
+            "latent_dim": latent_dim,
+            "step": steps,
+        },
+        save_path,
+    )
     print(f"\nSaved to {save_path}")
 
     # Final evaluation
@@ -363,9 +371,7 @@ def main(
     print("\nLatent diversity test...")
     test_data = collect_data(env, policy_model, device, num_steps=500)
     with torch.no_grad():
-        states = torch.tensor(
-            np.stack([t.state for t in test_data]), dtype=torch.float32, device=device
-        )
+        states = torch.tensor(np.stack([t.state for t in test_data]), dtype=torch.float32, device=device)
         z = model.encode(states)
 
         # Compute pairwise distances

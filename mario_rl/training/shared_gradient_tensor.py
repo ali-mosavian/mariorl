@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import mmap
 import struct
+from typing import Any
 from pathlib import Path
 from dataclasses import dataclass
 
@@ -128,7 +129,7 @@ class SharedGradientTensor:
         self.param_layout: list[tuple[str, int, torch.Size]] = []
         total_numel = 0
         self.dtype: torch.dtype = torch.float32  # default
-        self.np_dtype = np.float32  # default
+        self.np_dtype: Any = np.float32  # default
 
         for name, param in model.named_parameters():
             if param.requires_grad:
@@ -136,7 +137,7 @@ class SharedGradientTensor:
                 total_numel += param.numel()
                 # Use dtype from first parameter
                 if len(self.param_layout) == 1:
-                    self.dtype = param.dtype
+                    self.dtype = param.dtype  # type: ignore[assignment]
                     self.np_dtype = self._torch_to_numpy_dtype(param.dtype)
 
         self.total_numel = total_numel
@@ -163,7 +164,7 @@ class SharedGradientTensor:
             torch.int32: np.int32,
             torch.int64: np.int64,
         }
-        return mapping.get(dtype, np.float32)
+        return mapping.get(dtype, np.float32)  # type: ignore[return-value]
 
     @staticmethod
     def _dtype_size(dtype: torch.dtype) -> int:
@@ -202,8 +203,8 @@ class SharedGradientTensor:
 
     def _open_mmap(self) -> None:
         """Open mmap and create numpy views for each slot."""
-        self._fd = open(self.shm_path, "r+b")
-        self._mmap = mmap.mmap(self._fd.fileno(), self.total_bytes)
+        self._fd: Any = open(self.shm_path, "r+b")
+        self._mmap: Any = mmap.mmap(self._fd.fileno(), self.total_bytes)
 
         # Create numpy array views for each slot's data section
         self._slot_arrays: list[np.ndarray] = []
@@ -211,7 +212,7 @@ class SharedGradientTensor:
             slot_start = GLOBAL_HEADER_SIZE + i * self.slot_total_bytes
             data_start = slot_start + SLOT_HEADER_SIZE
 
-            arr = np.ndarray(
+            arr: np.ndarray[Any, Any] = np.ndarray(
                 shape=(self.total_numel,),
                 dtype=self.np_dtype,
                 buffer=self._mmap,

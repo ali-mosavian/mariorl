@@ -38,12 +38,11 @@ Training:
 
 from dataclasses import dataclass
 
-import numpy as np
 import torch
-import torch.nn.functional as F
-from torch import Tensor
+import numpy as np
 from torch import nn
-
+from torch import Tensor
+import torch.nn.functional as F
 
 # =============================================================================
 # Symlog Transform (from Dreamer V3)
@@ -560,9 +559,7 @@ class MuZeroModel(nn.Module):
             self.target.parameters(),
             strict=True,
         ):
-            target_param.data.copy_(
-                tau * online_param.data + (1.0 - tau) * target_param.data
-            )
+            target_param.data.copy_(tau * online_param.data + (1.0 - tau) * target_param.data)
 
     def initial_inference(self, s: Tensor) -> tuple[Tensor, Tensor, Tensor]:
         """Initial inference using online network."""

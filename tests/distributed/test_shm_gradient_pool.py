@@ -7,12 +7,10 @@ These tests verify the SharedGradientPool interface:
 """
 
 from pathlib import Path
-from dataclasses import dataclass
 
-import pytest
 import torch
+import pytest
 from torch import nn
-
 
 # =============================================================================
 # Mock Model
@@ -110,9 +108,7 @@ def test_write_and_read_worker(model_with_gradients: SimpleModel, shm_dir: Path)
     )
 
     grads = {
-        name: param.grad.clone()
-        for name, param in model_with_gradients.named_parameters()
-        if param.grad is not None
+        name: param.grad.clone() for name, param in model_with_gradients.named_parameters() if param.grad is not None
     }
 
     # Write to worker 0
@@ -139,9 +135,7 @@ def test_read_all_workers(model_with_gradients: SimpleModel, shm_dir: Path) -> N
     )
 
     grads = {
-        name: param.grad.clone()
-        for name, param in model_with_gradients.named_parameters()
-        if param.grad is not None
+        name: param.grad.clone() for name, param in model_with_gradients.named_parameters() if param.grad is not None
     }
 
     # Write to both workers
@@ -178,9 +172,7 @@ def test_workers_have_separate_buffers(model_with_gradients: SimpleModel, shm_di
     )
 
     grads = {
-        name: param.grad.clone()
-        for name, param in model_with_gradients.named_parameters()
-        if param.grad is not None
+        name: param.grad.clone() for name, param in model_with_gradients.named_parameters() if param.grad is not None
     }
 
     # Write to worker 0 only

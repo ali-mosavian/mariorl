@@ -5,7 +5,6 @@ All configuration is immutable (frozen) to prevent accidental modification.
 """
 
 import os
-
 from typing import Tuple
 from typing import Literal
 from dataclasses import dataclass

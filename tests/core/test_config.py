@@ -28,20 +28,20 @@ def test_epsilon_floor_with_4_workers() -> None:
     """Epsilon floor should range from ~2% to ~9% with 4 workers."""
     config = TrainingConfig(num_workers=4)
     worker_configs = config.create_worker_configs()
-    
+
     # Get epsilon_end for each worker
     epsilons = [wc.exploration.epsilon_end for wc in worker_configs]
-    
+
     # Worker 0 should have highest epsilon (most exploration)
     # Worker 3 should have lowest epsilon (most exploitation)
     assert epsilons[0] > epsilons[1] > epsilons[2] > epsilons[3]
-    
+
     # All should be under 10%
     assert all(eps < 0.10 for eps in epsilons)
-    
+
     # Most exploitative should be around 2%
     assert epsilons[3] < 0.03
-    
+
     # Most explorative should be around 9%
     assert 0.05 < epsilons[0] < 0.12
 
@@ -50,10 +50,10 @@ def test_epsilon_floor_calculation_formula() -> None:
     """Verify exact epsilon calculation formula."""
     config = TrainingConfig(num_workers=4)
     worker_configs = config.create_worker_configs()
-    
+
     base = config.epsilon_base
     n = config.num_workers
-    
+
     for i, wc in enumerate(worker_configs):
         expected = base ** (1 + (i + 1) / n)
         actual = wc.exploration.epsilon_end
@@ -77,9 +77,9 @@ def test_epsilon_range_with_different_configs(
     """Epsilon range should vary with base and num_workers."""
     config = TrainingConfig(num_workers=num_workers, epsilon_base=eps_base)
     worker_configs = config.create_worker_configs()
-    
+
     epsilons = [wc.exploration.epsilon_end for wc in worker_configs]
-    
+
     min_eps, max_eps = expected_range
     assert epsilons[-1] >= min_eps * 0.5  # Allow some margin
     assert epsilons[-1] <= max_eps
@@ -88,33 +88,27 @@ def test_epsilon_range_with_different_configs(
 
 def test_old_epsilon_base_was_too_high() -> None:
     """Document that old eps_base=0.4 gave too high floors.
-    
+
     This test documents the problem we fixed: with eps_base=0.4,
     even the most exploitative worker had ~16% random actions.
     """
     # Old config with eps_base=0.4
     old_base = 0.4
     num_workers = 4
-    
+
     # Calculate old epsilon floors
-    old_epsilons = [
-        old_base ** (1 + (i + 1) / num_workers)
-        for i in range(num_workers)
-    ]
-    
+    old_epsilons = [old_base ** (1 + (i + 1) / num_workers) for i in range(num_workers)]
+
     # The old most exploitative worker had ~16% epsilon - too high!
     assert old_epsilons[3] > 0.15  # Was 0.16
-    
+
     # The old most explorative had ~32% - way too high!
     assert old_epsilons[0] > 0.30  # Was 0.315
-    
+
     # New config should be much better
     new_config = TrainingConfig(num_workers=4)
-    new_epsilons = [
-        wc.exploration.epsilon_end
-        for wc in new_config.create_worker_configs()
-    ]
-    
+    new_epsilons = [wc.exploration.epsilon_end for wc in new_config.create_worker_configs()]
+
     # New floors are much lower
     assert new_epsilons[3] < 0.03  # ~2.3%
     assert new_epsilons[0] < 0.10  # ~8.7%

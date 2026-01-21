@@ -1,14 +1,14 @@
 """Wrapper that stacks frames."""
 
+from typing import overload
 from collections import deque
 from dataclasses import dataclass
-from typing import overload
 
 import lz4.block
 import numpy as np
 import gymnasium as gym
-from numpy.typing import NDArray
 from gymnasium.spaces import Box
+from numpy.typing import NDArray
 
 
 @dataclass(frozen=True, slots=True)
@@ -64,17 +64,15 @@ class LazyFrames[T: np.generic]:
             return arr.astype(dtype)
         return arr
 
-    def __eq__(self, other: NDArray[T]) -> NDArray[np.bool_]:
+    def __eq__(self, other: NDArray[T]) -> NDArray[np.bool_]:  # type: ignore[override]
         """Element-wise equality with another array-like object."""
-        return self.__array__() == other
+        return self.__array__() == other  # type: ignore[return-value]
 
     def _decode(self, frame: bytes | NDArray[T]) -> NDArray[T]:
         """Decompress frame if compressed, otherwise return as-is."""
         if self._compressed:
-            return np.frombuffer(
-                lz4.block.decompress(frame), dtype=self._dtype
-            ).reshape(self._shape)
-        return frame
+            return np.frombuffer(lz4.block.decompress(frame), dtype=self._dtype).reshape(self._shape)
+        return frame  # type: ignore[return-value]
 
     @classmethod
     def from_frames(
@@ -101,7 +99,8 @@ class LazyFrames[T: np.generic]:
             _shape=shape,
             _dtype=dtype,
             _compressed=compressed,
-        )        
+        )
+
 
 class FrameStack(gym.ObservationWrapper):
     """Observation wrapper that stacks the observations in a rolling manner.
@@ -147,9 +146,9 @@ class FrameStack(gym.ObservationWrapper):
 
         self.frames: deque = deque(maxlen=num_stack)
 
-        low = np.repeat(self.observation_space.low[np.newaxis, ...], num_stack, axis=0)  # type: ignore[has-type]
-        high = np.repeat(self.observation_space.high[np.newaxis, ...], num_stack, axis=0)  # type: ignore[has-type]
-        self.observation_space = Box(low=low, high=high, dtype=self.observation_space.dtype)  # type: ignore[has-type]
+        low = np.repeat(self.observation_space.low[np.newaxis, ...], num_stack, axis=0)  # type: ignore[attr-defined]
+        high = np.repeat(self.observation_space.high[np.newaxis, ...], num_stack, axis=0)  # type: ignore[attr-defined]
+        self.observation_space = Box(low=low, high=high, dtype=self.observation_space.dtype)  # type: ignore[arg-type,attr-defined]
 
     def observation(self, observation):
         """Converts the wrappers current frames to lazy frames.
@@ -161,7 +160,9 @@ class FrameStack(gym.ObservationWrapper):
             :class:`LazyFrames` object for the wrapper's frame buffer,  :attr:`self.frames`
         """
         assert len(self.frames) == self.num_stack, (len(self.frames), self.num_stack)
-        return LazyFrames.from_frames(list(self.frames), compressed=self.lz4_compress, dtype=self.observation_space.dtype)
+        return LazyFrames.from_frames(
+            list(self.frames), compressed=self.lz4_compress, dtype=self.observation_space.dtype
+        )
 
     def step(self, action):
         """Steps through the environment, appending the observation to the frame buffer.

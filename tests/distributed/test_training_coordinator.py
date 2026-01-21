@@ -9,15 +9,13 @@ These tests verify the TrainingCoordinator correctly:
 
 from typing import Any
 from pathlib import Path
-from dataclasses import dataclass
 from dataclasses import field
-from unittest.mock import Mock
+from dataclasses import dataclass
 
-import pytest
 import torch
-from torch import Tensor
+import pytest
 from torch import nn
-
+from torch import Tensor
 
 # =============================================================================
 # Mock Model and Learner
@@ -142,25 +140,19 @@ def test_coordinator_creates_gradient_pool(training_coordinator) -> None:
 def test_apply_gradients(training_coordinator, simple_model: SimpleModel) -> None:
     """Should apply gradients to model."""
     # Create mock gradients
-    grads = {
-        name: torch.ones_like(param)
-        for name, param in simple_model.named_parameters()
-    }
+    grads = {name: torch.ones_like(param) for name, param in simple_model.named_parameters()}
 
-    initial_params = {
-        name: param.clone()
-        for name, param in simple_model.named_parameters()
-    }
+    _initial_params = {name: param.clone() for name, param in simple_model.named_parameters()}
 
     training_coordinator.apply_gradients([grads])
 
     # Parameters should have changed
-    for name, param in simple_model.named_parameters():
+    for _, _ in simple_model.named_parameters():
         # Note: optimizer step changes params, so they should differ
         # (this is behavior test, not exact value)
         pass  # Just checking no error
 
-    training_coordinator.update_count > 0
+    assert training_coordinator.update_count > 0
 
 
 def test_accumulate_gradients(training_coordinator, simple_model: SimpleModel) -> None:
@@ -171,7 +163,7 @@ def test_accumulate_gradients(training_coordinator, simple_model: SimpleModel) -
     averaged = training_coordinator.aggregate_gradients([grads1, grads2])
 
     # Averaged gradients should be (1 + 2) / 2 = 1.5
-    for name, grad in averaged.items():
+    for _, grad in averaged.items():
         assert torch.allclose(grad, torch.ones_like(grad) * 1.5)
 
 
@@ -188,10 +180,7 @@ def test_poll_gradients_from_pool(mock_learner: MockLearner, shm_dir: Path, chec
     )
 
     # Write some gradients to pool
-    grads = {
-        name: torch.ones_like(param)
-        for name, param in mock_learner.model.named_parameters()
-    }
+    grads = {name: torch.ones_like(param) for name, param in mock_learner.model.named_parameters()}
     coordinator.gradient_pool.write(worker_id=0, grads=grads)
 
     # Poll should get them
@@ -350,10 +339,7 @@ def test_maybe_update_targets(training_coordinator, mock_learner: MockLearner) -
 
 def test_training_step(training_coordinator, simple_model: SimpleModel) -> None:
     """Full training step should work."""
-    grads = {
-        name: torch.ones_like(param)
-        for name, param in simple_model.named_parameters()
-    }
+    grads = {name: torch.ones_like(param) for name, param in simple_model.named_parameters()}
 
     # Write to pool
     training_coordinator.gradient_pool.write(worker_id=0, grads=grads)

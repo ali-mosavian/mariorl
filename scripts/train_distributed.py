@@ -25,9 +25,6 @@ from pathlib import Path
 import multiprocessing as mp
 from datetime import datetime
 from dataclasses import dataclass
-
-mp.set_start_method("spawn", force=True)
-
 from multiprocessing import Queue
 from multiprocessing import Process
 
@@ -44,6 +41,8 @@ from mario_rl.distributed.events import EventPublisher
 from mario_rl.distributed.events import EventSubscriber
 from mario_rl.metrics import DifficultyHotspotAggregate
 from mario_rl.distributed.events import event_to_ui_message
+
+mp.set_start_method("spawn", force=True)
 
 # =============================================================================
 # Configuration

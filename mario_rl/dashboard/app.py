@@ -6,23 +6,19 @@ Run with:
 """
 
 import time
-from datetime import datetime
 from pathlib import Path
+from datetime import datetime
 
 import streamlit as st
 
-from mario_rl.dashboard.data_loaders import (
-    list_checkpoints,
-    load_coordinator_metrics,
-    load_death_hotspots,
-    load_worker_metrics,
-)
-from mario_rl.dashboard.tabs import (
-    render_coordinator_tab,
-    render_workers_tab,
-    render_levels_tab,
-    render_analysis_tab,
-)
+from mario_rl.dashboard.tabs import render_levels_tab
+from mario_rl.dashboard.tabs import render_workers_tab
+from mario_rl.dashboard.tabs import render_analysis_tab
+from mario_rl.dashboard.tabs import render_coordinator_tab
+from mario_rl.dashboard.data_loaders import list_checkpoints
+from mario_rl.dashboard.data_loaders import load_death_hotspots
+from mario_rl.dashboard.data_loaders import load_worker_metrics
+from mario_rl.dashboard.data_loaders import load_coordinator_metrics
 
 
 def setup_page() -> None:
@@ -32,16 +28,19 @@ def setup_page() -> None:
         page_icon="🍄",
         layout="wide",
     )
-    
+
     # Minimal custom CSS
-    st.markdown("""
+    st.markdown(
+        """
     <style>
         .block-container { padding-top: 1rem; padding-bottom: 1rem; }
         [data-testid="stMetricValue"] { font-size: 1.8rem; }
         .stTabs [data-baseweb="tab-list"] { gap: 8px; }
         .stTabs [data-baseweb="tab"] { padding: 8px 16px; }
     </style>
-    """, unsafe_allow_html=True)
+    """,
+        unsafe_allow_html=True,
+    )
 
 
 def render_sidebar() -> tuple[str, int]:
@@ -88,7 +87,7 @@ def render_sidebar() -> tuple[str, int]:
                 mod_time = datetime.fromtimestamp(coord_csv.stat().st_mtime)
                 st.caption(f"📁 {checkpoint_path.name}")
                 st.caption(f"🕐 {mod_time.strftime('%H:%M:%S')}")
-            
+
             # Worker health summary
             _render_worker_health_summary(checkpoint_dir)
 
@@ -100,13 +99,13 @@ def _render_worker_health_summary(checkpoint_dir: str) -> None:
     workers = load_worker_metrics(checkpoint_dir)
     if not workers:
         return
-    
+
     current_time = time.time()
     healthy = 0
     stale = 0
     crashed = 0
-    
-    for wid, df in workers.items():
+
+    for _wid, df in workers.items():
         if len(df) > 0:
             last_timestamp = df.iloc[-1].get("timestamp", 0)
             if last_timestamp > 0:
@@ -117,7 +116,7 @@ def _render_worker_health_summary(checkpoint_dir: str) -> None:
                     stale += 1
                 else:
                     crashed += 1
-    
+
     st.divider()
     st.caption("WORKER HEALTH")
     health_cols = st.columns(3)
@@ -128,10 +127,11 @@ def _render_worker_health_summary(checkpoint_dir: str) -> None:
 
 def render_dashboard_content(checkpoint_dir: str, refresh_sec: int) -> None:
     """Render the main dashboard content (tabs and charts)."""
-    
+
     tab1, tab2, tab3, tab4 = st.tabs(["📊 Coordinator", "👷 Workers", "🗺️ Levels", "🔍 Analysis"])
 
     with tab1:
+
         @st.fragment(run_every=refresh_sec)
         def coordinator_fragment():
             load_coordinator_metrics.clear()
@@ -139,18 +139,22 @@ def render_dashboard_content(checkpoint_dir: str, refresh_sec: int) -> None:
             if df is not None and len(df) > 0:
                 st.caption(f"🔄 {datetime.now().strftime('%H:%M:%S')} • {len(df)} updates")
             render_coordinator_tab(df)
+
         coordinator_fragment()
 
     with tab2:
+
         @st.fragment(run_every=refresh_sec)
         def workers_fragment():
             load_worker_metrics.clear()
             workers = load_worker_metrics(checkpoint_dir)
             st.caption(f"🔄 {datetime.now().strftime('%H:%M:%S')}")
             render_workers_tab(workers)
+
         workers_fragment()
 
     with tab3:
+
         @st.fragment(run_every=refresh_sec)
         def levels_fragment():
             # Levels tab uses cached direct queries (TTL=5s), so just let cache expire
@@ -159,9 +163,11 @@ def render_dashboard_content(checkpoint_dir: str, refresh_sec: int) -> None:
             death_hotspots = load_death_hotspots(checkpoint_dir)
             st.caption(f"🔄 {datetime.now().strftime('%H:%M:%S')}")
             render_levels_tab(checkpoint_dir, death_hotspots)
+
         levels_fragment()
 
     with tab4:
+
         @st.fragment(run_every=refresh_sec)
         def analysis_fragment():
             load_coordinator_metrics.clear()
@@ -170,21 +176,22 @@ def render_dashboard_content(checkpoint_dir: str, refresh_sec: int) -> None:
             workers = load_worker_metrics(checkpoint_dir)
             st.caption(f"🔄 {datetime.now().strftime('%H:%M:%S')}")
             render_analysis_tab(df, workers)
+
         analysis_fragment()
 
 
 def run_dashboard() -> None:
     """Main entry point for the dashboard."""
     setup_page()
-    
+
     st.title("🍄 Mario RL Training")
-    
+
     checkpoint_dir, refresh_sec = render_sidebar()
-    
+
     if not Path(checkpoint_dir).exists():
         st.error(f"Directory not found: {checkpoint_dir}")
         return
-    
+
     render_dashboard_content(checkpoint_dir, refresh_sec)
 
 

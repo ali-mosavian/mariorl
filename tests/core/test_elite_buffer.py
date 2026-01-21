@@ -2,13 +2,13 @@
 
 from __future__ import annotations
 
-import numpy as np
-import pytest
 import torch
+import pytest
+import numpy as np
 
+from mario_rl.core.types import Transition
 from mario_rl.core.elite_buffer import EliteBuffer
 from mario_rl.core.elite_buffer import EliteTransition
-from mario_rl.core.types import Transition
 
 
 @pytest.fixture
@@ -72,8 +72,8 @@ def test_add_episode(sample_transition: Transition) -> None:
 
 def test_add_episode_with_flag(sample_transition: Transition) -> None:
     """Test adding a flag capture episode gets higher quality."""
-    buffer = EliteBuffer(capacity=100)
-    transitions = [sample_transition for _ in range(5)]
+    _buffer = EliteBuffer(capacity=100)
+    _transitions = [sample_transition for _ in range(5)]
 
     # Without flag
     quality_no_flag = EliteBuffer.compute_quality(
@@ -345,5 +345,5 @@ def test_elite_transition_frozen(sample_transition: Transition) -> None:
         episode_id=1,
     )
 
-    with pytest.raises(Exception):  # FrozenInstanceError or AttributeError
+    with pytest.raises((AttributeError, TypeError)):  # FrozenInstanceError or AttributeError
         elite.quality = 600.0

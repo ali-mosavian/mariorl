@@ -9,9 +9,8 @@ from pathlib import Path
 import pandas as pd
 import streamlit as st
 
-from mario_rl.dashboard.query import get_metrics_dir
-from mario_rl.dashboard.query import query_coordinator
 from mario_rl.dashboard.query import query_workers
+from mario_rl.dashboard.query import query_coordinator
 
 # Max valid x position in Super Mario Bros (levels are ~3000-3500 px long)
 MAX_VALID_X_POS = 5000
@@ -77,11 +76,7 @@ def load_death_hotspots(checkpoint_dir: str) -> dict[str, dict[int, int]] | None
         # Convert string keys back to int for position buckets
         # Filter outliers like 65535 (max uint16) which are invalid
         return {
-            level: {
-                int(pos): count
-                for pos, count in buckets.items()
-                if 0 < int(pos) <= MAX_VALID_X_POS
-            }
+            level: {int(pos): count for pos, count in buckets.items() if 0 < int(pos) <= MAX_VALID_X_POS}
             for level, buckets in data.items()
         }
     except Exception:
@@ -128,23 +123,23 @@ def load_worker_latest(checkpoint_dir: str) -> pd.DataFrame | None:
             checkpoint_dir,
             """
             SELECT * FROM (
-                SELECT *, 
+                SELECT *,
                     ROW_NUMBER() OVER (PARTITION BY worker_id ORDER BY timestamp DESC) as rn
                 FROM workers
-            ) 
+            )
             WHERE rn = 1
             ORDER BY worker_id
             """,
         ).df()
-        
+
         if len(df) == 0:
             return None
-        
+
         # Drop helper columns
         df = df.drop(columns=["rn"], errors="ignore")
         if "filename" in df.columns:
             df = df.drop(columns=["filename"])
-        
+
         return df
     except Exception:
         return None

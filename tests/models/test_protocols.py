@@ -8,14 +8,13 @@ from typing import Any
 from dataclasses import field
 from dataclasses import dataclass
 
-import pytest
 import torch
-from torch import Tensor
+import pytest
 from torch import nn
+from torch import Tensor
 
 from mario_rl.models import Model
 from mario_rl.learners import Learner
-
 
 # =============================================================================
 # Mock Implementations for Testing

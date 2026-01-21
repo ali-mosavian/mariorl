@@ -11,16 +11,17 @@ Test plan:
 7. Multiple write/read cycles
 8. Works across separate "processes" (simulated via separate instances)
 """
+
 from __future__ import annotations
 
 from pathlib import Path
 
-import pytest
 import torch
+import pytest
 import torch.nn as nn
 
-from mario_rl.training.shared_gradient_tensor import SharedGradientTensor
 from mario_rl.training.shared_gradient_tensor import GradientPacket
+from mario_rl.training.shared_gradient_tensor import SharedGradientTensor
 
 
 class SimpleModel(nn.Module):
@@ -59,13 +60,9 @@ def model_with_gradients(simple_model: SimpleModel) -> SimpleModel:
 # === Creation Tests ===
 
 
-def test_create_buffer_creates_file(
-    simple_model: SimpleModel, temp_shm_path: Path
-) -> None:
+def test_create_buffer_creates_file(simple_model: SimpleModel, temp_shm_path: Path) -> None:
     """Creating a buffer should create the shared memory file."""
-    buffer = SharedGradientTensor(
-        model=simple_model, shm_path=temp_shm_path, create=True
-    )
+    buffer = SharedGradientTensor(model=simple_model, shm_path=temp_shm_path, create=True)
 
     assert temp_shm_path.exists()
     assert temp_shm_path.stat().st_size > 0
@@ -73,14 +70,10 @@ def test_create_buffer_creates_file(
     buffer.close()
 
 
-def test_create_buffer_calculates_correct_size(
-    simple_model: SimpleModel, temp_shm_path: Path
-) -> None:
+def test_create_buffer_calculates_correct_size(simple_model: SimpleModel, temp_shm_path: Path) -> None:
     """Buffer size should match ring buffer structure."""
     num_slots = 4  # default
-    buffer = SharedGradientTensor(
-        model=simple_model, shm_path=temp_shm_path, create=True, num_slots=num_slots
-    )
+    buffer = SharedGradientTensor(model=simple_model, shm_path=temp_shm_path, create=True, num_slots=num_slots)
 
     # Calculate expected size: global header + num_slots * (slot header + data)
     expected_numel = sum(p.numel() for p in simple_model.parameters())
@@ -96,13 +89,9 @@ def test_create_buffer_calculates_correct_size(
     buffer.close()
 
 
-def test_create_buffer_stores_param_layout(
-    simple_model: SimpleModel, temp_shm_path: Path
-) -> None:
+def test_create_buffer_stores_param_layout(simple_model: SimpleModel, temp_shm_path: Path) -> None:
     """Buffer should store parameter layout for reconstruction."""
-    buffer = SharedGradientTensor(
-        model=simple_model, shm_path=temp_shm_path, create=True
-    )
+    buffer = SharedGradientTensor(model=simple_model, shm_path=temp_shm_path, create=True)
 
     # Should have layout for each parameter
     assert len(buffer.param_layout) == 4  # fc1.weight, fc1.bias, fc2.weight, fc2.bias
@@ -116,13 +105,9 @@ def test_create_buffer_stores_param_layout(
     buffer.close()
 
 
-def test_unlink_removes_file(
-    simple_model: SimpleModel, temp_shm_path: Path
-) -> None:
+def test_unlink_removes_file(simple_model: SimpleModel, temp_shm_path: Path) -> None:
     """Unlink should remove the shared memory file."""
-    buffer = SharedGradientTensor(
-        model=simple_model, shm_path=temp_shm_path, create=True
-    )
+    buffer = SharedGradientTensor(model=simple_model, shm_path=temp_shm_path, create=True)
     buffer.unlink()
 
     assert not temp_shm_path.exists()
@@ -131,17 +116,11 @@ def test_unlink_removes_file(
 # === Attach Tests ===
 
 
-def test_attach_to_existing_buffer(
-    simple_model: SimpleModel, temp_shm_path: Path
-) -> None:
+def test_attach_to_existing_buffer(simple_model: SimpleModel, temp_shm_path: Path) -> None:
     """Should be able to attach to a buffer created by another instance."""
-    creator = SharedGradientTensor(
-        model=simple_model, shm_path=temp_shm_path, create=True
-    )
+    creator = SharedGradientTensor(model=simple_model, shm_path=temp_shm_path, create=True)
 
-    attacher = SharedGradientTensor(
-        model=simple_model, shm_path=temp_shm_path, create=False
-    )
+    attacher = SharedGradientTensor(model=simple_model, shm_path=temp_shm_path, create=False)
 
     assert attacher.total_numel == creator.total_numel
     assert attacher.total_bytes == creator.total_bytes
@@ -150,31 +129,21 @@ def test_attach_to_existing_buffer(
     creator.unlink()
 
 
-def test_attach_fails_if_file_missing(
-    simple_model: SimpleModel, temp_shm_path: Path
-) -> None:
+def test_attach_fails_if_file_missing(simple_model: SimpleModel, temp_shm_path: Path) -> None:
     """Attaching to non-existent file should raise FileNotFoundError."""
     with pytest.raises(FileNotFoundError):
-        SharedGradientTensor(
-            model=simple_model, shm_path=temp_shm_path, create=False
-        )
+        SharedGradientTensor(model=simple_model, shm_path=temp_shm_path, create=False)
 
 
 # === Write Tests ===
 
 
-def test_write_gradients_from_model(
-    model_with_gradients: SimpleModel, temp_shm_path: Path
-) -> None:
+def test_write_gradients_from_model(model_with_gradients: SimpleModel, temp_shm_path: Path) -> None:
     """Writing gradients should succeed and return True."""
-    buffer = SharedGradientTensor(
-        model=model_with_gradients, shm_path=temp_shm_path, create=True
-    )
+    buffer = SharedGradientTensor(model=model_with_gradients, shm_path=temp_shm_path, create=True)
 
     grads = {
-        name: param.grad.clone()
-        for name, param in model_with_gradients.named_parameters()
-        if param.grad is not None
+        name: param.grad.clone() for name, param in model_with_gradients.named_parameters() if param.grad is not None
     }
 
     result = buffer.write(grads)
@@ -183,18 +152,12 @@ def test_write_gradients_from_model(
     buffer.unlink()
 
 
-def test_write_sets_ready_flag(
-    model_with_gradients: SimpleModel, temp_shm_path: Path
-) -> None:
+def test_write_sets_ready_flag(model_with_gradients: SimpleModel, temp_shm_path: Path) -> None:
     """After write, ready flag should be set."""
-    buffer = SharedGradientTensor(
-        model=model_with_gradients, shm_path=temp_shm_path, create=True
-    )
+    buffer = SharedGradientTensor(model=model_with_gradients, shm_path=temp_shm_path, create=True)
 
     grads = {
-        name: param.grad.clone()
-        for name, param in model_with_gradients.named_parameters()
-        if param.grad is not None
+        name: param.grad.clone() for name, param in model_with_gradients.named_parameters() if param.grad is not None
     }
 
     buffer.write(grads)
@@ -203,18 +166,12 @@ def test_write_sets_ready_flag(
     buffer.unlink()
 
 
-def test_write_updates_seq_to_even(
-    model_with_gradients: SimpleModel, temp_shm_path: Path
-) -> None:
+def test_write_updates_seq_to_even(model_with_gradients: SimpleModel, temp_shm_path: Path) -> None:
     """After write, sequence number should be even (write complete)."""
-    buffer = SharedGradientTensor(
-        model=model_with_gradients, shm_path=temp_shm_path, create=True
-    )
+    buffer = SharedGradientTensor(model=model_with_gradients, shm_path=temp_shm_path, create=True)
 
     grads = {
-        name: param.grad.clone()
-        for name, param in model_with_gradients.named_parameters()
-        if param.grad is not None
+        name: param.grad.clone() for name, param in model_with_gradients.named_parameters() if param.grad is not None
     }
 
     buffer.write(grads)
@@ -228,18 +185,12 @@ def test_write_updates_seq_to_even(
 # === Read Tests ===
 
 
-def test_read_returns_gradients(
-    model_with_gradients: SimpleModel, temp_shm_path: Path
-) -> None:
+def test_read_returns_gradients(model_with_gradients: SimpleModel, temp_shm_path: Path) -> None:
     """Reading after write should return gradient dict."""
-    buffer = SharedGradientTensor(
-        model=model_with_gradients, shm_path=temp_shm_path, create=True
-    )
+    buffer = SharedGradientTensor(model=model_with_gradients, shm_path=temp_shm_path, create=True)
 
     grads = {
-        name: param.grad.clone()
-        for name, param in model_with_gradients.named_parameters()
-        if param.grad is not None
+        name: param.grad.clone() for name, param in model_with_gradients.named_parameters() if param.grad is not None
     }
 
     buffer.write(grads)
@@ -252,23 +203,18 @@ def test_read_returns_gradients(
     buffer.unlink()
 
 
-def test_read_returns_correct_values(
-    model_with_gradients: SimpleModel, temp_shm_path: Path
-) -> None:
+def test_read_returns_correct_values(model_with_gradients: SimpleModel, temp_shm_path: Path) -> None:
     """Read gradients should match written gradients."""
-    buffer = SharedGradientTensor(
-        model=model_with_gradients, shm_path=temp_shm_path, create=True
-    )
+    buffer = SharedGradientTensor(model=model_with_gradients, shm_path=temp_shm_path, create=True)
 
     grads = {
-        name: param.grad.clone()
-        for name, param in model_with_gradients.named_parameters()
-        if param.grad is not None
+        name: param.grad.clone() for name, param in model_with_gradients.named_parameters() if param.grad is not None
     }
 
     buffer.write(grads)
     result = buffer.read()
 
+    assert result is not None
     for name, expected_grad in grads.items():
         assert name in result.grads
         assert torch.allclose(result.grads[name], expected_grad)
@@ -276,41 +222,30 @@ def test_read_returns_correct_values(
     buffer.unlink()
 
 
-def test_read_returns_correct_shapes(
-    model_with_gradients: SimpleModel, temp_shm_path: Path
-) -> None:
+def test_read_returns_correct_shapes(model_with_gradients: SimpleModel, temp_shm_path: Path) -> None:
     """Read gradients should have correct shapes."""
-    buffer = SharedGradientTensor(
-        model=model_with_gradients, shm_path=temp_shm_path, create=True
-    )
+    buffer = SharedGradientTensor(model=model_with_gradients, shm_path=temp_shm_path, create=True)
 
     grads = {
-        name: param.grad.clone()
-        for name, param in model_with_gradients.named_parameters()
-        if param.grad is not None
+        name: param.grad.clone() for name, param in model_with_gradients.named_parameters() if param.grad is not None
     }
 
     buffer.write(grads)
     result = buffer.read()
 
+    assert result is not None
     for name, expected_grad in grads.items():
         assert result.grads[name].shape == expected_grad.shape
 
     buffer.unlink()
 
 
-def test_read_clears_ready_flag(
-    model_with_gradients: SimpleModel, temp_shm_path: Path
-) -> None:
+def test_read_clears_ready_flag(model_with_gradients: SimpleModel, temp_shm_path: Path) -> None:
     """After read, ready flag should be cleared."""
-    buffer = SharedGradientTensor(
-        model=model_with_gradients, shm_path=temp_shm_path, create=True
-    )
+    buffer = SharedGradientTensor(model=model_with_gradients, shm_path=temp_shm_path, create=True)
 
     grads = {
-        name: param.grad.clone()
-        for name, param in model_with_gradients.named_parameters()
-        if param.grad is not None
+        name: param.grad.clone() for name, param in model_with_gradients.named_parameters() if param.grad is not None
     }
 
     buffer.write(grads)
@@ -321,13 +256,9 @@ def test_read_clears_ready_flag(
     buffer.unlink()
 
 
-def test_read_returns_none_when_not_ready(
-    simple_model: SimpleModel, temp_shm_path: Path
-) -> None:
+def test_read_returns_none_when_not_ready(simple_model: SimpleModel, temp_shm_path: Path) -> None:
     """Reading when no data written should return None."""
-    buffer = SharedGradientTensor(
-        model=simple_model, shm_path=temp_shm_path, create=True
-    )
+    buffer = SharedGradientTensor(model=simple_model, shm_path=temp_shm_path, create=True)
 
     result = buffer.read()
 
@@ -339,13 +270,9 @@ def test_read_returns_none_when_not_ready(
 # === Seqlock Tests ===
 
 
-def test_read_returns_none_during_write(
-    model_with_gradients: SimpleModel, temp_shm_path: Path
-) -> None:
+def test_read_returns_none_during_write(model_with_gradients: SimpleModel, temp_shm_path: Path) -> None:
     """Reading while seq is odd (write in progress) should return None."""
-    buffer = SharedGradientTensor(
-        model=model_with_gradients, shm_path=temp_shm_path, create=True
-    )
+    buffer = SharedGradientTensor(model=model_with_gradients, shm_path=temp_shm_path, create=True)
 
     # Manually set seq to odd (simulating write in progress)
     buffer._write_seq(1)
@@ -358,18 +285,12 @@ def test_read_returns_none_during_write(
     buffer.unlink()
 
 
-def test_read_detects_concurrent_write(
-    model_with_gradients: SimpleModel, temp_shm_path: Path
-) -> None:
+def test_read_detects_concurrent_write(model_with_gradients: SimpleModel, temp_shm_path: Path) -> None:
     """Seqlock should detect if data changes during read."""
-    buffer = SharedGradientTensor(
-        model=model_with_gradients, shm_path=temp_shm_path, create=True
-    )
+    buffer = SharedGradientTensor(model=model_with_gradients, shm_path=temp_shm_path, create=True)
 
     grads = {
-        name: param.grad.clone()
-        for name, param in model_with_gradients.named_parameters()
-        if param.grad is not None
+        name: param.grad.clone() for name, param in model_with_gradients.named_parameters() if param.grad is not None
     }
     buffer.write(grads)
 
@@ -381,7 +302,23 @@ def test_read_detects_concurrent_write(
     # but before the final seq check
     def mock_read() -> GradientPacket | None:
         # First seq check passes
-        seq1, ready, version, worker_id, timesteps, episodes, loss, q_mean, td_error, avg_reward, avg_speed, entropy, deaths, flags, best_x = buffer._read_slot_header(slot_idx)
+        (
+            seq1,
+            ready,
+            version,
+            worker_id,
+            timesteps,
+            episodes,
+            loss,
+            q_mean,
+            td_error,
+            avg_reward,
+            avg_speed,
+            entropy,
+            deaths,
+            flags,
+            best_x,
+        ) = buffer._read_slot_header(slot_idx)
         if ready != 1 or (seq1 % 2) == 1:
             return None
 
@@ -428,13 +365,9 @@ def test_read_detects_concurrent_write(
 # === Multiple Roundtrip Tests ===
 
 
-def test_multiple_write_read_cycles(
-    simple_model: SimpleModel, temp_shm_path: Path
-) -> None:
+def test_multiple_write_read_cycles(simple_model: SimpleModel, temp_shm_path: Path) -> None:
     """Should handle multiple write/read cycles correctly."""
-    buffer = SharedGradientTensor(
-        model=simple_model, shm_path=temp_shm_path, create=True
-    )
+    buffer = SharedGradientTensor(model=simple_model, shm_path=temp_shm_path, create=True)
 
     for i in range(5):
         # Generate different gradients each time
@@ -443,11 +376,7 @@ def test_multiple_write_read_cycles(
         simple_model.zero_grad()
         loss.backward()
 
-        grads = {
-            name: param.grad.clone()
-            for name, param in simple_model.named_parameters()
-            if param.grad is not None
-        }
+        grads = {name: param.grad.clone() for name, param in simple_model.named_parameters() if param.grad is not None}
 
         buffer.write(grads)
         result = buffer.read()
@@ -462,27 +391,19 @@ def test_multiple_write_read_cycles(
 # === Cross-Instance Tests ===
 
 
-def test_writer_reader_separate_instances(
-    model_with_gradients: SimpleModel, temp_shm_path: Path
-) -> None:
+def test_writer_reader_separate_instances(model_with_gradients: SimpleModel, temp_shm_path: Path) -> None:
     """Writer and reader as separate instances should work."""
     # Writer creates buffer
-    writer = SharedGradientTensor(
-        model=model_with_gradients, shm_path=temp_shm_path, create=True
-    )
+    writer = SharedGradientTensor(model=model_with_gradients, shm_path=temp_shm_path, create=True)
 
     grads = {
-        name: param.grad.clone()
-        for name, param in model_with_gradients.named_parameters()
-        if param.grad is not None
+        name: param.grad.clone() for name, param in model_with_gradients.named_parameters() if param.grad is not None
     }
     writer.write(grads)
     writer.close()  # Close but don't unlink
 
     # Reader attaches to existing buffer
-    reader = SharedGradientTensor(
-        model=model_with_gradients, shm_path=temp_shm_path, create=False
-    )
+    reader = SharedGradientTensor(model=model_with_gradients, shm_path=temp_shm_path, create=False)
 
     result = reader.read()
 
@@ -505,18 +426,12 @@ def test_write_gpu_gradients(temp_shm_path: Path) -> None:
     loss = model(x).sum()
     loss.backward()
 
-    buffer = SharedGradientTensor(
-        model=model, shm_path=temp_shm_path, create=True
-    )
+    buffer = SharedGradientTensor(model=model, shm_path=temp_shm_path, create=True)
 
-    grads = {
-        name: param.grad.clone()
-        for name, param in model.named_parameters()
-        if param.grad is not None
-    }
+    grads = {name: param.grad.clone() for name, param in model.named_parameters() if param.grad is not None}
 
-    result = buffer.write(grads)
-    assert result is True
+    write_result = buffer.write(grads)
+    assert write_result is True
 
     result = buffer.read()
     assert result is not None
@@ -533,27 +448,19 @@ def test_write_gpu_gradients(temp_shm_path: Path) -> None:
 # === Ring Buffer Tests ===
 
 
-def test_ring_buffer_multiple_writes_before_read(
-    simple_model: SimpleModel, temp_shm_path: Path
-) -> None:
+def test_ring_buffer_multiple_writes_before_read(simple_model: SimpleModel, temp_shm_path: Path) -> None:
     """Should be able to write multiple times before reading."""
     num_slots = 4
-    buffer = SharedGradientTensor(
-        model=simple_model, shm_path=temp_shm_path, create=True, num_slots=num_slots
-    )
+    buffer = SharedGradientTensor(model=simple_model, shm_path=temp_shm_path, create=True, num_slots=num_slots)
 
     all_grads = []
-    for i in range(3):  # Write 3 times
+    for _ in range(3):  # Write 3 times
         x = torch.randn(4, 10)
         loss = simple_model(x).sum()
         simple_model.zero_grad()
         loss.backward()
 
-        grads = {
-            name: param.grad.clone()
-            for name, param in simple_model.named_parameters()
-            if param.grad is not None
-        }
+        grads = {name: param.grad.clone() for name, param in simple_model.named_parameters() if param.grad is not None}
         all_grads.append(grads)
         buffer.write(grads)
 
@@ -567,27 +474,19 @@ def test_ring_buffer_multiple_writes_before_read(
     buffer.unlink()
 
 
-def test_ring_buffer_wraps_around(
-    simple_model: SimpleModel, temp_shm_path: Path
-) -> None:
+def test_ring_buffer_wraps_around(simple_model: SimpleModel, temp_shm_path: Path) -> None:
     """Ring buffer should wrap around when full."""
     num_slots = 2
-    buffer = SharedGradientTensor(
-        model=simple_model, shm_path=temp_shm_path, create=True, num_slots=num_slots
-    )
+    buffer = SharedGradientTensor(model=simple_model, shm_path=temp_shm_path, create=True, num_slots=num_slots)
 
     # Write 4 times (wraps around with 2 slots)
-    for i in range(4):
+    for _ in range(4):
         x = torch.randn(4, 10)
         loss = simple_model(x).sum()
         simple_model.zero_grad()
         loss.backward()
 
-        grads = {
-            name: param.grad.clone()
-            for name, param in simple_model.named_parameters()
-            if param.grad is not None
-        }
+        grads = {name: param.grad.clone() for name, param in simple_model.named_parameters() if param.grad is not None}
         buffer.write(grads)
 
         # Read immediately to free slot
@@ -597,28 +496,20 @@ def test_ring_buffer_wraps_around(
     buffer.unlink()
 
 
-def test_ring_buffer_read_latest(
-    simple_model: SimpleModel, temp_shm_path: Path
-) -> None:
+def test_ring_buffer_read_latest(simple_model: SimpleModel, temp_shm_path: Path) -> None:
     """read_latest should skip old data and return newest."""
     num_slots = 4
-    buffer = SharedGradientTensor(
-        model=simple_model, shm_path=temp_shm_path, create=True, num_slots=num_slots
-    )
+    buffer = SharedGradientTensor(model=simple_model, shm_path=temp_shm_path, create=True, num_slots=num_slots)
 
     # Write 3 times without reading
     last_grads = None
-    for i in range(3):
+    for _ in range(3):
         x = torch.randn(4, 10)
         loss = simple_model(x).sum()
         simple_model.zero_grad()
         loss.backward()
 
-        grads = {
-            name: param.grad.clone()
-            for name, param in simple_model.named_parameters()
-            if param.grad is not None
-        }
+        grads = {name: param.grad.clone() for name, param in simple_model.named_parameters() if param.grad is not None}
         last_grads = grads
         buffer.write(grads)
 
@@ -635,29 +526,21 @@ def test_ring_buffer_read_latest(
     buffer.unlink()
 
 
-def test_ring_buffer_count_ready(
-    simple_model: SimpleModel, temp_shm_path: Path
-) -> None:
+def test_ring_buffer_count_ready(simple_model: SimpleModel, temp_shm_path: Path) -> None:
     """count_ready should return number of slots with data."""
     num_slots = 4
-    buffer = SharedGradientTensor(
-        model=simple_model, shm_path=temp_shm_path, create=True, num_slots=num_slots
-    )
+    buffer = SharedGradientTensor(model=simple_model, shm_path=temp_shm_path, create=True, num_slots=num_slots)
 
     assert buffer.count_ready() == 0
 
     # Write 2 times
-    for i in range(2):
+    for _ in range(2):
         x = torch.randn(4, 10)
         loss = simple_model(x).sum()
         simple_model.zero_grad()
         loss.backward()
 
-        grads = {
-            name: param.grad.clone()
-            for name, param in simple_model.named_parameters()
-            if param.grad is not None
-        }
+        grads = {name: param.grad.clone() for name, param in simple_model.named_parameters() if param.grad is not None}
         buffer.write(grads)
 
     assert buffer.count_ready() == 2

@@ -9,18 +9,15 @@ These tests verify the TrainingWorker correctly:
 """
 
 from typing import Any
-from dataclasses import dataclass
-from dataclasses import field
 from pathlib import Path
-from unittest.mock import Mock
-from unittest.mock import MagicMock
+from dataclasses import field
+from dataclasses import dataclass
 
+import torch
 import pytest
 import numpy as np
-import torch
-from torch import Tensor
 from torch import nn
-
+from torch import Tensor
 
 # =============================================================================
 # Mock Environment

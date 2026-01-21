@@ -7,7 +7,7 @@ from unittest.mock import Mock
 
 import pytest
 
-from mario_rl.metrics.schema import MetricType, MetricDef, DDQNMetrics
+from mario_rl.metrics.schema import DDQNMetrics
 from mario_rl.metrics.logger import MetricLogger
 
 
@@ -121,16 +121,16 @@ def test_rolling_respects_window_size(tmp_csv: Path) -> None:
         schema=DDQNMetrics,
         csv_path=tmp_csv,
     )
-    
+
     # The default window is 100, add more than that
     # First, add 100 values of 100.0
     for _ in range(100):
         logger.observe("reward", 100.0)
-    
+
     # Then add 100 more values of 200.0 (these should push out the old ones)
     for _ in range(100):
         logger.observe("reward", 200.0)
-    
+
     snap = logger.snapshot()
     # Window should only keep last 100 values (all 200s)
     assert snap["reward"] == 200.0
@@ -184,7 +184,7 @@ def test_flush_writes_data_row(logger: MetricLogger, tmp_csv: Path) -> None:
     logger.gauge("epsilon", 0.5)
     logger.observe("reward", 100.0)
     logger.flush()
-    
+
     with open(tmp_csv) as f:
         reader = csv.DictReader(f)
         row = next(reader)
@@ -197,10 +197,10 @@ def test_multiple_flushes_append_rows(logger: MetricLogger, tmp_csv: Path) -> No
     """Multiple flush() calls append rows."""
     logger.count("episodes")
     logger.flush()
-    
+
     logger.count("episodes")
     logger.flush()
-    
+
     with open(tmp_csv) as f:
         reader = csv.DictReader(f)
         rows = list(reader)
@@ -223,10 +223,10 @@ def test_flush_publishes_when_publisher_provided(tmp_csv: Path) -> None:
         csv_path=tmp_csv,
         publisher=mock_pub,
     )
-    
+
     logger.count("episodes")
     logger.flush()
-    
+
     mock_pub.publish.assert_called_once()
     call_args = mock_pub.publish.call_args
     assert call_args[0][0] == "metrics"  # msg_type
@@ -251,7 +251,7 @@ def test_close_flushes_file(logger: MetricLogger, tmp_csv: Path) -> None:
     logger.count("episodes")
     logger.flush()
     logger.close()
-    
+
     # File should be readable
     with open(tmp_csv) as f:
         content = f.read()

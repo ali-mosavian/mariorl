@@ -6,11 +6,9 @@ of the state machine before implementation details are finalized.
 
 from __future__ import annotations
 
-import pytest
-
+from mario_rl.training.snapshot_state_machine import SnapshotState
 from mario_rl.training.snapshot_state_machine import SnapshotAction
 from mario_rl.training.snapshot_state_machine import SnapshotContext
-from mario_rl.training.snapshot_state_machine import SnapshotState
 from mario_rl.training.snapshot_state_machine import SnapshotStateMachine
 
 

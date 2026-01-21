@@ -2,18 +2,14 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-from dataclasses import field
-from pathlib import Path
 from typing import Any
-from unittest.mock import MagicMock
-from unittest.mock import patch
+from dataclasses import field
+from dataclasses import dataclass
 
-import numpy as np
 import pytest
+import numpy as np
 
 from mario_rl.training.snapshot_handler import SnapshotHandler
-from mario_rl.training.snapshot_handler import SnapshotResult
 from mario_rl.training.snapshot_state_machine import SnapshotAction
 from mario_rl.training.snapshot_state_machine import SnapshotStateMachine
 
@@ -48,9 +44,7 @@ class MockSnapshotManager:
             self._slot_to_state[slot] = state
         return self.save_succeeds
 
-    def try_restore(
-        self, info: dict, current_best_x: int
-    ) -> tuple[np.ndarray, bool]:
+    def try_restore(self, info: dict, current_best_x: int) -> tuple[np.ndarray, bool]:
         """Mock restore operation."""
         self.restore_calls.append({"info": info, "best_x": current_best_x})
         if self.restore_succeeds and self.restore_observation is not None:
@@ -77,9 +71,7 @@ def state_machine() -> SnapshotStateMachine:
 
 
 @pytest.fixture
-def handler(
-    state_machine: SnapshotStateMachine, mock_manager: MockSnapshotManager
-) -> SnapshotHandler:
+def handler(state_machine: SnapshotStateMachine, mock_manager: MockSnapshotManager) -> SnapshotHandler:
     """Create a snapshot handler with mocks."""
     return SnapshotHandler(
         state_machine=state_machine,
@@ -90,9 +82,7 @@ def handler(
 class TestSnapshotHandlerBasic:
     """Basic handler tests."""
 
-    def test_no_action_during_normal_play(
-        self, handler: SnapshotHandler
-    ) -> None:
+    def test_no_action_during_normal_play(self, handler: SnapshotHandler) -> None:
         """Handler should return NONE action during normal gameplay."""
         obs = np.zeros((4, 64, 64), dtype=np.float32)
         info = {"x_pos": 100, "time": 100, "world": 1, "stage": 1}
@@ -116,9 +106,7 @@ class TestSnapshotHandlerBasic:
         handler.process_step(obs, {"x_pos": 150, "time": 0}, done=False)
         assert handler._best_x == 200  # Should not decrease
 
-    def test_reset_episode(
-        self, handler: SnapshotHandler, mock_manager: MockSnapshotManager
-    ) -> None:
+    def test_reset_episode(self, handler: SnapshotHandler, mock_manager: MockSnapshotManager) -> None:
         """reset_episode should reset all state."""
         obs = np.zeros((4, 64, 64), dtype=np.float32)
         handler._best_x = 500
@@ -133,22 +121,16 @@ class TestSnapshotHandlerBasic:
 class TestCheckpointTriggering:
     """Tests for checkpoint (time-based) snapshot triggering."""
 
-    def test_checkpoint_triggers_save(
-        self, handler: SnapshotHandler, mock_manager: MockSnapshotManager
-    ) -> None:
+    def test_checkpoint_triggers_save(self, handler: SnapshotHandler, mock_manager: MockSnapshotManager) -> None:
         """Should save when checkpoint interval is reached."""
         obs = np.zeros((4, 64, 64), dtype=np.float32)
 
         # First step - no checkpoint yet
-        result = handler.process_step(
-            obs, {"x_pos": 100, "time": 100}, done=False
-        )
+        result = handler.process_step(obs, {"x_pos": 100, "time": 100}, done=False)
         assert result.action_taken == SnapshotAction.NONE
 
         # Time reaches checkpoint interval (500)
-        result = handler.process_step(
-            obs, {"x_pos": 200, "time": 500}, done=False
-        )
+        result = handler.process_step(obs, {"x_pos": 200, "time": 500}, done=False)
         assert result.action_taken == SnapshotAction.SAVE_SNAPSHOT
         assert len(mock_manager.save_calls) == 1
 
@@ -173,9 +155,7 @@ class TestDeathAndRestore:
         # The exact flow depends on state machine, but should end episode
         assert result.episode_ended is True or result.action_taken == SnapshotAction.END_EPISODE
 
-    def test_death_with_snapshot_restores(
-        self, handler: SnapshotHandler, mock_manager: MockSnapshotManager
-    ) -> None:
+    def test_death_with_snapshot_restores(self, handler: SnapshotHandler, mock_manager: MockSnapshotManager) -> None:
         """Death with available snapshot should restore."""
         obs = np.zeros((4, 64, 64), dtype=np.float32)
         restored_obs = np.ones((4, 64, 64), dtype=np.float32)
@@ -201,9 +181,7 @@ class TestDeathAndRestore:
             assert result.observation is not None
             np.testing.assert_array_equal(result.observation, restored_obs)
 
-    def test_repeated_deaths_lead_to_give_up(
-        self, handler: SnapshotHandler, mock_manager: MockSnapshotManager
-    ) -> None:
+    def test_repeated_deaths_lead_to_give_up(self, handler: SnapshotHandler, mock_manager: MockSnapshotManager) -> None:
         """Repeated deaths without progress should give up."""
         obs = np.zeros((4, 64, 64), dtype=np.float32)
         mock_manager._slot_to_state[0] = obs
@@ -232,9 +210,7 @@ class TestDeathAndRestore:
 class TestHotspotIntegration:
     """Tests for death hotspot integration."""
 
-    def test_hotspots_affect_snapshot_positions(
-        self, mock_manager: MockSnapshotManager
-    ) -> None:
+    def test_hotspots_affect_snapshot_positions(self, mock_manager: MockSnapshotManager) -> None:
         """Hotspots should trigger saves before dangerous areas."""
         # Create handler with hotspots
         state_machine = SnapshotStateMachine(
@@ -249,6 +225,7 @@ class TestHotspotIntegration:
 
         # Manually set hotspots (bypass file loading)
         from mario_rl.metrics.levels import DeathHotspotAggregate
+
         hotspots = DeathHotspotAggregate()
         hotspots.record_deaths_batch("1-1", [500, 510, 520, 530, 540])
         handler._hotspots = hotspots
@@ -257,21 +234,18 @@ class TestHotspotIntegration:
         obs = np.zeros((4, 64, 64), dtype=np.float32)
 
         # Approach hotspot zone (500 - 100 = 400)
-        result = handler.process_step(
-            obs, {"x_pos": 410, "time": 10, "world": 1, "stage": 1}, done=False
-        )
+        result = handler.process_step(obs, {"x_pos": 410, "time": 10, "world": 1, "stage": 1}, done=False)
 
         # Should be approaching
         from mario_rl.training.snapshot_state_machine import SnapshotState
+
         assert handler.state_machine.state in (
             SnapshotState.APPROACHING_HOTSPOT,
             SnapshotState.RUNNING,
         )
 
         # Reach save position (500 - 50 = 450)
-        result = handler.process_step(
-            obs, {"x_pos": 450, "time": 20, "world": 1, "stage": 1}, done=False
-        )
+        result = handler.process_step(obs, {"x_pos": 450, "time": 20, "world": 1, "stage": 1}, done=False)
 
         # Should save
         assert result.action_taken == SnapshotAction.SAVE_SNAPSHOT
@@ -280,9 +254,7 @@ class TestHotspotIntegration:
 class TestFlagGet:
     """Tests for level completion (flag get)."""
 
-    def test_flag_get_not_treated_as_death(
-        self, handler: SnapshotHandler
-    ) -> None:
+    def test_flag_get_not_treated_as_death(self, handler: SnapshotHandler) -> None:
         """Completing level should not trigger death handling."""
         obs = np.zeros((4, 64, 64), dtype=np.float32)
 

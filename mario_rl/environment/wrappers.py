@@ -201,9 +201,9 @@ class RAMObservationWrapper(gym.ObservationWrapper):
         unwrapped = self.env.unwrapped
         # Handle SuperMarioBrosMultiLevel which wraps the actual NES env
         if hasattr(unwrapped, "env") and hasattr(unwrapped.env, "ram"):
-            return unwrapped.env.ram.copy()
+            return unwrapped.env.ram.copy()  # type: ignore[attr-defined]
         # Direct NESEnv case
-        return unwrapped.ram.copy()
+        return unwrapped.ram.copy()  # type: ignore[attr-defined]
 
 
 class ActionHistoryWrapper(gym.Wrapper):

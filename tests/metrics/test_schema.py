@@ -2,15 +2,12 @@
 
 import pytest
 
-from mario_rl.metrics.schema import (
-    MetricType,
-    MetricDef,
-    CommonMetrics,
-    DDQNMetrics,
-    DreamerMetrics,
-    CoordinatorMetrics,
-)
-
+from mario_rl.metrics.schema import MetricDef
+from mario_rl.metrics.schema import MetricType
+from mario_rl.metrics.schema import DDQNMetrics
+from mario_rl.metrics.schema import CommonMetrics
+from mario_rl.metrics.schema import DreamerMetrics
+from mario_rl.metrics.schema import CoordinatorMetrics
 
 # =============================================================================
 # MetricType Tests
@@ -65,7 +62,7 @@ def test_metric_def_is_frozen() -> None:
     """MetricDef is immutable (frozen dataclass)."""
     defn = MetricDef("test_metric", MetricType.COUNTER)
     with pytest.raises(AttributeError):
-        defn.name = "changed"
+        defn.name = "changed"  # type: ignore[misc]
 
 
 # =============================================================================
@@ -129,7 +126,7 @@ def test_common_metrics_has_deaths() -> None:
 
 def test_common_metrics_has_timeouts() -> None:
     """CommonMetrics defines timeouts counter.
-    
+
     Timeouts are distinct from deaths - they represent
     running out of game time rather than skill-based deaths.
     """
@@ -145,7 +142,7 @@ def test_common_metrics_has_flags() -> None:
 
 def test_common_metrics_definitions_includes_episode_end_metrics() -> None:
     """CommonMetrics.definitions() includes all episode end metrics.
-    
+
     Episodes can end in three ways: death, timeout, or flag.
     All three should be tracked separately.
     """

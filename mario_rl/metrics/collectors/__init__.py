@@ -16,18 +16,16 @@ Coordinator-side collectors (CoordinatorCollector protocol):
 - CoordinatorComposite: Combines coordinator collectors
 """
 
+from mario_rl.metrics.collectors.ddqn import DDQNCollector
+from mario_rl.metrics.collectors.mario import MarioCollector
+from mario_rl.metrics.collectors.system import SystemCollector
+from mario_rl.metrics.collectors.dreamer import DreamerCollector
 from mario_rl.metrics.collectors.protocol import MetricCollector
 from mario_rl.metrics.collectors.composite import CompositeCollector
-from mario_rl.metrics.collectors.mario import MarioCollector
-from mario_rl.metrics.collectors.ddqn import DDQNCollector
-from mario_rl.metrics.collectors.dreamer import DreamerCollector
-from mario_rl.metrics.collectors.system import SystemCollector
-from mario_rl.metrics.collectors.coordinator import (
-    CoordinatorCollector,
-    GradientCollector,
-    AggregatorCollector,
-    CoordinatorComposite,
-)
+from mario_rl.metrics.collectors.coordinator import GradientCollector
+from mario_rl.metrics.collectors.coordinator import AggregatorCollector
+from mario_rl.metrics.collectors.coordinator import CoordinatorCollector
+from mario_rl.metrics.collectors.coordinator import CoordinatorComposite
 
 __all__ = [
     # Worker-side

@@ -7,18 +7,22 @@ These tests verify the Coordinator correctly:
 - Supports target network updates
 """
 
+from __future__ import annotations
+
 from typing import Any
-from dataclasses import dataclass
 from dataclasses import field
+from typing import TYPE_CHECKING
+from dataclasses import dataclass
 
-import pytest
 import torch
-from torch import Tensor
+import pytest
 from torch import nn
+from torch import Tensor
 
-from mario_rl.models import Model
 from mario_rl.learners import Learner
 
+if TYPE_CHECKING:
+    from mario_rl.distributed.training_coordinator import TrainingCoordinator as Coordinator
 
 # =============================================================================
 # Mock Implementations
@@ -108,7 +112,7 @@ def mock_learner(mock_model: MockModel) -> MockLearner:
 @pytest.fixture
 def coordinator(mock_learner: MockLearner) -> "Coordinator":
     """Create a Coordinator for testing."""
-    from mario_rl.distributed.coordinator import Coordinator
+    from mario_rl.distributed.training_coordinator import TrainingCoordinator as Coordinator
 
     return Coordinator(learner=mock_learner, lr=0.001)
 
@@ -116,10 +120,7 @@ def coordinator(mock_learner: MockLearner) -> "Coordinator":
 @pytest.fixture
 def sample_gradients(mock_model: MockModel) -> dict[str, Tensor]:
     """Create sample gradients matching model structure."""
-    return {
-        name: torch.randn_like(param)
-        for name, param in mock_model.named_parameters()
-    }
+    return {name: torch.randn_like(param) for name, param in mock_model.named_parameters()}
 
 
 # =============================================================================
@@ -129,7 +130,7 @@ def sample_gradients(mock_model: MockModel) -> dict[str, Tensor]:
 
 def test_coordinator_accepts_any_learner(mock_learner: MockLearner) -> None:
     """Coordinator should accept any Learner that implements the protocol."""
-    from mario_rl.distributed.coordinator import Coordinator
+    from mario_rl.distributed.training_coordinator import TrainingCoordinator as Coordinator
 
     assert isinstance(mock_learner, Learner)
     coordinator = Coordinator(learner=mock_learner, lr=0.001)
@@ -162,10 +163,7 @@ def test_aggregate_single_gradient(coordinator: "Coordinator", sample_gradients:
 def test_aggregate_multiple_gradients(coordinator: "Coordinator", mock_model: MockModel) -> None:
     """Aggregating multiple gradients should compute mean."""
     # Create 4 different gradient sets
-    grad_sets = [
-        {name: torch.randn_like(param) for name, param in mock_model.named_parameters()}
-        for _ in range(4)
-    ]
+    grad_sets = [{name: torch.randn_like(param) for name, param in mock_model.named_parameters()} for _ in range(4)]
 
     aggregated = coordinator.aggregate_gradients(grad_sets)
 
@@ -188,9 +186,7 @@ def test_aggregate_empty_list_raises(coordinator: "Coordinator") -> None:
 
 def test_apply_gradients_updates_weights(coordinator: "Coordinator", sample_gradients: dict[str, Tensor]) -> None:
     """apply_gradients should update model weights."""
-    original_weights = {
-        name: param.clone() for name, param in coordinator.model.named_parameters()
-    }
+    original_weights = {name: param.clone() for name, param in coordinator.model.named_parameters()}
 
     coordinator.apply_gradients(sample_gradients)
 
@@ -233,7 +229,7 @@ def test_weights_are_detached(coordinator: "Coordinator") -> None:
     """weights should return detached tensors."""
     weights = coordinator.weights()
 
-    for name, tensor in weights.items():
+    for _, tensor in weights.items():
         assert not tensor.requires_grad
 
 
@@ -266,10 +262,7 @@ def test_update_targets_with_different_tau(coordinator: "Coordinator") -> None:
 def test_training_step_integrates_all_operations(coordinator: "Coordinator", mock_model: MockModel) -> None:
     """A full training step should aggregate, apply, and return new weights."""
     # Create gradient sets from multiple workers
-    grad_sets = [
-        {name: torch.randn_like(param) for name, param in mock_model.named_parameters()}
-        for _ in range(4)
-    ]
+    grad_sets = [{name: torch.randn_like(param) for name, param in mock_model.named_parameters()} for _ in range(4)]
 
     original_weights = coordinator.weights()
 
@@ -298,9 +291,9 @@ def test_training_step_returns_weights(coordinator: "Coordinator", sample_gradie
 
 def test_coordinator_with_ddqn() -> None:
     """Coordinator should work with DoubleDQN model."""
-    from mario_rl.distributed.coordinator import Coordinator
     from mario_rl.models import DoubleDQN
     from mario_rl.learners import DDQNLearner
+    from mario_rl.distributed.training_coordinator import TrainingCoordinator as Coordinator
 
     model = DoubleDQN(
         input_shape=(4, 64, 64),
@@ -320,9 +313,9 @@ def test_coordinator_with_ddqn() -> None:
 
 def test_coordinator_with_dreamer() -> None:
     """Coordinator should work with DreamerModel."""
-    from mario_rl.distributed.coordinator import Coordinator
     from mario_rl.models import DreamerModel
     from mario_rl.learners import DreamerLearner
+    from mario_rl.distributed.training_coordinator import TrainingCoordinator as Coordinator
 
     model = DreamerModel(
         input_shape=(4, 64, 64),

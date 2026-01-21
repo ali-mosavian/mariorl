@@ -8,16 +8,13 @@ These tests verify the EnvRunner correctly:
 """
 
 from typing import Any
-from dataclasses import dataclass
-from dataclasses import field
 from unittest.mock import Mock
-from unittest.mock import MagicMock
+from dataclasses import dataclass
 
 import pytest
 import numpy as np
 
 from mario_rl.core.types import Transition
-
 
 # =============================================================================
 # Mock Environment
@@ -249,6 +246,7 @@ def test_reward_clipping(mock_env: MockEnv, action_fn: Mock) -> None:
 
     # Mock environment to return extreme rewards
     original_step = mock_env.step
+
     def extreme_reward_step(action):
         obs, _, term, trunc, info = original_step(action)
         return obs, 100.0, term, trunc, info  # Extreme reward

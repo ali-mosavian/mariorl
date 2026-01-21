@@ -8,17 +8,15 @@ These tests verify the Worker correctly:
 """
 
 from typing import Any
-from dataclasses import dataclass
 from dataclasses import field
+from dataclasses import dataclass
 
-import pytest
 import torch
-from torch import Tensor
+import pytest
 from torch import nn
+from torch import Tensor
 
-from mario_rl.models import Model
 from mario_rl.learners import Learner
-
 
 # =============================================================================
 # Mock Implementations for Protocol Testing
@@ -170,7 +168,7 @@ def test_gradients_match_parameter_names(worker, sample_batch: dict[str, Tensor]
     """Gradient dict keys should match model parameter names."""
     grads, _ = worker.compute_gradients(**sample_batch)
 
-    param_names = set(name for name, _ in worker.model.named_parameters())
+    param_names = {name for name, _ in worker.model.named_parameters()}
     grad_names = set(grads.keys())
 
     assert grad_names == param_names
@@ -208,9 +206,7 @@ def test_gradients_are_detached(worker, sample_batch: dict[str, Tensor]) -> None
 def test_apply_weights_updates_model(worker) -> None:
     """apply_weights should update model parameters."""
     # Save original weights
-    original_weights = {
-        name: param.clone() for name, param in worker.model.named_parameters()
-    }
+    original_weights = {name: param.clone() for name, param in worker.model.named_parameters()}
 
     # Create new weights
     new_weights = {name: param + 1.0 for name, param in original_weights.items()}
@@ -266,9 +262,9 @@ def test_weights_roundtrip(worker) -> None:
 
 def test_worker_with_ddqn() -> None:
     """Worker should work with DoubleDQN model."""
-    from mario_rl.distributed.worker import Worker
     from mario_rl.models import DoubleDQN
     from mario_rl.learners import DDQNLearner
+    from mario_rl.distributed.worker import Worker
 
     model = DoubleDQN(
         input_shape=(4, 64, 64),
@@ -294,9 +290,9 @@ def test_worker_with_ddqn() -> None:
 
 def test_worker_with_dreamer() -> None:
     """Worker should work with DreamerModel."""
-    from mario_rl.distributed.worker import Worker
     from mario_rl.models import DreamerModel
     from mario_rl.learners import DreamerLearner
+    from mario_rl.distributed.worker import Worker
 
     model = DreamerModel(
         input_shape=(4, 64, 64),

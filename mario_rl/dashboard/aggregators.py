@@ -8,7 +8,6 @@ from dataclasses import dataclass
 import duckdb
 import pandas as pd
 
-from mario_rl.dashboard.query import get_metrics_dir
 from mario_rl.dashboard.query import query_workers
 
 # Max valid x position in Super Mario Bros (levels are ~3000-3500 px long)
@@ -126,7 +125,7 @@ def aggregate_level_stats_direct(checkpoint_dir: str) -> dict[str, LevelStats]:
             checkpoint_dir,
             f"""
             WITH per_worker AS (
-                SELECT 
+                SELECT
                     {level_expr} AS level,
                     worker_id,
                     COUNT(*) AS episodes,
@@ -143,7 +142,7 @@ def aggregate_level_stats_direct(checkpoint_dir: str) -> dict[str, LevelStats]:
                 WHERE {level_expr} IS NOT NULL AND {level_expr} != '?'
                 GROUP BY level, worker_id
             )
-            SELECT 
+            SELECT
                 level,
                 SUM(episodes) AS episodes,
                 SUM(max_deaths) AS deaths,
@@ -203,13 +202,13 @@ def aggregate_action_distribution_direct(
             checkpoint_dir,
             f"""
             WITH ranked AS (
-                SELECT 
+                SELECT
                     {level_expr} AS level,
                     steps,
                     action_dist,
                     NTILE({max_points_per_level}) OVER (PARTITION BY {level_expr} ORDER BY steps) as bucket
                 FROM workers
-                WHERE action_dist IS NOT NULL 
+                WHERE action_dist IS NOT NULL
                   AND action_dist != ''
                   AND {level_expr} IS NOT NULL
                   AND {level_expr} != '?'
@@ -234,7 +233,7 @@ def aggregate_action_distribution_direct(
     steps_arr = result["steps"].values
     dists = result["action_dist"].values
 
-    for level, steps, dist_str in zip(levels, steps_arr, dists):
+    for level, steps, dist_str in zip(levels, steps_arr, dists, strict=False):
         level = str(level)
         if dist_str and isinstance(dist_str, str):
             try:
@@ -243,9 +242,7 @@ def aggregate_action_distribution_direct(
                 if len(pcts) == 7 or len(pcts) == 12:
                     if level not in action_data:
                         action_data[level] = []
-                    action_data[level].append(
-                        ActionDistPoint(steps=int(steps), percentages=pcts)
-                    )
+                    action_data[level].append(ActionDistPoint(steps=int(steps), percentages=pcts))
             except (ValueError, TypeError):
                 pass
 
@@ -276,7 +273,7 @@ def aggregate_rate_data_direct(
             checkpoint_dir,
             f"""
             WITH bucketed AS (
-                SELECT 
+                SELECT
                     {level_expr} AS level,
                     worker_id,
                     (steps // {step_bucket_size}) * {step_bucket_size} AS step_bucket,
@@ -289,19 +286,19 @@ def aggregate_rate_data_direct(
                 WHERE {level_expr} IS NOT NULL AND {level_expr} != '?'
             ),
             latest_per_worker AS (
-                SELECT 
-                    level, 
+                SELECT
+                    level,
                     worker_id,
-                    step_bucket, 
-                    deaths, 
-                    flags, 
-                    episodes, 
+                    step_bucket,
+                    deaths,
+                    flags,
+                    episodes,
                     timeouts
                 FROM bucketed
                 WHERE rn = 1
             ),
             with_deltas AS (
-                SELECT 
+                SELECT
                     level,
                     worker_id,
                     step_bucket,
@@ -311,7 +308,7 @@ def aggregate_rate_data_direct(
                     timeouts - COALESCE(LAG(timeouts) OVER (PARTITION BY worker_id, level ORDER BY step_bucket), 0) AS delta_timeouts
                 FROM latest_per_worker
             )
-            SELECT 
+            SELECT
                 level,
                 step_bucket,
                 SUM(CASE WHEN delta_deaths > 0 THEN delta_deaths ELSE 0 END) AS total_deaths,
@@ -334,7 +331,7 @@ def aggregate_rate_data_direct(
     episodes = result["total_episodes"].values
     timeouts = result["total_timeouts"].values
 
-    for level, bucket, d, f, e, t in zip(levels, buckets, deaths, flags, episodes, timeouts):
+    for level, bucket, d, f, e, t in zip(levels, buckets, deaths, flags, episodes, timeouts, strict=False):
         level = str(level)
         if level not in rate_data:
             rate_data[level] = []
@@ -366,28 +363,28 @@ def aggregate_death_hotspots_direct(checkpoint_dir: str) -> dict[str, dict[int, 
             checkpoint_dir,
             f"""
             WITH parsed AS (
-                SELECT 
+                SELECT
                     split_part(CAST(death_positions AS VARCHAR), ':', 1) AS level,
                     split_part(CAST(death_positions AS VARCHAR), ':', 2) AS positions_str
                 FROM workers
-                WHERE death_positions IS NOT NULL 
+                WHERE death_positions IS NOT NULL
                   AND CAST(death_positions AS VARCHAR) != ''
                   AND CAST(death_positions AS VARCHAR) LIKE '%:%'
             ),
             exploded AS (
-                SELECT 
+                SELECT
                     level,
                     CAST(TRIM(unnest(string_split(positions_str, ','))) AS INTEGER) AS pos
                 FROM parsed
                 WHERE positions_str IS NOT NULL AND positions_str != ''
             )
-            SELECT 
+            SELECT
                 level,
                 (pos // 25) * 25 AS bucket,
                 COUNT(*) AS count
             FROM exploded
-            WHERE pos IS NOT NULL 
-              AND pos > 0 
+            WHERE pos IS NOT NULL
+              AND pos > 0
               AND pos <= {MAX_VALID_X_POS}
             GROUP BY level, bucket
             ORDER BY level, bucket
@@ -401,7 +398,7 @@ def aggregate_death_hotspots_direct(checkpoint_dir: str) -> dict[str, dict[int, 
     buckets = result["bucket"].values
     counts = result["count"].values
 
-    for level, bucket, count in zip(levels, buckets, counts):
+    for level, bucket, count in zip(levels, buckets, counts, strict=False):
         level = str(level)
         if level not in hotspots:
             hotspots[level] = {}
@@ -425,28 +422,28 @@ def aggregate_timeout_hotspots_direct(checkpoint_dir: str) -> dict[str, dict[int
             checkpoint_dir,
             f"""
             WITH parsed AS (
-                SELECT 
+                SELECT
                     split_part(CAST(timeout_positions AS VARCHAR), ':', 1) AS level,
                     split_part(CAST(timeout_positions AS VARCHAR), ':', 2) AS positions_str
                 FROM workers
-                WHERE timeout_positions IS NOT NULL 
+                WHERE timeout_positions IS NOT NULL
                   AND CAST(timeout_positions AS VARCHAR) != ''
                   AND CAST(timeout_positions AS VARCHAR) LIKE '%:%'
             ),
             exploded AS (
-                SELECT 
+                SELECT
                     level,
                     CAST(TRIM(unnest(string_split(positions_str, ','))) AS INTEGER) AS pos
                 FROM parsed
                 WHERE positions_str IS NOT NULL AND positions_str != ''
             )
-            SELECT 
+            SELECT
                 level,
                 (pos // 25) * 25 AS bucket,
                 COUNT(*) AS count
             FROM exploded
-            WHERE pos IS NOT NULL 
-              AND pos > 0 
+            WHERE pos IS NOT NULL
+              AND pos > 0
               AND pos <= {MAX_VALID_X_POS}
             GROUP BY level, bucket
             ORDER BY level, bucket
@@ -460,7 +457,7 @@ def aggregate_timeout_hotspots_direct(checkpoint_dir: str) -> dict[str, dict[int
     buckets = result["bucket"].values
     counts = result["count"].values
 
-    for level, bucket, count in zip(levels, buckets, counts):
+    for level, bucket, count in zip(levels, buckets, counts, strict=False):
         level = str(level)
         if level not in hotspots:
             hotspots[level] = {}
@@ -475,12 +472,12 @@ def aggregate_death_distribution_direct(
     pos_bucket_size: int = 100,
 ) -> dict[str, list[DeathDistPoint]]:
     """Aggregate death position distribution over time directly from files.
-    
+
     Args:
         checkpoint_dir: Path to checkpoint directory.
         step_bucket_size: Size of time buckets in steps.
         pos_bucket_size: Size of position buckets in pixels.
-    
+
     Returns:
         Dict mapping level to list of DeathDistPoint (sorted by steps).
     """
@@ -497,31 +494,31 @@ def aggregate_death_distribution_direct(
             checkpoint_dir,
             f"""
             WITH parsed AS (
-                SELECT 
+                SELECT
                     split_part(CAST(death_positions AS VARCHAR), ':', 1) AS level,
                     split_part(CAST(death_positions AS VARCHAR), ':', 2) AS positions_str,
                     (steps // {step_bucket_size}) * {step_bucket_size} AS step_bucket
                 FROM workers
-                WHERE death_positions IS NOT NULL 
+                WHERE death_positions IS NOT NULL
                   AND CAST(death_positions AS VARCHAR) != ''
                   AND CAST(death_positions AS VARCHAR) LIKE '%:%'
             ),
             exploded AS (
-                SELECT 
+                SELECT
                     level,
                     step_bucket,
                     CAST(TRIM(unnest(string_split(positions_str, ','))) AS INTEGER) AS pos
                 FROM parsed
                 WHERE positions_str IS NOT NULL AND positions_str != ''
             )
-            SELECT 
+            SELECT
                 level,
                 step_bucket,
                 (pos // {pos_bucket_size}) * {pos_bucket_size} AS pos_bucket,
                 COUNT(*) AS count
             FROM exploded
-            WHERE pos IS NOT NULL 
-              AND pos > 0 
+            WHERE pos IS NOT NULL
+              AND pos > 0
               AND pos <= {MAX_VALID_X_POS}
             GROUP BY level, step_bucket, pos_bucket
             ORDER BY level, step_bucket, pos_bucket
@@ -532,22 +529,27 @@ def aggregate_death_distribution_direct(
 
     # Group by level and step_bucket to create DeathDistPoints
     death_data: dict[str, list[DeathDistPoint]] = {}
-    
+
     for level in result["level"].unique():
         level_df = result[result["level"] == level]
         level = str(level)
         death_data[level] = []
-        
+
         for step_bucket in sorted(level_df["step_bucket"].unique()):
             bucket_df = level_df[level_df["step_bucket"] == step_bucket]
-            position_counts = dict(zip(
-                bucket_df["pos_bucket"].astype(int),
-                bucket_df["count"].astype(int),
-            ))
-            death_data[level].append(DeathDistPoint(
-                steps=int(step_bucket),
-                position_counts=position_counts,
-            ))
+            position_counts = dict(
+                zip(
+                    bucket_df["pos_bucket"].astype(int),
+                    bucket_df["count"].astype(int),
+                    strict=False,
+                )
+            )
+            death_data[level].append(
+                DeathDistPoint(
+                    steps=int(step_bucket),
+                    position_counts=position_counts,
+                )
+            )
 
     return death_data
 
@@ -572,31 +574,31 @@ def aggregate_death_distribution(
 
     result = duckdb.sql(f"""
         WITH parsed AS (
-            SELECT 
+            SELECT
                 split_part(CAST(death_positions AS VARCHAR), ':', 1) AS level,
                 split_part(CAST(death_positions AS VARCHAR), ':', 2) AS positions_str,
                 (steps // {step_bucket_size}) * {step_bucket_size} AS step_bucket
             FROM combined
-            WHERE death_positions IS NOT NULL 
+            WHERE death_positions IS NOT NULL
               AND CAST(death_positions AS VARCHAR) != ''
               AND CAST(death_positions AS VARCHAR) LIKE '%:%'
         ),
         exploded AS (
-            SELECT 
+            SELECT
                 level,
                 step_bucket,
                 CAST(TRIM(unnest(string_split(positions_str, ','))) AS INTEGER) AS pos
             FROM parsed
             WHERE positions_str IS NOT NULL AND positions_str != ''
         )
-        SELECT 
+        SELECT
             level,
             step_bucket,
             (pos // {pos_bucket_size}) * {pos_bucket_size} AS pos_bucket,
             COUNT(*) AS count
         FROM exploded
-        WHERE pos IS NOT NULL 
-          AND pos > 0 
+        WHERE pos IS NOT NULL
+          AND pos > 0
           AND pos <= {MAX_VALID_X_POS}
         GROUP BY level, step_bucket, pos_bucket
         ORDER BY level, step_bucket, pos_bucket
@@ -604,22 +606,27 @@ def aggregate_death_distribution(
 
     # Group by level and step_bucket to create DeathDistPoints
     death_data: dict[str, list[DeathDistPoint]] = {}
-    
+
     for level in result["level"].unique():
         level_df = result[result["level"] == level]
         level = str(level)
         death_data[level] = []
-        
+
         for step_bucket in sorted(level_df["step_bucket"].unique()):
             bucket_df = level_df[level_df["step_bucket"] == step_bucket]
-            position_counts = dict(zip(
-                bucket_df["pos_bucket"].astype(int),
-                bucket_df["count"].astype(int),
-            ))
-            death_data[level].append(DeathDistPoint(
-                steps=int(step_bucket),
-                position_counts=position_counts,
-            ))
+            position_counts = dict(
+                zip(
+                    bucket_df["pos_bucket"].astype(int),
+                    bucket_df["count"].astype(int),
+                    strict=False,
+                )
+            )
+            death_data[level].append(
+                DeathDistPoint(
+                    steps=int(step_bucket),
+                    position_counts=position_counts,
+                )
+            )
 
     return death_data
 
@@ -669,7 +676,7 @@ def aggregate_level_stats(workers: dict[int, pd.DataFrame]) -> dict[str, LevelSt
 
     result = duckdb.sql(f"""
         WITH per_worker AS (
-            SELECT 
+            SELECT
                 {level_expr} AS level,
                 worker_id,
                 COUNT(*) AS episodes,
@@ -686,7 +693,7 @@ def aggregate_level_stats(workers: dict[int, pd.DataFrame]) -> dict[str, LevelSt
             WHERE {level_expr} IS NOT NULL AND {level_expr} != '?'
             GROUP BY level, worker_id
         )
-        SELECT 
+        SELECT
             level,
             SUM(episodes) AS episodes,
             SUM(max_deaths) AS deaths,
@@ -745,13 +752,13 @@ def aggregate_action_distribution(
 
     result = duckdb.sql(f"""
         WITH ranked AS (
-            SELECT 
+            SELECT
                 {level_expr} AS level,
                 steps,
                 action_dist,
                 NTILE({max_points_per_level}) OVER (PARTITION BY {level_expr} ORDER BY steps) as bucket
             FROM combined
-            WHERE action_dist IS NOT NULL 
+            WHERE action_dist IS NOT NULL
               AND action_dist != ''
               AND {level_expr} IS NOT NULL
               AND {level_expr} != '?'
@@ -772,7 +779,7 @@ def aggregate_action_distribution(
     steps_arr = result["steps"].values
     dists = result["action_dist"].values
 
-    for level, steps, dist_str in zip(levels, steps_arr, dists):
+    for level, steps, dist_str in zip(levels, steps_arr, dists, strict=False):
         level = str(level)
         if dist_str and isinstance(dist_str, str):
             try:
@@ -780,9 +787,7 @@ def aggregate_action_distribution(
                 if len(pcts) == 7 or len(pcts) == 12:
                     if level not in action_data:
                         action_data[level] = []
-                    action_data[level].append(
-                        ActionDistPoint(steps=int(steps), percentages=pcts)
-                    )
+                    action_data[level].append(ActionDistPoint(steps=int(steps), percentages=pcts))
             except (ValueError, TypeError):
                 pass
 
@@ -811,7 +816,7 @@ def aggregate_rate_data(
 
     result = duckdb.sql(f"""
         WITH bucketed AS (
-            SELECT 
+            SELECT
                 {level_expr} AS level,
                 worker_id,
                 (steps // {step_bucket_size}) * {step_bucket_size} AS step_bucket,
@@ -824,19 +829,19 @@ def aggregate_rate_data(
             WHERE {level_expr} IS NOT NULL AND {level_expr} != '?'
         ),
         latest_per_worker AS (
-            SELECT 
-                level, 
+            SELECT
+                level,
                 worker_id,
-                step_bucket, 
-                deaths, 
-                flags, 
-                episodes, 
+                step_bucket,
+                deaths,
+                flags,
+                episodes,
                 timeouts
             FROM bucketed
             WHERE rn = 1
         ),
         with_deltas AS (
-            SELECT 
+            SELECT
                 level,
                 worker_id,
                 step_bucket,
@@ -846,7 +851,7 @@ def aggregate_rate_data(
                 timeouts - COALESCE(LAG(timeouts) OVER (PARTITION BY worker_id, level ORDER BY step_bucket), 0) AS delta_timeouts
             FROM latest_per_worker
         )
-        SELECT 
+        SELECT
             level,
             step_bucket,
             SUM(CASE WHEN delta_deaths > 0 THEN delta_deaths ELSE 0 END) AS total_deaths,
@@ -866,7 +871,7 @@ def aggregate_rate_data(
     episodes = result["total_episodes"].values
     timeouts = result["total_timeouts"].values
 
-    for level, bucket, d, f, e, t in zip(levels, buckets, deaths, flags, episodes, timeouts):
+    for level, bucket, d, f, e, t in zip(levels, buckets, deaths, flags, episodes, timeouts, strict=False):
         level = str(level)
         if level not in rate_data:
             rate_data[level] = []
@@ -901,28 +906,28 @@ def aggregate_death_hotspots_from_csv(
 
     result = duckdb.sql(f"""
         WITH parsed AS (
-            SELECT 
+            SELECT
                 split_part(CAST(death_positions AS VARCHAR), ':', 1) AS level,
                 split_part(CAST(death_positions AS VARCHAR), ':', 2) AS positions_str
             FROM combined
-            WHERE death_positions IS NOT NULL 
+            WHERE death_positions IS NOT NULL
               AND CAST(death_positions AS VARCHAR) != ''
               AND CAST(death_positions AS VARCHAR) LIKE '%:%'
         ),
         exploded AS (
-            SELECT 
+            SELECT
                 level,
                 CAST(TRIM(unnest(string_split(positions_str, ','))) AS INTEGER) AS pos
             FROM parsed
             WHERE positions_str IS NOT NULL AND positions_str != ''
         )
-        SELECT 
+        SELECT
             level,
             (pos // 25) * 25 AS bucket,
             COUNT(*) AS count
         FROM exploded
-        WHERE pos IS NOT NULL 
-          AND pos > 0 
+        WHERE pos IS NOT NULL
+          AND pos > 0
           AND pos <= {MAX_VALID_X_POS}
         GROUP BY level, bucket
         ORDER BY level, bucket
@@ -933,7 +938,7 @@ def aggregate_death_hotspots_from_csv(
     buckets = result["bucket"].values
     counts = result["count"].values
 
-    for level, bucket, count in zip(levels, buckets, counts):
+    for level, bucket, count in zip(levels, buckets, counts, strict=False):
         level = str(level)
         if level not in hotspots:
             hotspots[level] = {}

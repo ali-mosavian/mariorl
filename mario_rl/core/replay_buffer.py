@@ -15,10 +15,9 @@ import torch
 import numpy as np
 from torch import Tensor
 
-from mario_rl.core.types import Transition
 from mario_rl.core.types import TreeNode
+from mario_rl.core.types import Transition
 from mario_rl.environment.frame_stack import LazyFrames
-
 
 # =============================================================================
 # N-Step Buffer (inlined from buffers/nstep.py)
@@ -29,13 +28,13 @@ def _copy_state(state):
     """Copy state if numpy array, return as-is if LazyFrames (immutable)."""
     if isinstance(state, LazyFrames):
         return state  # LazyFrames is frozen/immutable, no copy needed
-    return state.copy() if hasattr(state, 'copy') else state
+    return state.copy() if hasattr(state, "copy") else state
 
 
 @dataclass
 class NStepBuffer:
     """Buffer for computing N-step returns.
-    
+
     Single responsibility: Accumulate transitions and compute discounted N-step returns.
     """
 
@@ -63,22 +62,22 @@ class NStepBuffer:
     def reset(self) -> None:
         """Clear the buffer."""
         self._buffer.clear()
-    
+
     def _pop_nstep_transition(self) -> Transition:
         """Compute and pop one N-step transition from front of buffer."""
         # Compute discounted reward, stopping at done
         n_step_reward = 0.0
         last_idx = len(self._buffer) - 1
-        
+
         for i, t in enumerate(self._buffer):
-            n_step_reward += (self.gamma ** i) * t.reward
+            n_step_reward += (self.gamma**i) * t.reward
             if t.done:
                 last_idx = i
                 break
-        
+
         first = self._buffer[0]
         last = self._buffer[last_idx]
-        
+
         result = Transition(
             state=first.state,
             action=first.action,
@@ -95,7 +94,7 @@ class NStepBuffer:
         )
         self._buffer.pop(0)
         return result
-    
+
     @staticmethod
     def _copy_transition(t: Transition) -> Transition:
         """Create a copy of transition with copied arrays."""
@@ -122,15 +121,15 @@ class NStepBuffer:
 
 class EpisodeCollector:
     """Context manager for episode-scoped transition collection.
-    
+
     Single responsibility: Handle one episode's worth of transitions.
     - N-step return computation
-    - Episode history tracking  
+    - Episode history tracking
     - Flag history capture on episode end
-    
+
     Single-use: After context exits, this collector is finished.
     Create a new one via buffer.episode() for the next episode.
-    
+
     Usage:
         with buffer.episode() as ep:
             for step in range(max_steps):
@@ -139,15 +138,12 @@ class EpisodeCollector:
                     break
         # Automatically finalizes episode on exit
     """
-    
-    __slots__ = (
-        '_buffer', '_flag_history_len', '_episode_history',
-        '_nstep_buffer', '_flag_captured', '_active'
-    )
-    
+
+    __slots__ = ("_buffer", "_flag_history_len", "_episode_history", "_nstep_buffer", "_flag_captured", "_active")
+
     def __init__(
-        self, 
-        buffer: "ReplayBuffer", 
+        self,
+        buffer: "ReplayBuffer",
         n_step: int = 1,
         gamma: float = 0.99,
         flag_history_len: int = 10,
@@ -158,24 +154,24 @@ class EpisodeCollector:
         self._nstep_buffer = NStepBuffer(n_step=n_step, gamma=gamma) if n_step > 1 else None
         self._flag_captured = False
         self._active = True  # False after context exits
-    
+
     def __enter__(self) -> "EpisodeCollector":
         if not self._active:
             raise RuntimeError("EpisodeCollector is single-use. Create a new one via buffer.episode()")
         return self
-    
+
     def __exit__(self, exc_type, exc_val, exc_tb) -> None:
         self._finalize()
         self._active = False  # Mark as done - cannot be reused
-    
+
     def add(self, transition: Transition) -> None:
         """Add a transition (will be N-step processed before storage)."""
         if not self._active:
             raise RuntimeError("EpisodeCollector is finished. Create a new one via buffer.episode()")
-        
+
         if transition.flag_get:
             self._flag_captured = True
-        
+
         # N-step processing
         if self._nstep_buffer is not None:
             processed = self._nstep_buffer.add(transition)
@@ -187,12 +183,12 @@ class EpisodeCollector:
                     self._store(t)
         else:
             self._store(transition)
-    
+
     def _store(self, transition: Transition) -> None:
         """Store processed transition to buffer and history."""
         self._episode_history.append(transition)
         self._buffer._store(transition)
-    
+
     def _finalize(self) -> None:
         """Finalize episode - store flag history if captured."""
         if self._flag_captured and self._buffer.positive_reward_ratio > 0:
@@ -201,12 +197,12 @@ class EpisodeCollector:
             for t in self._episode_history[start:]:
                 self._buffer._positive.store(t)
         self._episode_history.clear()
-    
+
     def end(self) -> None:
         """Finalize episode for training loops that span multiple episodes.
-        
+
         After calling end(), this collector cannot be reused - create a new one.
-        
+
         Training loop pattern:
             ep = buffer.episode()
             for step in range(num_steps):
@@ -219,7 +215,7 @@ class EpisodeCollector:
             return  # Already ended
         self._finalize()
         self._active = False
-    
+
     @property
     def history(self) -> list[Transition]:
         """Current episode history (N-step processed transitions)."""
@@ -295,25 +291,34 @@ class SumTree:
 
 @dataclass
 class ExperienceBuffer:
-    """Circular buffer for storing transitions with LazyFrames compression.
-    
+    """Circular buffer for storing transitions with optional Prioritized Experience Replay.
+
     Stores LazyFrames directly (already LZ4 compressed by env) for memory efficiency.
     Only decompresses to float32 numpy arrays on sampling.
-    
+
+    Features:
+    - Optional PER support (alpha > 0 enables prioritized sampling)
+    - LazyFrames compression for states
+    - Importance sampling weights computation
+
     Used as the base storage for:
     - Main replay buffer
     - Protected buffers (death, flag, difficult success)
     """
-    
+
     capacity: int
     obs_shape: tuple[int, ...]
     action_history_shape: tuple[int, ...] | None = None
     danger_target_bins: int = 0
-    
+
+    # PER parameters (alpha=0 disables PER, uses uniform sampling)
+    alpha: float = 0.0
+    epsilon: float = 1e-6  # Small constant to prevent zero priority
+
     # State storage (LazyFrames from env, already compressed)
     _states: list[LazyFrames | None] = field(init=False, repr=False)
     _next_states: list[LazyFrames | None] = field(init=False, repr=False)
-    
+
     # Regular storage arrays (small, no compression needed)
     _actions: np.ndarray = field(init=False, repr=False)
     _rewards: np.ndarray = field(init=False, repr=False)
@@ -321,99 +326,218 @@ class ExperienceBuffer:
     _action_histories: np.ndarray | None = field(init=False, repr=False, default=None)
     _next_action_histories: np.ndarray | None = field(init=False, repr=False, default=None)
     _danger_targets: np.ndarray | None = field(init=False, repr=False, default=None)
-    
+
+    # PER state
+    _tree: SumTree | None = field(init=False, repr=False, default=None)
+    _max_priority: float = field(init=False, default=1.0)
+
     # Tracking
     _size: int = field(init=False, default=0)
     _ptr: int = field(init=False, default=0)
-    
+
     def __post_init__(self) -> None:
-        """Initialize storage arrays."""
+        """Initialize storage arrays and optional PER tree."""
         # State storage - preallocate list with None
         self._states = [None] * self.capacity
         self._next_states = [None] * self.capacity
-        
+
         # Regular arrays for small data
         self._actions = np.zeros(self.capacity, dtype=np.int64)
         self._rewards = np.zeros(self.capacity, dtype=np.float32)
         self._dones = np.zeros(self.capacity, dtype=np.float32)
         self._size = 0
         self._ptr = 0
-        
+
         if self.action_history_shape is not None:
             self._action_histories = np.zeros((self.capacity, *self.action_history_shape), dtype=np.float32)
             self._next_action_histories = np.zeros((self.capacity, *self.action_history_shape), dtype=np.float32)
-        
+
         if self.danger_target_bins > 0:
             self._danger_targets = np.zeros((self.capacity, self.danger_target_bins), dtype=np.float32)
-    
+
+        # Initialize PER tree if alpha > 0
+        if self.alpha > 0:
+            self._tree = SumTree(capacity=self.capacity)
+            self._max_priority = 1.0
+
     @property
     def size(self) -> int:
         """Current number of stored transitions."""
         return self._size
-    
+
     def _to_numpy(self, state: LazyFrames | np.ndarray) -> np.ndarray:
         """Convert state to numpy array. No normalization - network handles that."""
         if isinstance(state, LazyFrames):
             # LazyFrames.__array__() decompresses and stacks
             return np.array(state)
         return state
-    
-    def store(self, transition: Transition) -> int:
+
+    def store(self, transition: Transition, priority: float | None = None) -> int:
         """Store a transition. Returns the index where it was stored.
-        
+
+        Args:
+            transition: The transition to store
+            priority: Optional priority for PER. If None, uses max_priority.
+                     Ignored if PER is disabled (alpha=0).
+
+        Returns:
+            The index where the transition was stored.
+
         States should be LazyFrames (from env) for memory efficiency.
         """
         idx = self._ptr
-        
+
         # Store states directly (LazyFrames are already compressed)
-        self._states[idx] = transition.state
-        self._next_states[idx] = transition.next_state
-        
+        self._states[idx] = transition.state  # type: ignore[assignment]
+        self._next_states[idx] = transition.next_state  # type: ignore[assignment]
+
         # Store regular data
         self._actions[idx] = transition.action
         self._rewards[idx] = transition.reward
         self._dones[idx] = float(transition.done)
-        
+
         if self._action_histories is not None and transition.action_history is not None:
             self._action_histories[idx] = transition.action_history
         if self._next_action_histories is not None and transition.next_action_history is not None:
             self._next_action_histories[idx] = transition.next_action_history
         if self._danger_targets is not None and transition.danger_target is not None:
             self._danger_targets[idx] = transition.danger_target
-        
+
+        # Add to PER tree if enabled
+        if self._tree is not None:
+            p = priority if priority is not None else self._max_priority
+            self._tree.add((p + self.epsilon) ** self.alpha)
+
         self._ptr = (self._ptr + 1) % self.capacity
         self._size = min(self._size + 1, self.capacity)
         return idx
-    
-    def sample(self, batch_size: int) -> tuple[
-        np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray,
-        np.ndarray | None, np.ndarray | None, np.ndarray | None
+
+    def sample(
+        self, batch_size: int
+    ) -> tuple[
+        np.ndarray,
+        np.ndarray,
+        np.ndarray,
+        np.ndarray,
+        np.ndarray,
+        np.ndarray | None,
+        np.ndarray | None,
+        np.ndarray | None,
     ]:
-        """Sample random transitions.
-        
+        """Sample random transitions (uniform sampling, ignores PER).
+
         Returns:
             Tuple of (states, actions, rewards, next_states, dones,
                      action_histories, next_action_histories, danger_targets)
         """
         if self._size == 0:
             raise ValueError("Cannot sample from empty buffer")
-        
+
         indices = np.random.randint(0, self._size, size=batch_size)
         return self.get_by_indices(indices)
-    
-    def get_by_indices(self, indices: np.ndarray) -> tuple[
-        np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray,
-        np.ndarray | None, np.ndarray | None, np.ndarray | None
+
+    def sample_per(
+        self, batch_size: int, beta: float = 0.4
+    ) -> tuple[
+        np.ndarray,
+        np.ndarray,
+        np.ndarray,
+        np.ndarray,
+        np.ndarray,
+        np.ndarray | None,
+        np.ndarray | None,
+        np.ndarray | None,
+        np.ndarray,
+        np.ndarray,  # indices, weights
+    ]:
+        """Sample transitions using Prioritized Experience Replay.
+
+        Args:
+            batch_size: Number of transitions to sample
+            beta: Importance sampling exponent (0 = no correction, 1 = full correction)
+
+        Returns:
+            Tuple of (states, actions, rewards, next_states, dones,
+                     action_histories, next_action_histories, danger_targets,
+                     tree_indices, importance_weights)
+
+        Raises:
+            ValueError: If PER is disabled (alpha=0) or buffer is empty
+        """
+        if self._tree is None:
+            raise ValueError("PER is disabled (alpha=0). Use sample() for uniform sampling.")
+        if self._size == 0:
+            raise ValueError("Cannot sample from empty buffer")
+
+        tree_indices = np.zeros(batch_size, dtype=np.int64)
+        priorities = np.zeros(batch_size, dtype=np.float64)
+        data_indices = np.zeros(batch_size, dtype=np.int64)
+
+        # Stratified sampling: divide total priority into segments
+        total = self._tree.total
+        segment = total / batch_size
+
+        for i in range(batch_size):
+            value = np.random.uniform(segment * i, segment * (i + 1))
+            node = self._tree.get(value)
+            tree_indices[i] = node.leaf_idx
+            priorities[i] = node.priority
+            data_indices[i] = node.data_idx
+
+        # Get samples by data indices
+        s, a, r, ns, d, ah, nah, dt = self.get_by_indices(data_indices)
+
+        # Compute importance sampling weights
+        # w_i = (N * P(i))^(-beta) / max(w)
+        probs = priorities / total
+        weights = (self._size * probs) ** (-beta)
+        weights = (weights / weights.max()).astype(np.float32)  # Normalize
+
+        return s, a, r, ns, d, ah, nah, dt, tree_indices, weights
+
+    def update_priorities(self, tree_indices: np.ndarray, td_errors: np.ndarray) -> None:
+        """Update priorities based on TD errors.
+
+        Args:
+            tree_indices: Indices returned from sample_per()
+            td_errors: Absolute TD errors for the sampled transitions
+        """
+        if self._tree is None:
+            return  # PER disabled, nothing to update
+
+        for idx, td_error in zip(tree_indices, td_errors, strict=False):
+            priority = (abs(td_error) + self.epsilon) ** self.alpha
+            self._tree.update(idx, priority)
+            self._max_priority = max(self._max_priority, abs(td_error))
+
+    @property
+    def uses_per(self) -> bool:
+        """Whether this buffer uses Prioritized Experience Replay."""
+        return self._tree is not None
+
+    def get_by_indices(
+        self, indices: np.ndarray
+    ) -> tuple[
+        np.ndarray,
+        np.ndarray,
+        np.ndarray,
+        np.ndarray,
+        np.ndarray,
+        np.ndarray | None,
+        np.ndarray | None,
+        np.ndarray | None,
     ]:
         """Get transitions by indices, converting states to numpy."""
         # Convert LazyFrames to numpy (decompresses on access)
         states = np.stack([self._to_numpy(self._states[i]) for i in indices])
         next_states = np.stack([self._to_numpy(self._next_states[i]) for i in indices])
-        
+
         action_histories = self._action_histories[indices] if self._action_histories is not None else None
-        next_action_histories = self._next_action_histories[indices] if self._next_action_histories is not None else None
+        next_action_histories = (
+            self._next_action_histories[indices] if self._next_action_histories is not None else None
+        )
         danger_targets = self._danger_targets[indices] if self._danger_targets is not None else None
-        
+
         return (
             states,
             self._actions[indices],
@@ -424,14 +548,18 @@ class ExperienceBuffer:
             next_action_histories,
             danger_targets,
         )
-    
+
     def reset(self) -> None:
-        """Clear the buffer."""
+        """Clear the buffer and reset PER tree if enabled."""
         self._size = 0
         self._ptr = 0
         # Clear state storage to free memory
         self._states = [None] * self.capacity
         self._next_states = [None] * self.capacity
+        # Reset PER tree if enabled
+        if self._tree is not None:
+            self._tree = SumTree(capacity=self.capacity)
+            self._max_priority = 1.0
 
 
 # =============================================================================
@@ -441,14 +569,22 @@ class ExperienceBuffer:
 
 class _SampleCollector:
     """Accumulates samples from multiple buffers for batch construction.
-    
+
     Internal helper - not part of public API.
     """
+
     __slots__ = (
-        'states', 'actions', 'rewards', 'next_states', 'dones',
-        'action_histories', 'next_action_histories', 'danger_targets', 'weights'
+        "states",
+        "actions",
+        "rewards",
+        "next_states",
+        "dones",
+        "action_histories",
+        "next_action_histories",
+        "danger_targets",
+        "weights",
     )
-    
+
     def __init__(self) -> None:
         self.states: list[np.ndarray] = []
         self.actions: list[np.ndarray] = []
@@ -459,13 +595,19 @@ class _SampleCollector:
         self.next_action_histories: list[np.ndarray] = []
         self.danger_targets: list[np.ndarray] = []
         self.weights: list[np.ndarray] = []
-    
+
     def add(
         self,
-        s: np.ndarray, a: np.ndarray, r: np.ndarray,
-        ns: np.ndarray, d: np.ndarray,
-        ah: np.ndarray | None, nah: np.ndarray | None, dt: np.ndarray | None,
-        weight: float | np.ndarray, count: int,
+        s: np.ndarray,
+        a: np.ndarray,
+        r: np.ndarray,
+        ns: np.ndarray,
+        d: np.ndarray,
+        ah: np.ndarray | None,
+        nah: np.ndarray | None,
+        dt: np.ndarray | None,
+        weight: float | np.ndarray,
+        count: int,
     ) -> None:
         """Add sampled data to collector."""
         self.states.append(s)
@@ -473,16 +615,16 @@ class _SampleCollector:
         self.rewards.append(r)
         self.next_states.append(ns)
         self.dones.append(d)
-        
+
         # Convert scalar weight to array
         if isinstance(weight, (int, float)):
             self.weights.append(np.full(count, weight, dtype=np.float32))
         else:
             self.weights.append(weight)
-        
+
         if ah is not None:
             self.action_histories.append(ah)
-            self.next_action_histories.append(nah)
+            self.next_action_histories.append(nah)  # type: ignore[arg-type]
         if dt is not None:
             self.danger_targets.append(dt)
 
@@ -538,59 +680,71 @@ class ReplayBuffer:
     difficult_success_ratio: float = 0.25  # Ratio from difficult buffer
     protected_capacity: int = 25000  # Capacity for each protected buffer
 
-    # All four buffers use the same ExperienceBuffer class
+    # All four buffers use ExperienceBuffer with optional PER
     _main: ExperienceBuffer = field(init=False, repr=False)
     _negative: ExperienceBuffer = field(init=False, repr=False)
     _positive: ExperienceBuffer = field(init=False, repr=False)
     _difficult: ExperienceBuffer = field(init=False, repr=False)
 
-    # For PER (main buffer only)
-    _tree: SumTree | None = field(init=False, repr=False, default=None)
-    _max_priority: float = field(init=False, default=1.0)
+    # PER beta tracking (for importance sampling annealing)
     _current_beta: float = field(init=False, default=0.4)
 
     # Metadata for main buffer (priority boost and difficulty tracking)
     _flag_gets: np.ndarray = field(init=False, repr=False)
     _level_ids: list = field(init=False, repr=False)
     _x_positions: np.ndarray = field(init=False, repr=False)
-    
+
     # Flag history length for EpisodeCollector
     flag_history_len: int = 10  # Number of transitions to capture before flag
-    
+
     # Difficulty ranges per level: {level_id: [(start, end), ...]}
     _difficulty_ranges: dict = field(init=False, repr=False)
 
     def __post_init__(self) -> None:
-        """Initialize all four experience buffers."""
+        """Initialize all four experience buffers with optional PER support."""
         # Common buffer config
         buf_config = {
             "obs_shape": self.obs_shape,
             "action_history_shape": self.action_history_shape,
             "danger_target_bins": self.danger_target_bins,
         }
-        
-        # Create all four buffers
-        self._main = ExperienceBuffer(capacity=self.capacity, **buf_config)
-        self._negative = ExperienceBuffer(capacity=self.protected_capacity, **buf_config)
-        self._positive = ExperienceBuffer(capacity=self.protected_capacity, **buf_config)
-        self._difficult = ExperienceBuffer(capacity=self.protected_capacity, **buf_config)
+
+        # Create all four buffers - all with PER support if alpha > 0
+        # Each buffer manages its own SumTree internally
+        self._main = ExperienceBuffer(capacity=self.capacity, alpha=self.alpha, epsilon=self.epsilon, **buf_config)  # type: ignore[arg-type]
+        self._negative = ExperienceBuffer(
+            capacity=self.protected_capacity,
+            alpha=self.alpha,
+            epsilon=self.epsilon,
+            **buf_config,  # type: ignore[arg-type]
+        )
+        self._positive = ExperienceBuffer(
+            capacity=self.protected_capacity,
+            alpha=self.alpha,
+            epsilon=self.epsilon,
+            **buf_config,  # type: ignore[arg-type]
+        )
+        self._difficult = ExperienceBuffer(
+            capacity=self.protected_capacity,
+            alpha=self.alpha,
+            epsilon=self.epsilon,
+            **buf_config,  # type: ignore[arg-type]
+        )
 
         # Metadata for main buffer (used for PER priority boosting)
         self._flag_gets = np.zeros(self.capacity, dtype=np.bool_)
         self._level_ids = [None] * self.capacity
         self._x_positions = np.zeros(self.capacity, dtype=np.int32)
 
-        # PER tracking
-        self._max_priority = 1.0
+        # PER beta tracking (beta anneals from beta_start to beta_end)
         self._current_beta = self.beta_start
-        self._tree = SumTree(capacity=self.capacity) if self.alpha > 0 else None
 
         # Difficulty ranges for detecting difficult areas
         self._difficulty_ranges = {}
 
     def episode(self) -> "EpisodeCollector":
         """Create an episode collector - the only way to add transitions.
-        
+
         MUST be used as a context manager:
             with buffer.episode() as ep:
                 ep.add(transition)
@@ -598,25 +752,55 @@ class ReplayBuffer:
             # Automatically handles N-step, flag history on exit
         """
         return EpisodeCollector(
-            self, 
+            self,
             n_step=self.n_step,
             gamma=self.gamma,
             flag_history_len=self.flag_history_len,
         )
 
+    def add(self, transition: Transition) -> None:
+        """Convenience method to add a single transition.
+
+        For simple testing or when episode context is not needed.
+        Uses n_step=1 internally (no n-step return computation).
+
+        For proper episode handling with N-step returns, use:
+            with buffer.episode() as ep:
+                ep.add(transition)
+        """
+        self._store(transition)
+
+    def flush(self) -> None:
+        """No-op for compatibility. Episode flushing is handled by EpisodeCollector."""
+        pass
+
     def _store(self, transition: Transition) -> None:
         """Store a transition in main buffer and optionally in protected buffers."""
-        # Store in main buffer (returns the index used)
-        idx = self._main.store(transition)
-        
-        # Store metadata for priority boosting
+        # Compute priority with asymmetric boosts
+        base_priority = self._main._max_priority if self._main._tree else 1.0
+        priority = base_priority
+
+        # Apply asymmetric priority boosts
+        if transition.flag_get and self.flag_priority_multiplier > 1.0:
+            priority = priority * self.flag_priority_multiplier
+
+        # Death transitions get priority boost to ensure learning from rare deaths
+        if transition.done and self.death_priority_multiplier > 1.0:
+            priority = priority * self.death_priority_multiplier
+
+        # Store in main buffer with computed priority
+        idx = self._main.store(transition, priority=priority)
+
+        # Store metadata for priority boosting (used later for update_priorities)
         self._flag_gets[idx] = transition.flag_get
         self._level_ids[idx] = transition.level_id
         self._x_positions[idx] = transition.x_pos
 
         # Also store in protected negative buffer (death transitions)
+        # Death transitions also get priority boost in the negative buffer
         if transition.reward < 0 and self.negative_reward_ratio > 0:
-            self._negative.store(transition)
+            death_priority = base_priority * self.death_priority_multiplier if transition.done else base_priority
+            self._negative.store(transition, priority=death_priority)
 
         # Note: Flag history is tracked by EpisodeCollector, not here
 
@@ -627,22 +811,7 @@ class ReplayBuffer:
             and self.difficult_success_ratio > 0
             and self._is_in_difficult_range(transition.level_id, transition.x_pos)
         ):
-            self._difficult.store(transition)
-
-        # Update PER tree with max priority (apply priority boosts)
-        if self._tree is not None:
-            base_priority = self._max_priority ** self.alpha
-            priority = base_priority
-            
-            # Apply asymmetric priority boosts
-            if transition.flag_get and self.flag_priority_multiplier > 1.0:
-                priority = priority * self.flag_priority_multiplier
-            
-            # Death transitions get priority boost to ensure learning from rare deaths
-            if transition.done and self.death_priority_multiplier > 1.0:
-                priority = priority * self.death_priority_multiplier
-            
-            self._tree.add(priority)
+            self._difficult.store(transition, priority=priority)
 
     def can_sample(self, batch_size: int) -> bool:
         """Check if buffer has enough samples."""
@@ -668,11 +837,9 @@ class ReplayBuffer:
             ValueError: If not enough samples in buffer
         """
         if not self.can_sample(batch_size):
-            raise ValueError(
-                f"Not enough samples: {self._main.size} < {batch_size}"
-            )
+            raise ValueError(f"Not enough samples: {self._main.size} < {batch_size}")
 
-        if self._tree is not None and self.alpha > 0:
+        if self._main.uses_per:
             return self._sample_per(batch_size, device, beta)
         return self._sample_uniform(batch_size, device)
 
@@ -684,45 +851,78 @@ class ReplayBuffer:
         main = batch_size - neg - pos - diff
         return neg, pos, diff, main
 
-    def _collect_samples(
+    def _collect_samples_uniform(
         self,
         buffer: ExperienceBuffer,
         size: int,
         collector: "_SampleCollector",
         weight: float | np.ndarray = 1.0,
-    ) -> None:
-        """Sample from a buffer and add to collector."""
+    ) -> np.ndarray:
+        """Sample uniformly from a buffer and add to collector. Returns tree indices (or -1)."""
         if size <= 0:
-            return
+            return np.array([], dtype=np.int64)
         s, a, r, ns, d, ah, nah, dt = buffer.sample(size)
         collector.add(s, a, r, ns, d, ah, nah, dt, weight, size)
+        return -np.ones(size, dtype=np.int64)  # No tree indices for uniform sampling
+
+    def _collect_samples_per(
+        self,
+        buffer: ExperienceBuffer,
+        size: int,
+        collector: "_SampleCollector",
+        beta: float,
+    ) -> np.ndarray:
+        """Sample with PER from a buffer and add to collector. Returns tree indices."""
+        if size <= 0:
+            return np.array([], dtype=np.int64)
+
+        if buffer.uses_per:
+            s, a, r, ns, d, ah, nah, dt, tree_indices, weights = buffer.sample_per(size, beta)
+            collector.add(s, a, r, ns, d, ah, nah, dt, weights, size)
+            return tree_indices
+        else:
+            # Fall back to uniform sampling if PER not enabled
+            return self._collect_samples_uniform(buffer, size, collector)
 
     def _build_batch(
-        self, collector: "_SampleCollector", batch_size: int, device: str,
+        self,
+        collector: "_SampleCollector",
+        batch_size: int,
+        device: str,
         indices: np.ndarray | None = None,
     ) -> Batch:
         """Build final Batch from collected samples."""
         # Concatenate or use empty defaults
-        states = np.concatenate(collector.states) if collector.states else np.zeros((batch_size, *self.obs_shape), dtype=np.uint8)
+        states = (
+            np.concatenate(collector.states)
+            if collector.states
+            else np.zeros((batch_size, *self.obs_shape), dtype=np.uint8)
+        )
         actions = np.concatenate(collector.actions) if collector.actions else np.zeros(batch_size, dtype=np.int64)
         rewards = np.concatenate(collector.rewards) if collector.rewards else np.zeros(batch_size, dtype=np.float32)
-        next_states = np.concatenate(collector.next_states) if collector.next_states else np.zeros((batch_size, *self.obs_shape), dtype=np.uint8)
+        next_states = (
+            np.concatenate(collector.next_states)
+            if collector.next_states
+            else np.zeros((batch_size, *self.obs_shape), dtype=np.uint8)
+        )
         dones = np.concatenate(collector.dones) if collector.dones else np.zeros(batch_size, dtype=np.float32)
         weights = np.concatenate(collector.weights) if collector.weights else np.ones(batch_size, dtype=np.float32)
 
         # Shuffle to mix samples from different sources
         shuffle_idx = np.random.permutation(batch_size)
-        
+
         # Apply shuffle to main arrays
         states, actions = states[shuffle_idx], actions[shuffle_idx]
         rewards, next_states = rewards[shuffle_idx], next_states[shuffle_idx]
         dones, weights = dones[shuffle_idx], weights[shuffle_idx]
-        
+
         # Handle optional arrays
         action_histories = next_action_histories = danger_targets = None
         if collector.action_histories:
             action_histories = torch.from_numpy(np.concatenate(collector.action_histories)[shuffle_idx]).to(device)
-            next_action_histories = torch.from_numpy(np.concatenate(collector.next_action_histories)[shuffle_idx]).to(device)
+            next_action_histories = torch.from_numpy(np.concatenate(collector.next_action_histories)[shuffle_idx]).to(
+                device
+            )
         if collector.danger_targets:
             danger_targets = torch.from_numpy(np.concatenate(collector.danger_targets)[shuffle_idx]).to(device)
 
@@ -747,65 +947,58 @@ class ReplayBuffer:
     def _sample_uniform(self, batch_size: int, device: str) -> Batch:
         """Sample uniformly with four-way split from protected buffers."""
         neg_size, pos_size, diff_size, main_size = self._compute_batch_sizes(batch_size)
-        
+
         collector = _SampleCollector()
-        self._collect_samples(self._negative, neg_size, collector)
-        self._collect_samples(self._positive, pos_size, collector)
-        self._collect_samples(self._difficult, diff_size, collector)
-        self._collect_samples(self._main, main_size, collector)
-        
+        self._collect_samples_uniform(self._negative, neg_size, collector)
+        self._collect_samples_uniform(self._positive, pos_size, collector)
+        self._collect_samples_uniform(self._difficult, diff_size, collector)
+        self._collect_samples_uniform(self._main, main_size, collector)
+
         return self._build_batch(collector, batch_size, device)
 
     def _sample_per(self, batch_size: int, device: str, beta: float | None) -> Batch:
-        """Sample with PER from main buffer, uniform from protected buffers."""
+        """Sample with PER from all buffers that have it enabled."""
         if beta is None:
             beta = self._current_beta
-        assert self._tree is not None
 
-        neg_size, pos_size, diff_size, per_size = self._compute_batch_sizes(batch_size)
-        protected_count = neg_size + pos_size + diff_size
-        
+        neg_size, pos_size, diff_size, main_size = self._compute_batch_sizes(batch_size)
+
         collector = _SampleCollector()
-        
-        # Sample protected buffers (weight=1)
-        self._collect_samples(self._negative, neg_size, collector)
-        self._collect_samples(self._positive, pos_size, collector)
-        self._collect_samples(self._difficult, diff_size, collector)
-        
-        # PER sampling from main buffer
-        per_tree_indices = np.zeros(per_size, dtype=np.int64)
-        if per_size > 0:
-            per_priorities = np.zeros(per_size, dtype=np.float64)
-            per_data_indices = np.zeros(per_size, dtype=np.int64)
-            
-            total = self._tree.total
-            segment = total / per_size
-            
-            for i in range(per_size):
-                value = np.random.uniform(segment * i, segment * (i + 1))
-                node = self._tree.get(value)
-                per_tree_indices[i] = node.leaf_idx
-                per_priorities[i] = node.priority
-                per_data_indices[i] = node.data_idx
-            
-            # Get samples by indices
-            s, a, r, ns, d, ah, nah, dt = self._main.get_by_indices(per_data_indices)
-            
-            # Compute importance weights
-            probs = per_priorities / total
-            per_weights = (self._main.size * probs) ** (-beta)
-            per_weights = (per_weights / per_weights.max()).astype(np.float32)
-            
-            collector.add(s, a, r, ns, d, ah, nah, dt, per_weights, per_size)
-        
-        # Build indices: -1 for protected, tree indices for PER
-        indices = np.concatenate([
-            -np.ones(protected_count, dtype=np.int64),
-            per_tree_indices
-        ])
-        
+        all_indices: list[np.ndarray] = []
+
+        # Sample from all buffers with PER (each buffer handles its own tree)
+        all_indices.append(self._collect_samples_per(self._negative, neg_size, collector, beta))
+        all_indices.append(self._collect_samples_per(self._positive, pos_size, collector, beta))
+        all_indices.append(self._collect_samples_per(self._difficult, diff_size, collector, beta))
+        all_indices.append(self._collect_samples_per(self._main, main_size, collector, beta))
+
+        # Build indices array for priority updates
+        # Note: indices from protected buffers are marked with negative buffer ID
+        # -1: negative, -2: positive, -3: difficult, >=0: main buffer tree index
+        neg_indices = all_indices[0] if len(all_indices[0]) > 0 else np.array([], dtype=np.int64)
+        pos_indices = all_indices[1] if len(all_indices[1]) > 0 else np.array([], dtype=np.int64)
+        diff_indices = all_indices[2] if len(all_indices[2]) > 0 else np.array([], dtype=np.int64)
+        main_indices = all_indices[3] if len(all_indices[3]) > 0 else np.array([], dtype=np.int64)
+
+        # Tag indices with buffer source (for update_priorities to know which buffer)
+        # We encode buffer ID in high bits and tree index in low bits
+        # Format: (buffer_id << 24) | tree_idx where buffer_id: 0=main, 1=neg, 2=pos, 3=diff
+        def encode_indices(tree_idx: np.ndarray, buffer_id: int) -> np.ndarray:
+            if len(tree_idx) == 0:
+                return tree_idx
+            return (buffer_id << 24) | (tree_idx & 0xFFFFFF)
+
+        indices = np.concatenate(
+            [
+                encode_indices(neg_indices, 1),
+                encode_indices(pos_indices, 2),
+                encode_indices(diff_indices, 3),
+                encode_indices(main_indices, 0),
+            ]
+        )
+
         return self._build_batch(collector, batch_size, device, indices)
-    
+
     @property
     def negative_reward_count(self) -> int:
         """Number of transitions in protected negative buffer (death)."""
@@ -837,7 +1030,7 @@ class ReplayBuffer:
 
     def set_difficulty_ranges(self, ranges: dict[str, list[tuple[int, int]]]) -> None:
         """Set difficulty ranges for tracking difficult success transitions.
-        
+
         Args:
             ranges: Dict mapping level_id -> list of (start_x, end_x) tuples.
                    Transitions within these ranges (that don't die) are tracked.
@@ -846,11 +1039,11 @@ class ReplayBuffer:
 
     def _is_in_difficult_range(self, level_id: str, x_pos: int) -> bool:
         """Check if position is within a known difficult range.
-        
+
         Args:
             level_id: Level identifier
             x_pos: X position to check
-            
+
         Returns:
             True if position is in a difficult range for this level.
         """
@@ -861,12 +1054,16 @@ class ReplayBuffer:
         return False
 
     def update_priorities(self, indices: np.ndarray | Tensor, td_errors: np.ndarray | Tensor) -> None:
-        """Update priorities based on TD errors.
+        """Update priorities based on TD errors for all buffers.
+
+        Indices are encoded with buffer ID in high bits:
+        - (buffer_id << 24) | tree_idx
+        - buffer_id: 0=main, 1=negative, 2=positive, 3=difficult
+        - Indices with value -1 are skipped (uniform sampling fallback)
 
         Maintains asymmetric priority: flag captures keep their boost multiplier.
-        Skips indices that are -1 (from negative reward buffer sampling).
         """
-        if self._tree is None:
+        if not self._main.uses_per:
             return  # Uniform sampling, no priorities
 
         if isinstance(indices, Tensor):
@@ -874,22 +1071,39 @@ class ReplayBuffer:
         if isinstance(td_errors, Tensor):
             td_errors = td_errors.cpu().numpy()
 
-        for leaf_idx, td_error in zip(indices, td_errors, strict=False):
-            # Skip negative samples (they use index -1 and bypass PER)
-            if leaf_idx < 0:
+        # Map buffer IDs to buffers
+        buffers = {
+            0: self._main,
+            1: self._negative,
+            2: self._positive,
+            3: self._difficult,
+        }
+
+        for encoded_idx, td_error in zip(indices, td_errors, strict=False):
+            # Skip -1 indices (uniform sampling fallback)
+            if encoded_idx < 0:
                 continue
-                
-            base_priority = (abs(td_error) + self.epsilon) ** self.alpha
 
-            # Maintain flag priority boost (convert leaf_idx to data_idx)
-            data_idx = int(leaf_idx) - self.capacity + 1
-            if 0 <= data_idx < self.capacity and self._flag_gets[data_idx]:
-                priority = base_priority * self.flag_priority_multiplier
-            else:
-                priority = base_priority
+            # Decode buffer ID and tree index
+            buffer_id = (encoded_idx >> 24) & 0xFF
+            tree_idx = encoded_idx & 0xFFFFFF
 
-            self._tree.update(int(leaf_idx), priority)
-            self._max_priority = max(self._max_priority, abs(td_error) + self.epsilon)
+            buffer = buffers.get(buffer_id)
+            if buffer is None or not buffer.uses_per:
+                continue
+
+            base_priority = abs(td_error) + self.epsilon
+
+            # Maintain flag priority boost for main buffer
+            if buffer_id == 0:
+                # For main buffer, check flag_gets metadata
+                # tree_idx is the leaf index, need to convert to data index
+                data_idx = int(tree_idx) - self.capacity + 1
+                if 0 <= data_idx < self.capacity and self._flag_gets[data_idx]:
+                    base_priority *= self.flag_priority_multiplier
+
+            # Update the appropriate buffer's tree
+            buffer.update_priorities(np.array([tree_idx], dtype=np.int64), np.array([base_priority], dtype=np.float32))
 
     def update_beta(self, progress: float) -> None:
         """Update beta based on training progress (0 to 1)."""
@@ -901,14 +1115,11 @@ class ReplayBuffer:
         self._negative.reset()
         self._positive.reset()
         self._difficult.reset()
-        
-        self._max_priority = 1.0
+
+        # Reset metadata
         self._flag_gets.fill(False)
         self._level_ids = [None] * self.capacity
         self._x_positions.fill(0)
-
-        if self._tree is not None:
-            self._tree = SumTree(capacity=self.capacity)
 
     def __len__(self) -> int:
         return self._main.size
@@ -1027,7 +1238,7 @@ class MuZeroReplayBuffer:
 
         # Update PER tree with max priority
         if self._tree is not None:
-            priority = self._max_priority ** self.alpha
+            priority = self._max_priority**self.alpha
             self._tree.add(priority)
 
         # Update pointers

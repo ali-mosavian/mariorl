@@ -8,8 +8,9 @@ Using frozen dataclasses with slots for:
 - Built-in type hints
 """
 
+from typing import Any
+from typing import TYPE_CHECKING
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any
 
 import numpy as np
 
