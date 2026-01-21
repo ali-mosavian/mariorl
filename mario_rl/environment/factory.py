@@ -14,12 +14,13 @@ from gym_super_mario_bros import actions as smb_actions
 
 from mario_rl.core.config import LevelType
 from mario_rl.environment.wrappers import SkipFrame
-from mario_rl.environment.wrappers import ResizeObservation
-from mario_rl.environment.wrappers import GrayScaleObservation
-from mario_rl.environment.wrappers import ActionHistoryWrapper
-from mario_rl.environment.wrappers import DeathPenaltyWrapper
-from mario_rl.environment.wrappers import FlagBonusWrapper
 from mario_rl.environment.frame_stack import FrameStack
+from mario_rl.environment.wrappers import FlagBonusWrapper
+from mario_rl.environment.wrappers import ResizeObservation
+from mario_rl.environment.wrappers import DeathPenaltyWrapper
+from mario_rl.environment.wrappers import ActionHistoryWrapper
+from mario_rl.environment.wrappers import GrayScaleObservation
+from mario_rl.environment.wrappers import RAMObservationWrapper
 from mario_rl.environment.mariogym import SuperMarioBrosMultiLevel
 
 
@@ -28,14 +29,14 @@ class MarioEnvironment:
     Container for a wrapped Mario environment and its components.
 
     Provides access to the full wrapped environment, the base environment
-    (for save/restore), and the frame stack wrapper.
+    (for save/restore), and the frame stack wrapper (if using pixel obs).
     """
 
     def __init__(
         self,
         env: Any,
         base_env: SuperMarioBrosMultiLevel,
-        fstack: FrameStack,
+        fstack: FrameStack | None,
     ):
         self.env = env
         self.base_env = base_env
@@ -104,11 +105,11 @@ def create_mario_env(
     env = SkipFrame(env, skip=4, render_frames=render_frames, sum_rewards=sum_rewards)
     env = GrayScaleObservation(env, keep_dim=False)
     env = ResizeObservation(env, shape=64)
-    
+
     # Add action history tracking if requested
     if action_history_len > 0:
         env = ActionHistoryWrapper(env, history_len=action_history_len, num_actions=7)
-    
+
     # Note: Normalization (x/255) is done in the neural network on GPU
     # This keeps observations as uint8 (smaller memory, faster transfer)
     # LZ4 compression further reduces memory for replay buffer storage
@@ -117,12 +118,52 @@ def create_mario_env(
     return MarioEnvironment(env=fstack, base_env=base_env, fstack=fstack)
 
 
+def create_ram_env(
+    level: LevelType = (1, 1),
+    render_frames: bool = False,
+) -> MarioEnvironment:
+    """
+    Create a RAM-based Mario environment.
+
+    Returns NES RAM (2048 bytes) as observation instead of pixel frames.
+    This is a simpler, lower-dimensional representation that contains the
+    full game state.
+
+    Args:
+        level: Level specification - tuple (world, stage) or "random"/"sequential"
+        render_frames: Whether to render frames for visualization
+
+    Returns:
+        MarioEnvironment with RAM observations of shape (2048,)
+    """
+    if render_frames:
+        try:
+            from pyglet.window import key
+            import nes_py._image_viewer as _iv
+
+            _iv.key = key
+        except Exception:
+            pass
+
+    base_env = SuperMarioBrosMultiLevel(level=level)
+    env = JoypadSpace(base_env, actions=smb_actions.SIMPLE_MOVEMENT)
+    # Add strong death penalty (-475 to bring total death cost from ~-25 to ~-500)
+    env = DeathPenaltyWrapper(env, penalty=-475.0)
+    # Add flag capture bonus (+500 to make success strongly positive, symmetric with death)
+    env = FlagBonusWrapper(env, bonus=500.0)
+    env = SkipFrame(env, skip=4, render_frames=render_frames, sum_rewards=False)
+    # Return RAM instead of pixels - no frame stacking needed
+    env = RAMObservationWrapper(env)
+
+    return MarioEnvironment(env=env, base_env=base_env, fstack=None)
+
+
 # Backwards compatibility - returns tuple like old create_env
 def create_env(
     level: LevelType = (1, 1),
     render_frames: bool = False,
     lz4_compress: bool = True,
-) -> Tuple[Any, SuperMarioBrosMultiLevel, FrameStack]:
+) -> Tuple[Any, SuperMarioBrosMultiLevel, FrameStack | None]:
     """
     Create a wrapped Mario environment (legacy interface).
 

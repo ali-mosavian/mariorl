@@ -1,69 +1,68 @@
-from typing import Tuple
 from collections import deque
 
 import cv2
 import numpy as np
 import gymnasium as gym
-from gymnasium.spaces import Box, Dict
+from gymnasium.spaces import Box
 
 
 class DeathPenaltyWrapper(gym.Wrapper):
     """
     Add a strong death penalty to encourage survival.
-    
+
     The base gym-super-mario-bros only gives ~-25 for death, which is too weak
     for the agent to learn that death is catastrophic. This wrapper adds an
     additional penalty to make death strongly negative.
-    
+
     Args:
         env: The environment to wrap
         penalty: Additional penalty to add on death (default -475 to bring total to ~-500)
     """
-    
+
     def __init__(self, env: gym.Env, penalty: float = -475.0):
         super().__init__(env)
         self.penalty = penalty
-    
+
     def step(self, action):
         obs, reward, terminated, truncated, info = self.env.step(action)
-        
+
         # Add death penalty if terminated but NOT from flag capture
         if terminated and not info.get("flag_get", False):
             reward += self.penalty
-        
+
         return obs, reward, terminated, truncated, info
 
 
 class FlagBonusWrapper(gym.Wrapper):
     """
     Add a large bonus for capturing the flag to reinforce success.
-    
+
     The base gym-super-mario-bros gives no special bonus for reaching the flag,
     just the normal forward movement reward (~2-5). This wrapper adds a large
     bonus to make flag capture strongly positive, symmetric with the death penalty.
-    
+
     Args:
         env: The environment to wrap
         bonus: Bonus to add on flag capture (default +500)
     """
-    
+
     def __init__(self, env: gym.Env, bonus: float = 500.0):
         super().__init__(env)
         self.bonus = bonus
-    
+
     def step(self, action):
         obs, reward, terminated, truncated, info = self.env.step(action)
-        
+
         # Add flag bonus if flag was captured
         if info.get("flag_get", False):
             reward += self.bonus
-        
+
         return obs, reward, terminated, truncated, info
 
 
 class ResizeObservation(gym.ObservationWrapper):
     """Resize observations using OpenCV (much faster than skimage)."""
-    
+
     def __init__(self, env, shape):
         super().__init__(env)
         if isinstance(shape, int):
@@ -95,7 +94,7 @@ class SkipFrame(gym.Wrapper):
         sum_rewards: bool = False,
     ):
         """Return only every `skip`-th frame.
-        
+
         Args:
             env: The environment to wrap
             skip: Number of frames to skip (repeat action)
@@ -138,7 +137,7 @@ class SkipFrame(gym.Wrapper):
 
             if done or truncated:
                 break
-        
+
         # Return summed or last reward based on configuration
         reward = total_reward if self.sum_rewards else last_reward
         return s_, reward, done, truncated, info
@@ -176,14 +175,45 @@ class GrayScaleObservation(gym.ObservationWrapper):
         return gray
 
 
+class RAMObservationWrapper(gym.ObservationWrapper):
+    """Return NES RAM (2048 bytes) as observation instead of pixel frames.
+
+    The NES has 2KB of RAM containing the full game state: Mario's position,
+    velocity, enemy positions, timer, score, etc. This can be used as an
+    alternative to visual observations for training RL agents.
+
+    The RAM observation is a 1D uint8 array of shape (2048,).
+    """
+
+    def __init__(self, env: gym.Env):
+        super().__init__(env)
+        self.observation_space = Box(
+            low=0,
+            high=255,
+            shape=(2048,),
+            dtype=np.uint8,
+        )
+
+    def observation(self, obs: np.ndarray) -> np.ndarray:
+        """Return NES RAM instead of pixel observation."""
+        # Access RAM from the NES emulator
+        # SuperMarioBrosMultiLevel wraps MarioBrosLevel which has the ram attribute
+        unwrapped = self.env.unwrapped
+        # Handle SuperMarioBrosMultiLevel which wraps the actual NES env
+        if hasattr(unwrapped, "env") and hasattr(unwrapped.env, "ram"):
+            return unwrapped.env.ram.copy()
+        # Direct NESEnv case
+        return unwrapped.ram.copy()
+
+
 class ActionHistoryWrapper(gym.Wrapper):
     """
     Wrapper that tracks previous actions and includes them in the info dict.
-    
+
     This allows the agent to know what actions it took recently, which helps
     with understanding action effects (e.g., "I pressed jump last frame, so
     I'm probably mid-air now").
-    
+
     The action history is stored as a one-hot encoded array in the info dict
     under the key 'action_history'. The network can use this to correlate
     visual observations with recent actions.
@@ -200,19 +230,19 @@ class ActionHistoryWrapper(gym.Wrapper):
         self.history_len = history_len
         self.num_actions = num_actions
         self.action_history: deque = deque(maxlen=history_len)
-        
+
         # Initialize with "no action" (all zeros, or could use a special token)
         self._reset_history()
-    
+
     def _reset_history(self):
         """Reset action history to initial state (no actions taken)."""
         self.action_history.clear()
         for _ in range(self.history_len):
             self.action_history.append(-1)  # -1 indicates no action yet
-    
+
     def _get_action_history_array(self) -> np.ndarray:
         """Get action history as one-hot encoded array.
-        
+
         Returns:
             Array of shape (history_len, num_actions) with one-hot encoding.
             Actions that haven't been taken yet (-1) are all zeros.
@@ -222,36 +252,36 @@ class ActionHistoryWrapper(gym.Wrapper):
             if action >= 0:
                 history[i, action] = 1.0
         return history
-    
+
     def reset(self, **kwargs):
         """Reset environment and action history."""
         self._reset_history()
         obs, info = self.env.reset(**kwargs)
-        info['action_history'] = self._get_action_history_array()
+        info["action_history"] = self._get_action_history_array()
         return obs, info
-    
+
     def step(self, action):
         """Take action and update history."""
         # Record this action in history
         self.action_history.append(action)
-        
+
         # Step environment
         obs, reward, done, truncated, info = self.env.step(action)
-        
+
         # Add action history to info
-        info['action_history'] = self._get_action_history_array()
-        
+        info["action_history"] = self._get_action_history_array()
+
         return obs, reward, done, truncated, info
 
 
 class RelativeDeathMemory(gym.Wrapper):
     """
     Wrapper that tracks death positions and provides them as relative distances.
-    
+
     Instead of encoding absolute positions like "X=690 is dangerous", this encodes
     relative positions like "50 pixels ahead is dangerous". This helps the network
     generalize - it learns "danger 50px ahead = jump" which works for ALL pits.
-    
+
     The death memory is stored as a vector in the info dict under 'death_memory'.
     Each bin represents a distance range from Mario's current position.
     """
@@ -280,99 +310,98 @@ class RelativeDeathMemory(gym.Wrapper):
         self.max_lookbehind = max_lookbehind
         self.memory_size = memory_size
         self.merge_threshold = merge_threshold
-        
+
         # Store deaths per level: {(world, stage): [(x, count), ...]}
         self.death_memory: dict[tuple, list] = {}
         self.current_level = (1, 1)
-        
+
         # Bin layout: 25% behind, 75% ahead
         self.behind_bins = num_bins // 4
         self.ahead_bins = num_bins - self.behind_bins
         self.behind_bin_size = max_lookbehind / max(self.behind_bins, 1)
         self.ahead_bin_size = max_lookahead / max(self.ahead_bins, 1)
-    
+
     def _get_relative_death_vector(self, current_x: int) -> np.ndarray:
         """
         Create vector of death densities relative to current position.
-        
+
         Bins are organized as: [behind_bins..., ahead_bins...]
         - Behind bins: distances from -max_lookbehind to 0
         - Ahead bins: distances from 0 to +max_lookahead
         """
         deaths = self.death_memory.get(self.current_level, [])
         death_vector = np.zeros(self.num_bins, dtype=np.float32)
-        
+
         for death_x, count in deaths:
             relative_x = death_x - current_x
-            
+
             if -self.max_lookbehind <= relative_x < 0:
                 # Death is behind Mario
                 bin_idx = int((-relative_x) / self.behind_bin_size)
                 bin_idx = min(bin_idx, self.behind_bins - 1)
                 # Reverse so closer deaths are in higher bins
                 death_vector[self.behind_bins - 1 - bin_idx] += count
-                
+
             elif 0 <= relative_x < self.max_lookahead:
                 # Death is ahead of Mario
                 bin_idx = int(relative_x / self.ahead_bin_size)
                 bin_idx = min(bin_idx, self.ahead_bins - 1)
                 death_vector[self.behind_bins + bin_idx] += count
-        
+
         # Normalize to [0, 1]
         max_val = death_vector.max()
         if max_val > 0:
             death_vector = death_vector / max_val
-        
+
         return death_vector
-    
+
     def _record_death(self, x: int):
         """Record a death, merging nearby deaths to avoid duplicates."""
         if self.current_level not in self.death_memory:
             self.death_memory[self.current_level] = []
-        
+
         deaths = self.death_memory[self.current_level]
-        
+
         # Check if there's already a death nearby - if so, increment count
         for i, (dx, count) in enumerate(deaths):
             if abs(dx - x) < self.merge_threshold:
                 deaths[i] = (dx, count + 1)
                 return
-        
+
         # New death location
         deaths.append((x, 1))
-        
+
         # Limit memory size - keep most frequent deaths
         if len(deaths) > self.memory_size:
             deaths.sort(key=lambda d: d[1], reverse=True)
-            self.death_memory[self.current_level] = deaths[:self.memory_size]
-    
+            self.death_memory[self.current_level] = deaths[: self.memory_size]
+
     def step(self, action):
         obs, reward, done, truncated, info = self.env.step(action)
-        
+
         # Update current level
         self.current_level = (info.get("world", 1), info.get("stage", 1))
-        
+
         # Record death position
         if done and reward < 0:
             self._record_death(info.get("x_pos", 0))
-        
+
         # Add relative death vector to info
         info["death_memory"] = self._get_relative_death_vector(info.get("x_pos", 0))
-        
+
         return obs, reward, done, truncated, info
-    
+
     def reset(self, **kwargs):
         obs, info = self.env.reset(**kwargs)
         self.current_level = (info.get("world", 1), info.get("stage", 1))
         info["death_memory"] = self._get_relative_death_vector(info.get("x_pos", 40))
         return obs, info
-    
+
     def get_death_count(self) -> int:
         """Get total number of recorded deaths across all levels."""
         return sum(len(deaths) for deaths in self.death_memory.values())
-    
+
     def get_death_positions(self, level: tuple | None = None) -> list[tuple[int, int]]:
         """Get death positions for a level (or current level if None)."""
         level = level or self.current_level
         return self.death_memory.get(level, [])
-

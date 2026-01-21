@@ -5,6 +5,7 @@ Uses numpy array backed by mmap, then torch.from_numpy() for tensor access.
 Ring buffer design allows writer to keep writing while reader catches up.
 Seqlock synchronization for crash safety per slot.
 """
+
 from __future__ import annotations
 
 import mmap
@@ -12,18 +13,19 @@ import struct
 from pathlib import Path
 from dataclasses import dataclass
 
-import numpy as np
 import torch
+import numpy as np
 import torch.nn as nn
 
 
 @dataclass(frozen=True, slots=True)
 class GradientPacket:
     """Immutable gradient packet from shared memory.
-    
+
     Contains gradients and metadata from a worker's gradient computation.
     Frozen for thread safety and to prevent accidental mutation.
     """
+
     grads: dict[str, torch.Tensor]
     version: int
     worker_id: int
@@ -77,7 +79,7 @@ BEST_X_OFFSET = 53
 
 # Global header (64 bytes at start of file):
 # - write_idx: 4 bytes (uint32) - next slot to write
-# - read_idx: 4 bytes (uint32) - next slot to read  
+# - read_idx: 4 bytes (uint32) - next slot to read
 # - num_slots: 4 bytes (uint32) - number of slots
 # - padding: 52 bytes
 GLOBAL_HEADER_SIZE = 64
@@ -98,7 +100,7 @@ class SharedGradientTensor:
         buffer = SharedGradientTensor(model, shm_path, create=True, num_slots=4)
         buffer.write(grads)  # Writes to next slot
 
-        # Learner (reader)  
+        # Learner (reader)
         buffer = SharedGradientTensor(model, shm_path, create=False, num_slots=4)
         grads = buffer.read()  # Reads oldest unread slot
     """
@@ -230,7 +232,9 @@ class SharedGradientTensor:
         """Write global header."""
         self._mmap[0:8] = struct.pack("II", write_idx, read_idx)
 
-    def _read_slot_header(self, slot_idx: int) -> tuple[int, int, int, int, int, int, float, float, float, float, float, float, int, int, int]:
+    def _read_slot_header(
+        self, slot_idx: int
+    ) -> tuple[int, int, int, int, int, int, float, float, float, float, float, float, int, int, int]:
         """Read slot header. Returns (seq, ready, version, worker_id, timesteps, episodes, loss, q_mean, td_error, avg_reward, avg_speed, entropy, deaths, flags, best_x)."""
         offset = self._slot_offset(slot_idx)
         seq = struct.unpack("I", self._mmap[offset : offset + 4])[0]
@@ -248,7 +252,23 @@ class SharedGradientTensor:
         deaths = struct.unpack("I", self._mmap[offset + DEATHS_OFFSET : offset + DEATHS_OFFSET + 4])[0]
         flags = struct.unpack("I", self._mmap[offset + FLAGS_OFFSET : offset + FLAGS_OFFSET + 4])[0]
         best_x = struct.unpack("I", self._mmap[offset + BEST_X_OFFSET : offset + BEST_X_OFFSET + 4])[0]
-        return seq, ready, version, worker_id, timesteps, episodes, loss, q_mean, td_error, avg_reward, avg_speed, entropy, deaths, flags, best_x
+        return (
+            seq,
+            ready,
+            version,
+            worker_id,
+            timesteps,
+            episodes,
+            loss,
+            q_mean,
+            td_error,
+            avg_reward,
+            avg_speed,
+            entropy,
+            deaths,
+            flags,
+            best_x,
+        )
 
     def _write_slot_header(
         self,
@@ -388,10 +408,11 @@ class SharedGradientTensor:
         # 2. Copy gradients to slot's numpy array
         slot_array = self._slot_arrays[slot_idx]
         offset = 0
-        for name, numel, shape in self.param_layout:
+        for name, numel, _shape in self.param_layout:
             if name in grads:
                 grad = grads[name]
-                if grad.is_cuda:
+                # Move to CPU if on any accelerator (CUDA, MPS, etc.)
+                if not grad.is_cpu:
                     grad = grad.cpu()
                 np.copyto(
                     slot_array[offset : offset + numel],
@@ -442,7 +463,23 @@ class SharedGradientTensor:
         slot_idx = read_idx % self.num_slots
 
         # 1. Check ready and seq
-        seq1, ready, version, worker_id, timesteps, episodes, loss, q_mean, td_error, avg_reward, avg_speed, entropy, deaths, flags, best_x = self._read_slot_header(slot_idx)
+        (
+            seq1,
+            ready,
+            version,
+            worker_id,
+            timesteps,
+            episodes,
+            loss,
+            q_mean,
+            td_error,
+            avg_reward,
+            avg_speed,
+            entropy,
+            deaths,
+            flags,
+            best_x,
+        ) = self._read_slot_header(slot_idx)
 
         if ready != 1 or (seq1 % 2) == 1:
             return None  # Not ready or write in progress
@@ -504,14 +541,46 @@ class SharedGradientTensor:
         slot_idx = latest_idx % self.num_slots
 
         # 1. Check ready and seq
-        seq1, ready, version, worker_id, timesteps, episodes, loss, q_mean, td_error, avg_reward, avg_speed, entropy, deaths, flags, best_x = self._read_slot_header(slot_idx)
+        (
+            seq1,
+            ready,
+            version,
+            worker_id,
+            timesteps,
+            episodes,
+            loss,
+            q_mean,
+            td_error,
+            avg_reward,
+            avg_speed,
+            entropy,
+            deaths,
+            flags,
+            best_x,
+        ) = self._read_slot_header(slot_idx)
 
         if ready != 1 or (seq1 % 2) == 1:
             # Latest not ready, try previous
             if latest_idx > read_idx:
                 latest_idx -= 1
                 slot_idx = latest_idx % self.num_slots
-                seq1, ready, version, worker_id, timesteps, episodes, loss, q_mean, td_error, avg_reward, avg_speed, entropy, deaths, flags, best_x = self._read_slot_header(slot_idx)
+                (
+                    seq1,
+                    ready,
+                    version,
+                    worker_id,
+                    timesteps,
+                    episodes,
+                    loss,
+                    q_mean,
+                    td_error,
+                    avg_reward,
+                    avg_speed,
+                    entropy,
+                    deaths,
+                    flags,
+                    best_x,
+                ) = self._read_slot_header(slot_idx)
                 if ready != 1 or (seq1 % 2) == 1:
                     return None
             else:
@@ -629,7 +698,7 @@ class SharedGradientTensorPool:
 
     def read_worker_buffer(self, worker_id: int) -> GradientPacket | None:
         """Read gradients from a specific worker's buffer.
-        
+
         Returns:
             GradientPacket if data available, None otherwise
         """
@@ -639,7 +708,7 @@ class SharedGradientTensorPool:
 
     def read_all_available(self) -> list[GradientPacket]:
         """Read all available gradients from all workers.
-        
+
         Returns:
             List of GradientPacket instances
         """

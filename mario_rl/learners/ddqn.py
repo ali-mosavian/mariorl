@@ -12,16 +12,18 @@ Implements the Learner protocol for Double DQN:
 """
 
 from typing import Any
-from dataclasses import dataclass
 from dataclasses import field
+from dataclasses import dataclass
 
 import torch
 from torch import Tensor
 import torch.nn.functional as F
 
-from mario_rl.models import DoubleDQN
-from mario_rl.models.ddqn import symlog, symexp
-from mario_rl.mcts.protocols import PolicyAdapter, ValueAdapter
+from mario_rl.models.ddqn import symexp
+from mario_rl.models.ddqn import symlog
+from mario_rl.models.protocols import DDQNModel
+from mario_rl.mcts.protocols import ValueAdapter
+from mario_rl.mcts.protocols import PolicyAdapter
 
 
 @dataclass
@@ -43,9 +45,11 @@ class DDQNLearner:
     - N-step returns with correct gamma^n discounting
     - Importance sampling weights for PER bias correction
     - Entropy regularization for exploration
+
+    The model can be any DDQNModel implementation (CNN for frames, MLP for RAM).
     """
 
-    model: DoubleDQN
+    model: DDQNModel
     gamma: float = 0.99
     n_step: int = 1
     entropy_coef: float = 0.01
@@ -58,7 +62,7 @@ class DDQNLearner:
 
     def __post_init__(self) -> None:
         """Pre-compute n-step gamma for efficiency."""
-        self._n_step_gamma = self.gamma ** self.n_step
+        self._n_step_gamma = self.gamma**self.n_step
 
     def compute_loss(
         self,
@@ -100,27 +104,35 @@ class DDQNLearner:
         """
         # Determine if we need danger predictions
         has_danger_aux = (
-            danger_targets is not None and 
-            hasattr(self.model, 'danger_prediction_bins') and 
-            self.model.danger_prediction_bins > 0
+            danger_targets is not None
+            and hasattr(self.model, "danger_prediction_bins")
+            and self.model.danger_prediction_bins > 0
         )
-        
+
         # Current Q-values for taken actions (in symlog space)
-        action_hist = action_histories if action_histories is not None and hasattr(self.model, 'action_history_len') and self.model.action_history_len > 0 else None
-        
+        action_hist = (
+            action_histories
+            if action_histories is not None
+            and hasattr(self.model, "action_history_len")
+            and self.model.action_history_len > 0
+            else None
+        )
+
         if has_danger_aux:
             current_q, danger_pred = self.model(
-                states, network="online",
+                states,
+                network="online",
                 action_history=action_hist,
                 return_danger=True,
             )
         else:
             current_q = self.model(
-                states, network="online",
+                states,
+                network="online",
                 action_history=action_hist,
             )
             danger_pred = None
-        
+
         current_q_selected = current_q.gather(1, actions.unsqueeze(1)).squeeze(1)  # (batch,)
 
         # Double DQN target:
@@ -129,12 +141,18 @@ class DDQNLearner:
         # 3. Convert to real space, apply Bellman, convert back to symlog
         with torch.no_grad():
             # Determine auxiliary inputs for next states
-            next_hist = next_action_histories if next_action_histories is not None and hasattr(self.model, 'action_history_len') and self.model.action_history_len > 0 else None
-            
+            next_hist = (
+                next_action_histories
+                if next_action_histories is not None
+                and hasattr(self.model, "action_history_len")
+                and self.model.action_history_len > 0
+                else None
+            )
+
             # Action selection with online network (symlog-scaled, but argmax is invariant)
             next_q_online = self.model(next_states, network="online", action_history=next_hist)
             next_q_target = self.model(next_states, network="target", action_history=next_hist)
-            
+
             best_actions = next_q_online.argmax(dim=1)  # (batch,)
 
             # Value evaluation with target network (symlog-scaled)
@@ -152,9 +170,7 @@ class DDQNLearner:
         # Compute element-wise MSE loss (both in symlog space)
         # MSE instead of Huber: gives strong gradients for large TD errors (death)
         # Symlog compresses scale, grad clipping (max_grad_norm=100) prevents explosion
-        element_wise_loss = F.mse_loss(
-            current_q_selected, target_q, reduction="none"
-        )
+        element_wise_loss = F.mse_loss(current_q_selected, target_q, reduction="none")
 
         # Apply importance sampling weights for PER bias correction
         if weights is not None:

@@ -10,20 +10,19 @@ death hotspots. It intercepts step() calls and handles:
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-from dataclasses import field
-from pathlib import Path
 from typing import Any
+from pathlib import Path
 from typing import Tuple
+from dataclasses import field
+from dataclasses import dataclass
 
 import numpy as np
 
+from mario_rl.core.config import SnapshotConfig
+from mario_rl.training.snapshot import SnapshotManager
 from mario_rl.training.snapshot_handler import SnapshotHandler
-from mario_rl.training.snapshot_handler import SnapshotResult
 from mario_rl.training.snapshot_state_machine import SnapshotAction
 from mario_rl.training.snapshot_state_machine import SnapshotStateMachine
-from mario_rl.training.snapshot import SnapshotManager
-from mario_rl.core.config import SnapshotConfig
 
 
 @dataclass
@@ -120,7 +119,7 @@ class SnapshotMarioEnvironment:
     @property
     def unwrapped(self) -> Any:
         """Access to unwrapped NES environment (for MCTS save/restore).
-        
+
         Returns the actual NES emulator which has dump_state()/load_state().
         """
         return self.env.base_env.env
@@ -222,7 +221,7 @@ class SnapshotMarioEnvironment:
         if terminated and reward < 0:
             # Normal death without snapshot restore - mark for TD target
             info["actual_death"] = True
-        
+
         self._current_obs = obs
         return obs, reward, terminated, truncated, info
 
@@ -240,6 +239,7 @@ def create_snapshot_mario_env(
     enabled: bool = True,
     sum_rewards: bool = False,
     action_history_len: int = 4,
+    input_type: str = "frames",
 ) -> SnapshotMarioEnvironment:
     """
     Factory function to create a Mario environment with snapshot support.
@@ -253,18 +253,26 @@ def create_snapshot_mario_env(
         enabled: Whether snapshot functionality is enabled
         sum_rewards: If True, sum rewards across frame skips. If False, use last reward only.
         action_history_len: If > 0, track this many previous actions in info dict.
+        input_type: "frames" for visual observations (4x64x64) or "ram" for NES RAM (2048)
 
     Returns:
         SnapshotMarioEnvironment with full snapshot support
     """
+    from mario_rl.environment.factory import create_ram_env
     from mario_rl.environment.factory import create_mario_env
 
-    base_env = create_mario_env(
-        level=level,
-        render_frames=render_frames,
-        sum_rewards=sum_rewards,
-        action_history_len=action_history_len,
-    )
+    if input_type == "ram":
+        base_env = create_ram_env(
+            level=level,
+            render_frames=render_frames,
+        )
+    else:
+        base_env = create_mario_env(
+            level=level,
+            render_frames=render_frames,
+            sum_rewards=sum_rewards,
+            action_history_len=action_history_len,
+        )
 
     return SnapshotMarioEnvironment(
         env=base_env,

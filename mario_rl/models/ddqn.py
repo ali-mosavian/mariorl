@@ -43,7 +43,6 @@ import numpy as np
 from torch import nn
 from torch import Tensor
 
-
 # =============================================================================
 # Symlog Transform (from Dreamer V3)
 # =============================================================================
@@ -51,7 +50,7 @@ from torch import Tensor
 
 def symlog(x: Tensor) -> Tensor:
     """Symmetric logarithm: sign(x) * ln(|x| + 1).
-    
+
     Compresses large values while preserving small values and sign.
     Used for scale-invariant Q-value predictions.
     """
@@ -277,23 +276,40 @@ class DoubleDQN(nn.Module):
         # Copy online weights to target and freeze target
         self.sync_target()
 
-    def forward(self, x: Tensor, network: str = "online") -> Tensor:
+    def forward(
+        self,
+        x: Tensor,
+        network: str = "online",
+        action_history: Tensor | None = None,
+        return_danger: bool = False,
+    ) -> Tensor | tuple[Tensor, Tensor]:
         """Forward pass through specified network.
 
         Args:
             x: Observation tensor (N, C, H, W)
             network: "online" or "target"
+            action_history: Ignored (for API compatibility with advanced models)
+            return_danger: If True, returns (q_values, danger_pred) tuple.
+                          Since this model has no danger head, returns zeros.
 
         Returns:
             q_values: Q-values for each action (N, num_actions)
+            If return_danger=True: tuple of (q_values, danger_prediction)
         """
+        # action_history is ignored - this simple model doesn't use it
         match network:
             case "online":
-                return self.online(x)
+                q_values = self.online(x)
             case "target":
-                return self.target(x)
+                q_values = self.target(x)
             case _:
                 raise ValueError(f"Unknown network: {network}")
+
+        if return_danger:
+            # No danger head in this model, return zeros for compatibility
+            danger_pred = torch.zeros(x.shape[0], 16, device=x.device)
+            return q_values, danger_pred
+        return q_values
 
     def select_action(self, x: Tensor, epsilon: float = 0.0) -> Tensor:
         """Get action using online network with epsilon-greedy."""

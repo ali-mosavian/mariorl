@@ -10,6 +10,7 @@ Usage:
     uv run python scripts/train_distributed.py --model ddqn --workers 4
     uv run python scripts/train_distributed.py --model dreamer --workers 8 --no-ui
 """
+
 from __future__ import annotations
 
 import os
@@ -19,15 +20,16 @@ import atexit
 import shutil
 import signal
 import threading
-import multiprocessing as mp
+from typing import Any
 from pathlib import Path
+import multiprocessing as mp
 from datetime import datetime
 from dataclasses import dataclass
-from typing import Any
 
 mp.set_start_method("spawn", force=True)
 
-from multiprocessing import Queue, Process
+from multiprocessing import Queue
+from multiprocessing import Process
 
 import click
 import torch
@@ -35,15 +37,13 @@ from torch import nn
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from mario_rl.distributed.events import (
-    EventPublisher,
-    EventSubscriber,
-    format_event,
-    event_to_ui_message,
-    make_endpoint,
-)
-from mario_rl.metrics import MetricAggregator, DeathHotspotAggregate, DifficultyHotspotAggregate
-
+from mario_rl.metrics import MetricAggregator
+from mario_rl.distributed.events import format_event
+from mario_rl.distributed.events import make_endpoint
+from mario_rl.distributed.events import EventPublisher
+from mario_rl.distributed.events import EventSubscriber
+from mario_rl.metrics import DifficultyHotspotAggregate
+from mario_rl.distributed.events import event_to_ui_message
 
 # =============================================================================
 # Configuration
@@ -79,6 +79,7 @@ class Config:
     checkpoint_interval: int = 10_000
 
     # Environment options
+    input_type: str = "frames"  # "frames" (4x64x64) or "ram" (2048 bytes)
     action_history_len: int = 4  # Include previous actions in observation (default: 4)
     danger_prediction_bins: int = 16  # Auxiliary danger prediction task (default: 16)
     sum_rewards: bool = True  # If False, use only last reward from frame skips
@@ -107,31 +108,47 @@ def create_model_and_learner(
     device: torch.device | None = None,
 ) -> tuple[nn.Module, Any]:
     """Create model and learner from config.
-    
+
     If MCTS is enabled, also creates and injects the appropriate adapter
     into the learner for use by MCTSExplorer.
     """
     if config.model == "ddqn":
-        from mario_rl.agent.ddqn_net import DoubleDQN
         from mario_rl.learners.ddqn import DDQNLearner
 
-        # Use model with action history and death memory support
-        model = DoubleDQN(
-            input_shape=(4, 64, 64),
-            num_actions=7,  # SIMPLE_MOVEMENT
-            feature_dim=512,
-            hidden_dim=256,
-            dropout=0.1,
-            action_history_len=config.action_history_len,
-            danger_prediction_bins=config.danger_prediction_bins,
-        )
+        # Create model based on input type
+        if config.input_type == "ram":
+            from mario_rl.models.ram_dqn import RAMDoubleDQN
+
+            model = RAMDoubleDQN(
+                ram_size=2048,
+                num_actions=7,  # SIMPLE_MOVEMENT
+                feature_dim=512,
+                hidden_dim=256,
+                dropout=0.1,
+                action_history_len=config.action_history_len,
+            )
+        else:
+            from mario_rl.agent.ddqn_net import DoubleDQN
+
+            # Use model with action history and death memory support
+            model = DoubleDQN(
+                input_shape=(4, 64, 64),
+                num_actions=7,  # SIMPLE_MOVEMENT
+                feature_dim=512,
+                hidden_dim=256,
+                dropout=0.1,
+                action_history_len=config.action_history_len,
+                danger_prediction_bins=config.danger_prediction_bins,
+            )
+
         if device:
             model = model.to(device)
 
-        # Create MCTS adapter if enabled
+        # Create MCTS adapter if enabled (only for frame-based model)
         mcts_adapter = None
-        if config.mcts_enabled and device:
+        if config.mcts_enabled and device and config.input_type == "frames":
             from mario_rl.mcts import DDQNAdapter
+
             mcts_adapter = DDQNAdapter(net=model, device=device)
 
         learner = DDQNLearner(
@@ -143,9 +160,10 @@ def create_model_and_learner(
         )
 
     elif config.model == "muzero":
-        from mario_rl.models.muzero import MuZeroModel, MuZeroConfig
-        from mario_rl.learners.muzero import MuZeroLearner
         from mario_rl.mcts import MuZeroAdapter
+        from mario_rl.models.muzero import MuZeroModel
+        from mario_rl.models.muzero import MuZeroConfig
+        from mario_rl.learners.muzero import MuZeroLearner
 
         cfg = MuZeroConfig(
             input_shape=(4, 64, 64),
@@ -179,7 +197,8 @@ def create_model_and_learner(
         learner.mcts_adapter = mcts_adapter
 
     else:  # dreamer
-        from mario_rl.models.dreamer import DreamerModel, DreamerConfig
+        from mario_rl.models.dreamer import DreamerModel
+        from mario_rl.models.dreamer import DreamerConfig
         from mario_rl.learners.dreamer import DreamerLearner
 
         cfg = DreamerConfig(
@@ -200,6 +219,7 @@ def create_model_and_learner(
         mcts_adapter = None
         if config.mcts_enabled and device:
             from mario_rl.mcts import DreamerAdapter
+
             mcts_adapter = DreamerAdapter(net=model, device=device)
 
         learner = DreamerLearner(model=model, gamma=config.gamma, mcts_adapter=mcts_adapter)
@@ -224,10 +244,10 @@ def install_exit_handler():
 
 def parse_level(level_str: str) -> tuple[int, int] | str:
     """Parse level string to tuple or special mode.
-    
+
     Args:
         level_str: 'random', 'sequential', or 'W,S' (e.g. '1,1')
-    
+
     Returns:
         (world, stage) tuple or 'random'/'sequential' string
     """
@@ -260,12 +280,14 @@ def run_worker(
     events = make_event_publisher(zmq_endpoint, source_id=worker_id)
 
     try:
-        from mario_rl.environment.snapshot_wrapper import create_snapshot_mario_env
-        from mario_rl.distributed.training_worker import TrainingWorker
-        from mario_rl.distributed.shm_heartbeat import SharedHeartbeat
-        from mario_rl.training.shared_gradient_tensor import attach_tensor_buffer
-        from mario_rl.metrics import MetricLogger, DDQNMetrics, DreamerMetrics
+        from mario_rl.metrics import DDQNMetrics
+        from mario_rl.metrics import MetricLogger
+        from mario_rl.metrics import DreamerMetrics
         from mario_rl.metrics.schema import MuZeroMetrics
+        from mario_rl.distributed.shm_heartbeat import SharedHeartbeat
+        from mario_rl.distributed.training_worker import TrainingWorker
+        from mario_rl.training.shared_gradient_tensor import attach_tensor_buffer
+        from mario_rl.environment.snapshot_wrapper import create_snapshot_mario_env
 
         device = torch.device(device_str)
         events.log(f"Starting on {device}...")
@@ -285,6 +307,7 @@ def run_worker(
             enabled=True,
             sum_rewards=config.sum_rewards,
             action_history_len=config.action_history_len,
+            input_type=config.input_type,
         )
         _, learner = create_model_and_learner(config, device)
 
@@ -302,7 +325,7 @@ def run_worker(
             csv_path=csv_path,
             publisher=events,
         )
-        
+
         # Set device as a constant text metric (included in all flushes)
         logger.text("device", device_str)
 
@@ -350,7 +373,7 @@ def run_worker(
         total_episodes = 0
         best_x = 0
         grads_sent = 0
-        
+
         # Track snapshot stats (handled by wrapper, but we log them)
         last_snapshot_saves = 0
         last_snapshot_restores = 0
@@ -358,11 +381,12 @@ def run_worker(
         while True:
             heartbeat.update(worker_id)
             worker.sync_weights(weights_path)
-            
+
             # Load difficulty ranges for transition tagging
             ranges_path = weights_path.parent / "difficulty_ranges.json"
             if ranges_path.exists():
                 from mario_rl.metrics.levels import DifficultyHotspotAggregate
+
                 ranges = DifficultyHotspotAggregate.load_difficulty_ranges(ranges_path)
                 worker.set_difficulty_ranges(ranges)
 
@@ -374,11 +398,11 @@ def run_worker(
             # Update stats from raw env info dicts
             info = result["collection_info"]
             total_episodes += info.get("episodes_completed", 0)
-            
+
             # Extract game-specific metrics from step_infos (raw env info dicts)
             step_infos = info.get("step_infos", [])
             episode_end_infos = info.get("episode_end_infos", [])
-            
+
             # Get current game state from last step's info
             if step_infos:
                 last_info = step_infos[-1]
@@ -391,9 +415,9 @@ def run_worker(
                 game_time = 0
                 world = 1
                 stage = 1
-            
+
             best_x = max(best_x, x_pos)
-            
+
             # Count deaths, timeouts, and flags
             # Include both: deaths where we restored AND deaths where episode ended
             deaths_this_cycle = 0
@@ -401,7 +425,7 @@ def run_worker(
             death_positions: list[int] = []
             timeout_positions: list[int] = []
             flags_this_cycle = 0
-            
+
             # Count deaths that were restored (from step_infos)
             for step_info in step_infos:
                 if step_info.get("snapshot_restored", False):
@@ -409,7 +433,7 @@ def run_worker(
                     if death_x > 0:
                         deaths_this_cycle += 1
                         death_positions.append(death_x)
-            
+
             # Count deaths/timeouts from actual episode endings
             for ep_info in episode_end_infos:
                 if ep_info.get("flag_get", False):
@@ -427,7 +451,7 @@ def run_worker(
                     death_x = ep_info.get("x_pos", 0)
                     if death_x > 0:
                         death_positions.append(death_x)
-            
+
             # Log deaths to CSV and publish for aggregation
             level_id = f"{world}-{stage}"
             if deaths_this_cycle > 0:
@@ -436,32 +460,41 @@ def run_worker(
                 positions_str = ",".join(str(p) for p in death_positions)
                 logger.text("death_positions", f"{level_id}:{positions_str}")
                 # Publish for main process aggregation
-                events.publish("death_positions", {
-                    "level_id": level_id,
-                    "positions": death_positions,
-                })
+                events.publish(
+                    "death_positions",
+                    {
+                        "level_id": level_id,
+                        "positions": death_positions,
+                    },
+                )
             else:
                 # Clear death positions if no deaths this cycle
                 logger.text("death_positions", "")
-            
+
             # Get stuck positions from worker and publish for aggregation
             stuck_positions = worker.get_stuck_positions()
             for stuck_level_id, stuck_pos_list in stuck_positions.items():
                 if stuck_pos_list:
-                    events.publish("stuck_positions", {
-                        "level_id": stuck_level_id,
-                        "positions": stuck_pos_list,
-                    })
+                    events.publish(
+                        "stuck_positions",
+                        {
+                            "level_id": stuck_level_id,
+                            "positions": stuck_pos_list,
+                        },
+                    )
             if timeouts_this_cycle > 0:
                 logger.count("timeouts", n=timeouts_this_cycle)
                 # Log timeout positions to CSV (format: "level:pos1,pos2,pos3")
                 timeout_positions_str = ",".join(str(p) for p in timeout_positions)
                 logger.text("timeout_positions", f"{level_id}:{timeout_positions_str}")
                 # Publish for main process aggregation
-                events.publish("timeout_positions", {
-                    "level_id": level_id,
-                    "positions": timeout_positions,
-                })
+                events.publish(
+                    "timeout_positions",
+                    {
+                        "level_id": level_id,
+                        "positions": timeout_positions,
+                    },
+                )
             else:
                 # Clear timeout positions if no timeouts this cycle
                 logger.text("timeout_positions", "")
@@ -475,7 +508,7 @@ def run_worker(
             logger.gauge("game_time", game_time)
             logger.gauge("world", world)
             logger.gauge("stage", stage)
-            
+
             # Calculate speed from episode end infos (x_pos / time_spent)
             for ep_info in episode_end_infos:
                 ep_time = ep_info.get("time", 0)
@@ -489,16 +522,16 @@ def run_worker(
                 stats = worker.env.snapshot_stats
                 current_saves = stats.get("snapshot_saves", 0)
                 current_restores = stats.get("snapshot_restores", 0)
-                
+
                 # Log incremental counts
                 new_saves = current_saves - last_snapshot_saves
                 new_restores = current_restores - last_snapshot_restores
-                
+
                 if new_saves > 0:
                     logger.count("snapshot_saves", n=new_saves)
                 if new_restores > 0:
                     logger.count("snapshot_restores", n=new_restores)
-                
+
                 last_snapshot_saves = current_saves
                 last_snapshot_restores = current_restores
 
@@ -533,7 +566,7 @@ def run_worker(
                         logger.gauge("q_max", float(m["q_max"]))
                 else:
                     loss = 0.0
-                
+
                 gradient_buffer.write(
                     grads=grads,
                     version=version,
@@ -553,11 +586,14 @@ def run_worker(
             # Periodic logging
             if grads_sent % 10 == 0:
                 eps = worker.epsilon_at(worker.total_steps)
-                events.log(f"steps={worker.total_steps}, eps={total_episodes}, ε={eps:.4f}, best_x={best_x}, grads={grads_sent}")
+                events.log(
+                    f"steps={worker.total_steps}, eps={total_episodes}, ε={eps:.4f}, best_x={best_x}, grads={grads_sent}"
+                )
 
     except Exception as e:
         events.log(f"Error: {e}")
         import traceback
+
         traceback.print_exc()
         sys.exit(1)
 
@@ -582,7 +618,6 @@ def run_coordinator(
 
     try:
         from mario_rl.distributed.training_coordinator import TrainingCoordinator
-        from mario_rl.metrics import MetricLogger, CoordinatorMetrics
 
         device = torch.device(device_str)
         events.log(f"Starting on {device}...")
@@ -621,7 +656,9 @@ def run_coordinator(
             if time.time() - last_log > 5.0:
                 elapsed = time.time() - last_log
                 grads_per_sec = grads_since_log / elapsed
-                events.log(f"update={result['update_count']}, steps={result['total_steps']}, grads/s={grads_per_sec:.1f}")
+                events.log(
+                    f"update={result['update_count']}, steps={result['total_steps']}, grads/s={grads_per_sec:.1f}"
+                )
 
                 # Status update (sent via ZMQ)
                 events.status(
@@ -645,6 +682,7 @@ def run_coordinator(
     except Exception as e:
         events.log(f"Error: {e}")
         import traceback
+
         traceback.print_exc()
         sys.exit(1)
 
@@ -758,8 +796,16 @@ def start_monitor_thread(
 @click.option("--mcts-periodic", default=10, help="Use MCTS every N episodes")
 @click.option("--mcts-seq-len", default=15, help="Actions to execute per MCTS call (like old MCTS)")
 # Environment options
+@click.option(
+    "--input-type",
+    type=click.Choice(["frames", "ram"]),
+    default="frames",
+    help="Observation type: frames (4x64x64) or ram (2048 bytes)",
+)
 @click.option("--action-history", default=4, help="Length of action history to include in observation (0=disabled)")
-@click.option("--sum-rewards/--last-reward", default=True, help="Sum rewards across frame skips (default) or use only last reward")
+@click.option(
+    "--sum-rewards/--last-reward", default=True, help="Sum rewards across frame skips (default) or use only last reward"
+)
 # Other
 @click.option("--total-steps", default=2_000_000, help="Total training steps (for LR schedule)")
 @click.option("--no-ui", is_flag=True, help="Disable ncurses UI")
@@ -792,6 +838,7 @@ def main(
     mcts_stuck: int,
     mcts_periodic: int,
     mcts_seq_len: int,
+    input_type: str,
     action_history: int,
     sum_rewards: bool,
     total_steps: int,
@@ -802,6 +849,7 @@ def main(
     print("Distributed Training")
     print("=" * 70)
     print(f"  Model: {model}")
+    print(f"  Input type: {input_type}")
     print(f"  Workers: {workers}, Level: {level}")
     print(f"  LR: {lr} → {lr_end} (cosine), Gamma: {gamma}")
     print(f"  Tau: {tau}, N-step: {n_step}")
@@ -813,15 +861,19 @@ def main(
     if model == "muzero":
         print(f"  MuZero: {muzero_sims} sims, unroll={muzero_unroll}, td_steps={muzero_td_steps}")
     if mcts:
-        print(f"  MCTS: {mcts_sims} sims, depth={mcts_depth}, seq_len={mcts_seq_len}, stuck={mcts_stuck}, periodic={mcts_periodic}")
+        print(
+            f"  MCTS: {mcts_sims} sims, depth={mcts_depth}, seq_len={mcts_seq_len}, stuck={mcts_stuck}, periodic={mcts_periodic}"
+        )
     if action_history > 0:
         print(f"  Action history: {action_history} steps")
     print("  Danger prediction: 16 bins (auxiliary task)")
     if not sum_rewards:
         print("  Reward mode: last reward only (no stacking)")
-    
+
     # Print GPU distribution
-    from mario_rl.core.device import get_device_assignment_summary, assign_device
+    from mario_rl.core.device import assign_device
+    from mario_rl.core.device import get_device_assignment_summary
+
     print(f"  {get_device_assignment_summary(workers)}")
     print("=" * 70)
 
@@ -845,6 +897,7 @@ def main(
         eps_base=eps_base,
         epsilon_decay_steps=eps_decay_steps,
         latent_dim=latent_dim,
+        input_type=input_type,
         action_history_len=action_history,
         sum_rewards=sum_rewards,
         muzero_num_simulations=muzero_sims,
@@ -864,7 +917,11 @@ def main(
     run_dir.mkdir(parents=True, exist_ok=True)
     weights_path = run_dir / "weights.pt"
 
-    shm_dir = Path("/dev/shm") / f"mario_{model}_{os.getpid()}"
+    # Use /dev/shm on Linux (faster), /tmp on macOS
+    import platform
+
+    shm_base = Path("/dev/shm") if platform.system() == "Linux" else Path("/tmp")
+    shm_dir = shm_base / f"mario_{model}_{os.getpid()}"
     shm_dir.mkdir(parents=True, exist_ok=True)
 
     # Create reference model for shm sizing (CPU only, deleted after)
@@ -872,8 +929,8 @@ def main(
     torch.save(ref_model.state_dict(), weights_path)
 
     # Initialize shared memory
-    from mario_rl.distributed.shm_gradient_pool import SharedGradientPool
     from mario_rl.distributed.shm_heartbeat import SharedHeartbeat
+    from mario_rl.distributed.shm_gradient_pool import SharedGradientPool
 
     gradient_pool = SharedGradientPool(
         num_workers=workers,
@@ -907,34 +964,45 @@ def main(
     # ZMQ event system
     zmq_endpoint = make_endpoint()
     event_sub = EventSubscriber(zmq_endpoint)
-    
+
     # Metrics aggregator for combining worker/coordinator stats
     aggregator = MetricAggregator(num_workers=workers)
-    
+
     # Main process CSV logger for aggregated metrics (coordinator only logs basic stats)
     main_csv_path = run_dir / "coordinator.csv"
     main_csv_file = None
     main_csv_writer = None
     main_csv_header_written = False
-    
+
     def write_main_metrics(data: dict) -> None:
         """Write aggregated metrics to coordinator CSV."""
         nonlocal main_csv_file, main_csv_writer, main_csv_header_written
         import csv
-        
+
         if main_csv_file is None:
             main_csv_file = open(main_csv_path, "w", newline="")
             fieldnames = [
-                "timestamp", "update_count", "total_steps", "total_episodes",
-                "grads_per_sec", "total_sps", "learning_rate", "weight_version",
-                "avg_reward", "avg_speed", "avg_loss", "q_mean", "td_error", "grad_norm",
+                "timestamp",
+                "update_count",
+                "total_steps",
+                "total_episodes",
+                "grads_per_sec",
+                "total_sps",
+                "learning_rate",
+                "weight_version",
+                "avg_reward",
+                "avg_speed",
+                "avg_loss",
+                "q_mean",
+                "td_error",
+                "grad_norm",
             ]
             main_csv_writer = csv.DictWriter(main_csv_file, fieldnames=fieldnames)
-        
+
         if not main_csv_header_written:
             main_csv_writer.writeheader()
             main_csv_header_written = True
-        
+
         row = {
             "timestamp": time.time(),
             "update_count": data.get("step", data.get("update_count", 0)),
@@ -953,17 +1021,18 @@ def main(
         }
         main_csv_writer.writerow(row)
         main_csv_file.flush()
-    
+
     # Difficulty hotspot aggregator (deaths + stuck positions) for sampling decisions
     hotspot_path = run_dir / "difficulty_hotspots.json"
     hotspot_aggregator = DifficultyHotspotAggregate.load_or_create(hotspot_path)
     last_hotspot_save = time.time()
-    
+
     # Cleanup ZMQ on exit
     def cleanup_zmq():
         event_sub.close()
         # Save hotspots on exit
         hotspot_aggregator.save_if_dirty()
+
     atexit.register(cleanup_zmq)
 
     # UI setup (only queue for forwarding to UI process)
@@ -1050,37 +1119,37 @@ def main(
             if not coord_process.is_alive():
                 print("Coordinator exited")
                 break
-            
+
             # Check if UI exited (user pressed 'q')
             if ui_process is not None and not ui_process.is_alive():
                 print("UI exited, stopping training...")
                 break
-            
+
             # Poll events from ZMQ (non-blocking)
             events_received = event_sub.poll(timeout_ms=50)
             for event in events_received:
                 msg_type = event.get("msg_type", "")
-                
+
                 # Update aggregator with metrics events
                 if msg_type == "metrics":
                     source = event.get("data", {}).get("source", "")
                     snapshot = event.get("data", {}).get("snapshot", {})
                     aggregator.update(source, snapshot)
-                
+
                 # Aggregate death positions for snapshot/restore hints
                 if msg_type == "death_positions":
                     level_id = event.get("data", {}).get("level_id", "")
                     positions = event.get("data", {}).get("positions", [])
                     if level_id and positions:
                         hotspot_aggregator.record_deaths_batch(level_id, positions)
-                
+
                 # Aggregate stuck positions for difficulty tracking
                 if msg_type == "stuck_positions":
                     level_id = event.get("data", {}).get("level_id", "")
                     positions = event.get("data", {}).get("positions", [])
                     if level_id and positions:
                         hotspot_aggregator.record_stuck_batch(level_id, positions)
-                
+
                 # Enhance learner_status with aggregated worker metrics
                 if msg_type == "learner_status":
                     agg = aggregator.aggregate()
@@ -1092,10 +1161,10 @@ def main(
                     event["data"]["td_error"] = agg.get("mean_td_error", 0.0)
                     event["data"]["total_episodes"] = agg.get("total_episodes", 0)
                     event["data"]["total_sps"] = agg.get("total_steps_per_sec", 0.0)
-                    
+
                     # Write enhanced metrics to CSV
                     write_main_metrics(event["data"])
-                
+
                 if ui_queue:
                     # Forward to UI process (skip None messages)
                     try:
@@ -1110,7 +1179,7 @@ def main(
                     text = format_event(event)
                     if text:
                         print(text, flush=True)
-            
+
             # Periodically save death hotspots (every 30 seconds)
             now = time.time()
             if now - last_hotspot_save > 30:
@@ -1119,7 +1188,7 @@ def main(
                     ranges_path = run_dir / "difficulty_ranges.json"
                     hotspot_aggregator.save_difficulty_ranges(ranges_path)
                 last_hotspot_save = now
-            
+
             time.sleep(0.01)
     except KeyboardInterrupt:
         pass
