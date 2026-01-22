@@ -382,47 +382,34 @@ def _render_level_difficulty_chart(
     level: str,
     difficulty_ranges: dict[str, list[tuple[int, int]]] | None,
 ) -> None:
-    """Render difficulty coverage by position - similar to deaths chart.
+    """Render difficulty zones - each zone as a bar showing its width.
 
-    Buckets positions and shows how many difficulty zones cover each bucket.
+    Y-axis: zone range (e.g., "0-950")
+    X-axis: zone width in pixels
     """
     if difficulty_ranges and level in difficulty_ranges and difficulty_ranges[level]:
         ranges = difficulty_ranges[level]
 
-        # Bucket the difficulty ranges (25px buckets, same as death hotspots)
-        bucket_size = 25
-        buckets: dict[int, int] = {}
+        # Sort by start position
+        sorted_ranges = sorted(ranges, key=lambda x: x[0])
 
-        for start, end in ranges:
-            # For each bucket that this range overlaps, increment count
-            bucket_start = (start // bucket_size) * bucket_size
-            bucket_end = ((end - 1) // bucket_size) * bucket_size
+        positions = [f"{start}-{end}" for start, end in sorted_ranges]
+        widths = [end - start for start, end in sorted_ranges]
 
-            for bucket in range(bucket_start, bucket_end + bucket_size, bucket_size):
-                buckets[bucket] = buckets.get(bucket, 0) + 1
+        fig = make_bar_chart(
+            x=widths,
+            y=positions,
+            title="⚠️ Difficult Zones",
+            height=250,
+            color=COLORS["peach"],
+            orientation="h",
+            x_title="Width (px)",
+            y_title="X Range",
+        )
+        st.plotly_chart(fig, use_container_width=True, key=f"difficulty_{level}")
 
-        if buckets:
-            sorted_buckets = sorted(buckets.items(), key=lambda x: x[0])
-
-            positions = [f"{b[0]}" for b in sorted_buckets]
-            counts = [b[1] for b in sorted_buckets]
-
-            fig = make_bar_chart(
-                x=counts,
-                y=positions,
-                title="⚠️ Difficulty by Position",
-                height=250,
-                color=COLORS["peach"],
-                orientation="h",
-                x_title="Zone Overlap",
-                y_title="X Position",
-            )
-            st.plotly_chart(fig, use_container_width=True, key=f"difficulty_{level}")
-
-            total_coverage = sum(end - start for start, end in ranges)
-            st.caption(f"⚠️ {len(ranges)} zones | {total_coverage}px total")
-        else:
-            st.info("⏳ No difficulty data")
+        total_coverage = sum(widths)
+        st.caption(f"⚠️ {len(ranges)} zones | {total_coverage}px total")
     else:
         st.info("⏳ No difficulty data")
 
