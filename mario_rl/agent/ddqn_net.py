@@ -69,10 +69,48 @@ import numpy as np
 from torch import nn
 
 
+# Global flag to control whether to skip expensive initialization
+# Workers set this to True before creating models since they'll load weights anyway
+_SKIP_WEIGHT_INIT = False
+
+
+def set_skip_weight_init(skip: bool) -> None:
+    """Set global flag to skip expensive weight initialization.
+
+    Call with True before creating models in workers that will immediately
+    load pre-initialized weights. This avoids CPU contention from parallel
+    orthogonal initialization (which uses O(n³) QR decomposition).
+
+    Usage in workers:
+        from mario_rl.agent.ddqn_net import set_skip_weight_init
+        set_skip_weight_init(True)  # Before creating model
+        model = DoubleDQN(...)      # Fast init (skips orthogonal)
+        model.load_state_dict(...)  # Load pre-initialized weights
+    """
+    global _SKIP_WEIGHT_INIT
+    _SKIP_WEIGHT_INIT = skip
+
+
+def get_skip_weight_init() -> bool:
+    """Get current skip_weight_init flag value."""
+    return _SKIP_WEIGHT_INIT
+
+
 def layer_init(layer: nn.Module, std: float = np.sqrt(2), bias_const: float = 0.0) -> nn.Module:
-    """Initialize layer with orthogonal weights and constant bias."""
+    """Initialize layer with orthogonal weights and constant bias.
+
+    Uses the global _SKIP_WEIGHT_INIT flag to determine whether to perform
+    the expensive orthogonal initialization. Workers that will immediately
+    load pre-initialized weights should call set_skip_weight_init(True)
+    before creating models.
+
+    Orthogonal initialization uses O(n³) QR decomposition which causes
+    severe CPU contention when multiple workers initialize in parallel
+    (23x slowdown observed with 4 workers: 3.7s → 85s).
+    """
     if isinstance(layer, (nn.Linear, nn.Conv2d)):
-        nn.init.orthogonal_(layer.weight, std)
+        if not _SKIP_WEIGHT_INIT:
+            nn.init.orthogonal_(layer.weight, std)
         if layer.bias is not None:
             nn.init.constant_(layer.bias, bias_const)
     return layer

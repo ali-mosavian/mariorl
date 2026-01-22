@@ -73,9 +73,16 @@ def _layer_init(
     std: float = np.sqrt(2),
     bias_const: float = 0.0,
 ) -> nn.Module:
-    """Initialize layer with orthogonal weights and constant bias."""
+    """Initialize layer with orthogonal weights and constant bias.
+
+    Respects the global skip flag from ddqn_net to avoid CPU contention
+    when multiple workers initialize in parallel.
+    """
+    from mario_rl.agent.ddqn_net import get_skip_weight_init
+
     if isinstance(layer, (nn.Linear, nn.Conv2d)):
-        nn.init.orthogonal_(layer.weight, std)
+        if not get_skip_weight_init():
+            nn.init.orthogonal_(layer.weight, std)
         if layer.bias is not None:
             nn.init.constant_(layer.bias, bias_const)
     return layer

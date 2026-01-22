@@ -39,13 +39,19 @@ class MarioBrosLevel(SuperMarioBrosEnv):
 
 
 class SuperMarioBrosMultiLevel(gym.Env):
-    """Multi-level Mario environment with random or sequential level selection."""
+    """Multi-level Mario environment with random or sequential level selection.
+
+    Uses lazy initialization for random/sequential modes to avoid creating
+    all 32 NES emulators upfront. Levels are created on-demand when first selected.
+    """
 
     rand: np.random.RandomState
     level: LevelModes
     envs: List[List[Optional[MarioBrosLevel]]]
     env: Optional[MarioBrosLevel] = None
     viewer: Optional[ImageViewer] = None
+    _rom_mode: RomModes  # Store for lazy creation
+    _current_level_idx: int  # For sequential mode
 
     metadata = {
         **SuperMarioBrosEnv.metadata,
@@ -54,38 +60,53 @@ class SuperMarioBrosMultiLevel(gym.Env):
     action_space = SuperMarioBrosEnv.action_space
     observation_space = SuperMarioBrosEnv.observation_space
 
+    # All valid level targets for random/sequential modes
+    _ALL_LEVELS: List[Tuple[int, int]] = [
+        (world, stage) for world in range(1, 9) for stage in range(1, 5)
+    ]
+
     def __init__(self, rom_mode: RomModes = "vanilla", level: LevelModes = "random"):
         self.level = level
+        self._rom_mode = rom_mode
         self.rand = np.random.RandomState()
         self.render_mode = "rgb_array"
+        self._current_level_idx = -1  # Start before first level for sequential
+
+        # Initialize empty grid - levels created lazily on first use
+        self.envs = [[None for _ in range(4)] for _ in range(8)]
 
         if isinstance(level, tuple):
+            # Single level mode: create only that level now
             world, stage = level
-            self.envs = [[None for _ in range(4)] for _ in range(8)]
             self.envs[world - 1][stage - 1] = MarioBrosLevel(rom_mode=rom_mode, target=(world, stage))
-        else:
-            self.envs = [
-                [MarioBrosLevel(rom_mode=rom_mode, target=(world, stage)) for stage in range(1, 5)]
-                for world in range(1, 9)
-            ]
+        # For "random"/"sequential": envs remain empty, created lazily in _get_or_create_level
 
         self.reset()
 
+    def _get_or_create_level(self, world: int, stage: int) -> MarioBrosLevel:
+        """Get existing level or create it lazily if not yet initialized."""
+        env = self.envs[world - 1][stage - 1]
+        if env is None:
+            env = MarioBrosLevel(rom_mode=self._rom_mode, target=(world, stage))
+            self.envs[world - 1][stage - 1] = env
+        return env
+
     def _next_level(self) -> MarioBrosLevel:
         if isinstance(self.level, str):
-            levels: list[MarioBrosLevel] = [e for row in self.envs for e in row if e is not None]
             if self.level == "random":
-                return self.rand.choice(levels, 1)[0]  # type: ignore[no-any-return]
+                # Pick random level target, create lazily if needed
+                idx = self.rand.randint(0, len(self._ALL_LEVELS))
+                world, stage = self._ALL_LEVELS[idx]
+                return self._get_or_create_level(world, stage)
             elif self.level == "sequential":
-                env = self.env or levels[-1]
-                return levels[(levels.index(env) + 1) % len(levels)]
+                # Move to next level in sequence
+                self._current_level_idx = (self._current_level_idx + 1) % len(self._ALL_LEVELS)
+                world, stage = self._ALL_LEVELS[self._current_level_idx]
+                return self._get_or_create_level(world, stage)
 
         elif isinstance(self.level, tuple):
-            w, level = self.level
-            result = self.envs[w - 1][level - 1]
-            if result is None:
-                raise RuntimeError(f"Level {w}-{level} not initialized")
-            return result
+            w, stage = self.level
+            return self._get_or_create_level(w, stage)
 
         raise RuntimeError(f"Invalid level_mode: {repr(self.level)}")
 

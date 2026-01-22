@@ -289,12 +289,15 @@ def run_worker(
         from mario_rl.environment.snapshot_wrapper import create_snapshot_mario_env
 
         device = torch.device(device_str)
+        worker_start_time = time.time()
         events.log(f"Starting on {device}...")
 
         # Worker-specific epsilon for diverse exploration
         epsilon_end = config.eps_base ** (1 + (worker_id + 1) / config.num_workers)
 
         # Create components with snapshot support
+        events.log("Creating environment...")
+        env_start = time.time()
         level = parse_level(config.level)
         hotspot_path = run_dir / "death_hotspots.json"
         env = create_snapshot_mario_env(
@@ -308,7 +311,25 @@ def run_worker(
             action_history_len=config.action_history_len,
             input_type=config.input_type,
         )
+        events.log(f"Environment created in {time.time() - env_start:.2f}s")
+
+        # Skip expensive orthogonal initialization - workers will load pre-initialized weights
+        # This avoids severe CPU contention when multiple workers init in parallel
+        # (orthogonal init uses O(n³) QR decomposition, causing 23x slowdown with 4 workers)
+        from mario_rl.agent.ddqn_net import set_skip_weight_init
+
+        events.log("Creating model (skipping init, will load weights)...")
+        model_start = time.time()
+        set_skip_weight_init(True)
         _, learner = create_model_and_learner(config, device)
+        set_skip_weight_init(False)  # Reset for any other model creation
+        events.log(f"Model created in {time.time() - model_start:.2f}s")
+
+        # Immediately load pre-initialized weights from main process
+        events.log("Loading pre-initialized weights...")
+        load_start = time.time()
+        learner.model.load_state_dict(torch.load(weights_path, map_location=device, weights_only=True))
+        events.log(f"Weights loaded in {time.time() - load_start:.2f}s")
 
         # Create metrics logger for this worker
         if config.model == "ddqn":
@@ -365,7 +386,8 @@ def run_worker(
             create=False,
         )
 
-        events.log(f"Started (ε_end={epsilon_end:.4f})")
+        total_startup_time = time.time() - worker_start_time
+        events.log(f"Ready in {total_startup_time:.2f}s (ε_end={epsilon_end:.4f})")
 
         # Training loop state
         version = 0
@@ -923,9 +945,19 @@ def main(
     shm_dir = shm_base / f"mario_{model}_{os.getpid()}"
     shm_dir.mkdir(parents=True, exist_ok=True)
 
-    # Create reference model for shm sizing (CPU only, deleted after)
+    # Create reference model with orthogonal initialization (workers will load these weights)
+    # This is done once in the main process to avoid CPU contention from parallel QR decomposition
+    print("Creating model with orthogonal initialization...")
+    model_create_start = time.time()
     ref_model, _ = create_model_and_learner(config, device=None)
+    model_create_time = time.time() - model_create_start
+    print(f"Model created in {model_create_time:.2f}s ({sum(p.numel() for p in ref_model.parameters()):,} parameters)")
+
+    print(f"Saving weights to {weights_path}...")
+    save_start = time.time()
     torch.save(ref_model.state_dict(), weights_path)
+    save_time = time.time() - save_start
+    print(f"Weights saved in {save_time:.2f}s")
 
     # Initialize shared memory
     from mario_rl.distributed.shm_heartbeat import SharedHeartbeat
