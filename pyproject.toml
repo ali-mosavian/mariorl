@@ -11,7 +11,7 @@ dependencies = [
     "torch>=2.0.0",
     "numpy>=1.24.0,<2.0.0",
     "gymnasium>=0.29.0",
-    "gym-super-mario-bros @ git+https://github.com/ali-mosavian/gym-super-mario-bros.git@7.6.4",
+    "gym-super-mario-bros @ git+https://github.com/ali-mosavian/gym-super-mario-bros.git@7.7.1",
     "nes-py>=8.2.1",
     "pyglet>=1.4.0,<=1.5.21",
     "click>=8.1.0",
@@ -145,7 +145,6 @@ disable_error_code = ["arg-type", "assignment"]
 module = [
     "mario_rl.distributed.*",
     "mario_rl.mcts.adapters",
-    "mario_rl.training.shared_gradient_tensor",
 ]
 disable_error_code = ["attr-defined", "call-arg", "has-type", "union-attr", "no-any-return", "assignment", "var-annotated", "return-value"]
 
