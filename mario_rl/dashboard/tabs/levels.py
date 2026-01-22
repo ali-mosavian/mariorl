@@ -382,45 +382,47 @@ def _render_level_difficulty_chart(
     level: str,
     difficulty_ranges: dict[str, list[tuple[int, int]]] | None,
 ) -> None:
-    """Render difficulty zones chart for a single level.
+    """Render difficulty coverage by position - similar to deaths chart.
 
-    Shows horizontal bars for each difficult section identified from death hotspots.
+    Buckets positions and shows how many difficulty zones cover each bucket.
     """
     if difficulty_ranges and level in difficulty_ranges and difficulty_ranges[level]:
         ranges = difficulty_ranges[level]
 
-        # Create horizontal bar chart showing difficult zones
-        # Each bar goes from start_x to end_x
-        fig = go.Figure()
+        # Bucket the difficulty ranges (25px buckets, same as death hotspots)
+        bucket_size = 25
+        buckets: dict[int, int] = {}
 
-        for i, (start, end) in enumerate(ranges):
-            fig.add_trace(go.Bar(
-                y=[f"Zone {i+1}"],
-                x=[end - start],
-                base=[start],
+        for start, end in ranges:
+            # For each bucket that this range overlaps, increment count
+            bucket_start = (start // bucket_size) * bucket_size
+            bucket_end = ((end - 1) // bucket_size) * bucket_size
+
+            for bucket in range(bucket_start, bucket_end + bucket_size, bucket_size):
+                buckets[bucket] = buckets.get(bucket, 0) + 1
+
+        if buckets:
+            sorted_buckets = sorted(buckets.items(), key=lambda x: x[0])
+
+            positions = [f"{b[0]}" for b in sorted_buckets]
+            counts = [b[1] for b in sorted_buckets]
+
+            fig = make_bar_chart(
+                x=counts,
+                y=positions,
+                title="⚠️ Difficulty by Position",
+                height=250,
+                color=COLORS["peach"],
                 orientation="h",
-                marker_color=COLORS["red"],
-                text=[f"x={start}-{end}"],
-                textposition="inside",
-                hovertemplate=f"Zone {i+1}: x={start} to x={end} ({end-start}px)<extra></extra>",
-            ))
+                x_title="Zone Overlap",
+                y_title="X Position",
+            )
+            st.plotly_chart(fig, use_container_width=True, key=f"difficulty_{level}")
 
-        fig.update_layout(
-            title="⚠️ Difficult Zones",
-            xaxis_title="X Position",
-            yaxis_title="",
-            height=250,
-            showlegend=False,
-            barmode="overlay",
-            **DARK_LAYOUT,
-            xaxis=dict(**GRID_STYLE, range=[0, 3500]),
-            yaxis=dict(**GRID_STYLE),
-            margin=dict(l=0, r=0, t=50, b=0),
-        )
-        st.plotly_chart(fig, use_container_width=True, key=f"difficulty_{level}")
-
-        total_coverage = sum(end - start for start, end in ranges)
-        st.caption(f"⚠️ {len(ranges)} zones | {total_coverage}px total")
+            total_coverage = sum(end - start for start, end in ranges)
+            st.caption(f"⚠️ {len(ranges)} zones | {total_coverage}px total")
+        else:
+            st.info("⏳ No difficulty data")
     else:
         st.info("⏳ No difficulty data")
 
