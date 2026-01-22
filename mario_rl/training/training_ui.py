@@ -644,7 +644,9 @@ class TrainingUI:
         title = "═══ DISTRIBUTED MARIO TRAINING ═══"
         stdscr.addstr(y, (width - len(title)) // 2, title, curses.A_BOLD | curses.color_pair(1))
 
-        info = f"Workers: {self.num_workers}"
+        # Show workers and coordinator weight version
+        coord_version = self.learner_status.get("weight_version", 0)
+        info = f"Workers: {self.num_workers}  |  Coordinator Weights: v{coord_version}"
         stdscr.addstr(y + 1, 2, info)
 
         stdscr.addstr(y + 2, 0, "═" * (width - 1))
@@ -1291,8 +1293,9 @@ class TrainingUI:
             train_color = curses.color_pair(1) if can_train else curses.color_pair(3)
             stdscr.addstr(train_char, train_color)
 
-            # Sync indicator
-            stdscr.addstr(f" ↓{sync_str}")
+            # Weight version and sync indicator
+            worker_version = int(ws.get("weight_version", 0))
+            stdscr.addstr(f" v{worker_version}")
 
             # MCTS indicator (compact)
             mcts_used = ws.get("mcts_used", 0)

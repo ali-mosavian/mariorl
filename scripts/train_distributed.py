@@ -63,14 +63,14 @@ class Config:
     lr_min: float = 1e-5
     lr_decay_steps: int = 1_000_000
     gamma: float = 0.99
-    tau: float = 0.004  # 4x higher to compensate for averaging 4 gradients into 1 update
+    tau: float = 0.004  # Soft update coefficient for target network
     max_grad_norm: float = 10.0
     weight_decay: float = 1e-4
     buffer_capacity: int = 25_000
     batch_size: int = 32
     n_step: int = 10
     alpha: float = 0.6
-    eps_base: float = 0.15  # Base for per-worker epsilon (floor ~2-9%)
+    eps_base: float = 0.05  # Final epsilon for all workers after decay
     epsilon_decay_steps: int = 1_000_000
     latent_dim: int = 128
     entropy_coef: float = 0.01  # Entropy regularization for exploration
@@ -292,8 +292,8 @@ def run_worker(
         worker_start_time = time.time()
         events.log(f"Starting on {device}...")
 
-        # Worker-specific epsilon for diverse exploration
-        epsilon_end = config.eps_base ** (1 + (worker_id + 1) / config.num_workers)
+        # All workers use the same epsilon schedule
+        epsilon_end = config.eps_base
 
         # Create components with snapshot support
         events.log("Creating environment...")
@@ -401,6 +401,8 @@ def run_worker(
 
         while True:
             heartbeat.update(worker_id)
+            # Publish heartbeat to UI
+            events.publish("worker_heartbeat", {"timestamp": time.time()})
             worker.sync_weights(weights_path)
 
             # Load difficulty ranges for transition tagging
@@ -569,6 +571,9 @@ def run_worker(
                 logger.flush()
             else:
                 logger.gauge("mcts_used", 0)
+
+            # Log worker's current weight version
+            logger.gauge("weight_version", worker.weight_version)
 
             # Write gradients to shared memory
             if grads := result["gradients"]:
@@ -798,7 +803,7 @@ def start_monitor_thread(
 # Learner settings
 @click.option("--accumulate-grads", default=1, help="Gradients to accumulate before update")
 # Epsilon settings
-@click.option("--eps-base", default=0.4, help="Base for per-worker epsilon (ε = base^(1+i/N))")
+@click.option("--eps-base", default=0.05, help="Final epsilon for all workers after decay")
 @click.option("--eps-decay-steps", default=1_000_000, help="Steps for epsilon decay")
 # Stability settings
 @click.option("--max-grad-norm", default=10.0, help="Maximum gradient norm")
@@ -877,7 +882,7 @@ def main(
     print(f"  Batch: {batch_size}, Buffer: {buffer_size}")
     print(f"  Collect steps: {collect_steps}, Train steps: {train_steps}")
     print(f"  Accumulate grads: {accumulate_grads}")
-    print(f"  Epsilon: {eps_base}^(1+i/N), decay: {eps_decay_steps:,}")
+    print(f"  Epsilon: 1.0 → {eps_base}, decay: {eps_decay_steps:,}")
     print(f"  Max grad norm: {max_grad_norm}")
     if model == "muzero":
         print(f"  MuZero: {muzero_sims} sims, unroll={muzero_unroll}, td_steps={muzero_td_steps}")

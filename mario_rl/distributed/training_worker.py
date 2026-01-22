@@ -1243,7 +1243,12 @@ class TrainingWorker:
             state_dict = torch.load(weights_path, map_location="cpu", weights_only=True)
             self.model.load_state_dict(state_dict)
             self._last_weights_mtime = mtime
-            self.weight_version += 1
+            # Read actual version from coordinator's metadata file
+            version_path = weights_path.parent / "weights_version.txt"
+            if version_path.exists():
+                self.weight_version = int(version_path.read_text().strip())
+            else:
+                self.weight_version += 1  # Fallback for backwards compatibility
             return True
         except Exception:
             return False

@@ -101,8 +101,25 @@ class TrainingCoordinator:
             create=self.create_shm,
         )
 
-        # Collect trainable parameters (online network only)
-        params = [p for n, p in self.model.named_parameters() if n.startswith("online.")]
+        # Collect trainable parameters
+        # For DDQN/MuZero: only train "online." network (target is frozen)
+        # For Dreamer: train all parameters (no online/target split)
+        all_params = list(self.model.named_parameters())
+        online_params = [p for n, p in all_params if n.startswith("online.")]
+
+        if online_params:
+            # DDQN/MuZero: train only online network
+            params = online_params
+            print(f"[COORD] Using {len(params)} 'online.' params (DDQN/MuZero mode)")
+        else:
+            # Dreamer or other: train all parameters
+            params = [p for _, p in all_params]
+            print(f"[COORD] Using all {len(params)} params (no online/target split)")
+
+        if not params:
+            raise ValueError(
+                f"Model {type(self.model).__name__} has no trainable parameters!"
+            )
 
         # Create single optimizer for all parameters
         self.optimizer = Adam(
@@ -264,9 +281,12 @@ class TrainingCoordinator:
         Returns:
             Path to weights file
         """
+        self._weight_version += 1
         weights_path = self.checkpoint_dir / "weights.pt"
         torch.save(self.model.state_dict(), weights_path)
-        self._weight_version += 1
+        # Save version metadata for workers to read
+        version_path = self.checkpoint_dir / "weights_version.txt"
+        version_path.write_text(str(self._weight_version))
         return weights_path
 
     def training_step(self) -> dict[str, Any]:

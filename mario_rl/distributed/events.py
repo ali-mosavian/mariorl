@@ -135,8 +135,8 @@ def event_to_ui_message(event: dict[str, Any]) -> UIMessage | None:
     source_id = event.get("source_id", -1)
     data = event.get("data", {})
 
-    # Skip events that are for internal aggregation only
-    if msg_type_str in ("death_positions",):
+    # Skip events that are for internal aggregation only (not for UI display)
+    if msg_type_str in ("death_positions", "stuck_positions", "timeout_positions"):
         return None
 
     # Handle new metrics events
@@ -171,7 +171,10 @@ def event_to_ui_message(event: dict[str, Any]) -> UIMessage | None:
         "learner_status": MessageType.LEARNER_STATUS,
         "worker_heartbeat": MessageType.WORKER_HEARTBEAT,
     }
-    msg_type = msg_type_map.get(msg_type_str, MessageType.SYSTEM_LOG)
+    msg_type = msg_type_map.get(msg_type_str)
+    if msg_type is None:
+        # Unknown event type - skip it instead of creating empty system log
+        return None
 
     return UIMessage(msg_type=msg_type, source_id=source_id, data=data)
 

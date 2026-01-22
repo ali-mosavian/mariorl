@@ -135,6 +135,9 @@ class DDQNMetrics(CommonMetrics):
     BUF_POS = MetricDef("buf_pos", MetricType.GAUGE)  # Positive (flag) buffer
     BUF_DIFF = MetricDef("buf_diff", MetricType.GAUGE)  # Difficult (hard sections) buffer
 
+    # Weight version tracking
+    WEIGHT_VERSION = MetricDef("weight_version", MetricType.GAUGE)
+
     @classmethod
     def definitions(cls) -> list[MetricDef]:
         """Return list of all DDQN metric definitions."""
@@ -151,6 +154,7 @@ class DDQNMetrics(CommonMetrics):
             cls.BUF_NEG,
             cls.BUF_POS,
             cls.BUF_DIFF,
+            cls.WEIGHT_VERSION,
         ]
 
 
