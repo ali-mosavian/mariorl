@@ -466,6 +466,35 @@ def aggregate_timeout_hotspots_direct(checkpoint_dir: str) -> dict[str, dict[int
     return hotspots
 
 
+def load_difficulty_ranges(checkpoint_dir: str) -> dict[str, list[tuple[int, int]]]:
+    """Load difficulty ranges from difficulty_ranges.json.
+    
+    Returns:
+        Dict mapping level_id -> list of (start_x, end_x) tuples.
+    """
+    import json
+    from pathlib import Path
+    
+    ranges_path = Path(checkpoint_dir) / "difficulty_ranges.json"
+    if not ranges_path.exists():
+        # Try metrics subdirectory
+        ranges_path = get_metrics_dir(checkpoint_dir) / "difficulty_ranges.json"
+    
+    if not ranges_path.exists():
+        return {}
+    
+    try:
+        with open(ranges_path) as f:
+            data = json.load(f)
+        # Convert [[start, end], ...] to [(start, end), ...]
+        return {
+            level: [(r[0], r[1]) for r in ranges]
+            for level, ranges in data.items()
+        }
+    except Exception:
+        return {}
+
+
 def aggregate_death_distribution_direct(
     checkpoint_dir: str,
     step_bucket_size: int = 50000,
