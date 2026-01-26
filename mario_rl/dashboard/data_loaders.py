@@ -16,15 +16,46 @@ from mario_rl.dashboard.query import query_coordinator
 MAX_VALID_X_POS = 5000
 
 
+def _is_checkpoint_dir(path: Path) -> bool:
+    """Check if a directory is a valid checkpoint directory.
+
+    Valid checkpoint directories either:
+    - Have a known naming pattern (_dist_, vec_dqn_, etc.)
+    - Contain coordinator.csv or worker_*.csv files
+    """
+    if not path.is_dir():
+        return False
+
+    # Check naming patterns (distributed training, vectorized training)
+    name = path.name
+    if "_dist_" in name or name.startswith("vec_dqn_"):
+        return True
+
+    # Check for metrics files directly in the directory
+    if (path / "coordinator.csv").exists():
+        return True
+    if list(path.glob("worker_*.csv")):
+        return True
+
+    # Check for metrics subdirectory
+    metrics_dir = path / "metrics"
+    if metrics_dir.exists():
+        if (metrics_dir / "coordinator.csv").exists():
+            return True
+        if list(metrics_dir.glob("worker_*.csv")):
+            return True
+
+    return False
+
+
 @st.cache_data(ttl=2)
 def find_latest_checkpoint(base_dir: str = "checkpoints") -> str | None:
     """Find the most recent checkpoint directory."""
     base = Path(base_dir)
     if not base.exists():
         return None
-    # Look for any dist_ directories (ddqn_dist_ or dreamer_dist_)
     dirs = sorted(
-        [d for d in base.iterdir() if d.is_dir() and "_dist_" in d.name],
+        [d for d in base.iterdir() if _is_checkpoint_dir(d)],
         key=lambda x: x.stat().st_mtime,
         reverse=True,
     )
@@ -37,9 +68,8 @@ def list_checkpoints(base_dir: str = "checkpoints") -> list[str]:
     base = Path(base_dir)
     if not base.exists():
         return []
-    # Look for any dist_ directories (ddqn_dist_ or dreamer_dist_)
     dirs = sorted(
-        [d for d in base.iterdir() if d.is_dir() and "_dist_" in d.name],
+        [d for d in base.iterdir() if _is_checkpoint_dir(d)],
         key=lambda x: x.stat().st_mtime,
         reverse=True,
     )
