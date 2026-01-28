@@ -13,8 +13,8 @@ import os
 import time
 import signal
 from pathlib import Path
-from dataclasses import dataclass
 import multiprocessing as mp
+from dataclasses import dataclass
 
 mp.set_start_method("spawn", force=True)
 
@@ -29,8 +29,10 @@ def format_time(t: float) -> str:
 
 def install_exit_handler():
     """Install signal handler that exits cleanly in child processes."""
+
     def handler(sig, frame):
         os._exit(0)
+
     signal.signal(signal.SIGINT, handler)
     signal.signal(signal.SIGTERM, handler)
 
@@ -38,6 +40,7 @@ def install_exit_handler():
 @dataclass
 class TimingResult:
     """Timing results from a worker."""
+
     worker_id: int
     timings: dict[str, float]
     total_time: float
@@ -65,18 +68,21 @@ def run_worker_with_timing(
     # ==========================================================================
     t0 = time.time()
     import torch
+
     record("import_torch")
     print(f"[{format_time(time.time())}] Worker {worker_id}: torch imported ({time.time()-t0:.2f}s)")
 
     t1 = time.time()
     record("import_metrics")
 
-    t2 = time.time()
+    time.time()
     from mario_rl.distributed.training_worker import TrainingWorker
+
     record("import_distributed")
 
-    t3 = time.time()
+    time.time()
     from mario_rl.environment.snapshot_wrapper import create_snapshot_mario_env
+
     record("import_environment")
 
     print(f"[{format_time(time.time())}] Worker {worker_id}: All imports done ({time.time()-t1:.2f}s)")
@@ -86,6 +92,7 @@ def run_worker_with_timing(
     # ==========================================================================
     t4 = time.time()
     from mario_rl.core.device import assign_device
+
     device_str = assign_device(process_id=worker_id + 1, num_processes=num_workers + 1)
     device = torch.device(device_str)
     record("device_setup")
@@ -113,8 +120,9 @@ def run_worker_with_timing(
     # Phase 4: Model and learner creation (skip init - will load weights)
     # ==========================================================================
     t6 = time.time()
-    from mario_rl.agent.ddqn_net import DoubleDQN, set_skip_weight_init
+    from mario_rl.agent.ddqn_net import DoubleDQN
     from mario_rl.learners.ddqn import DDQNLearner
+    from mario_rl.agent.ddqn_net import set_skip_weight_init
 
     # Skip expensive orthogonal init - we'll load pre-initialized weights
     set_skip_weight_init(True)
@@ -142,7 +150,7 @@ def run_worker_with_timing(
     record("load_weights")
     print(f"[{format_time(time.time())}] Worker {worker_id}: Loaded pre-init weights ({time.time()-t_load:.2f}s)")
 
-    t8 = time.time()
+    time.time()
     learner = DDQNLearner(model=model, gamma=0.99, n_step=10, entropy_coef=0.01)
     record("create_learner")
 
@@ -185,11 +193,13 @@ def run_worker_with_timing(
 
     print(f"[{format_time(time.time())}] Worker {worker_id}: READY (total: {total_time:.2f}s)")
 
-    result_queue.put(TimingResult(
-        worker_id=worker_id,
-        timings=timings,
-        total_time=total_time,
-    ))
+    result_queue.put(
+        TimingResult(
+            worker_id=worker_id,
+            timings=timings,
+            total_time=total_time,
+        )
+    )
 
 
 def main():
@@ -209,11 +219,12 @@ def main():
         print()
 
         # Setup (same as train_distributed.py)
-        from mario_rl.agent.ddqn_net import DoubleDQN
+        import shutil
 
         # Create temp directory and weights file
         import tempfile
-        import shutil
+
+        from mario_rl.agent.ddqn_net import DoubleDQN
 
         tmp_dir = Path(tempfile.mkdtemp(prefix="mario_profile_"))
         weights_path = tmp_dir / "weights.pt"
@@ -231,6 +242,7 @@ def main():
         )
 
         import torch
+
         torch.save(ref_model.state_dict(), weights_path)
         del ref_model
         print(f"[{format_time(time.time())}] Main: Weights saved to {weights_path}")

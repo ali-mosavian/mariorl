@@ -18,20 +18,22 @@ Usage:
 import sys
 import time
 from pathlib import Path
-from datetime import datetime
 from collections import deque
+from datetime import datetime
 from dataclasses import dataclass
 
 import click
 import torch
+import numpy as np
 import torch.nn as nn
 import torch.nn.functional as F
-import numpy as np
 
-from mario_rl.agent.ddqn_net import DDQNBackbone, layer_init, set_skip_weight_init
-from mario_rl.environment.factory import create_mario_env
+from mario_rl.agent.ddqn_net import layer_init
+from mario_rl.agent.ddqn_net import DDQNBackbone
 from mario_rl.metrics.logger import MetricLogger
 from mario_rl.metrics.schema import CoordinatorMetrics
+from mario_rl.agent.ddqn_net import set_skip_weight_init
+from mario_rl.environment.factory import create_mario_env
 
 
 def log(msg: str) -> None:
@@ -98,9 +100,7 @@ class PPONetwork(nn.Module):
             layer_init(nn.Linear(256, 1), std=1.0),
         )
 
-    def forward(
-        self, x: torch.Tensor, action_history: torch.Tensor | None = None
-    ) -> tuple[torch.Tensor, torch.Tensor]:
+    def forward(self, x: torch.Tensor, action_history: torch.Tensor | None = None) -> tuple[torch.Tensor, torch.Tensor]:
         """Forward pass returning policy logits and value estimate.
 
         Args:
@@ -192,9 +192,7 @@ class RolloutBuffer:
         """Create an empty rollout buffer."""
         action_history = None
         if action_history_len > 0:
-            action_history = np.zeros(
-                (num_steps, num_envs, action_history_len, num_actions), dtype=np.float32
-            )
+            action_history = np.zeros((num_steps, num_envs, action_history_len, num_actions), dtype=np.float32)
         return cls(
             obs=np.zeros((num_steps, num_envs, *obs_shape), dtype=np.uint8),
             actions=np.zeros((num_steps, num_envs), dtype=np.int64),
@@ -293,7 +291,8 @@ class RolloutBuffer:
 class PPOMetrics:
     """PPO-specific metrics for logging."""
 
-    from mario_rl.metrics.schema import MetricDef, MetricType
+    from mario_rl.metrics.schema import MetricDef
+    from mario_rl.metrics.schema import MetricType
 
     EPISODES = MetricDef("episodes", MetricType.COUNTER)
     STEPS = MetricDef("steps", MetricType.COUNTER)
@@ -462,14 +461,18 @@ def main(
     log(f"Parameters: {sum(p.numel() for p in model.parameters()):,}")
     log("Architecture: CNN(3 layers) → Self-Attention(8×8) → Policy/Value heads")
     if action_history_len > 0:
-        log(f"Action history: {action_history_len} steps × {num_actions} actions = {action_history_len * num_actions} features")
+        log(
+            f"Action history: {action_history_len} steps × {num_actions} actions = {action_history_len * num_actions} features"
+        )
 
     # Optimizer
     optimizer = torch.optim.Adam(model.parameters(), lr=lr, eps=1e-5)
 
     # Rollout buffer
     rollout = RolloutBuffer.create(
-        rollout_steps, envs, obs_shape,
+        rollout_steps,
+        envs,
+        obs_shape,
         action_history_len=action_history_len,
         num_actions=num_actions,
     )
@@ -525,9 +528,7 @@ def main(
 
             with torch.no_grad():
                 obs_t = torch.from_numpy(obs).to(device)
-                action, log_prob, _, value = model.get_action_and_value(
-                    obs_t, action_history=action_history_t
-                )
+                action, log_prob, _, value = model.get_action_and_value(obs_t, action_history=action_history_t)
                 action = action.cpu().numpy()
                 log_prob = log_prob.cpu().numpy()
                 value = value.cpu().numpy()
@@ -627,9 +628,7 @@ def main(
                 # Value loss
                 if clip_vloss:
                     v_loss_unclipped = (new_value - batch["returns"]) ** 2
-                    v_clipped = batch["old_values"] + torch.clamp(
-                        new_value - batch["old_values"], -clip_eps, clip_eps
-                    )
+                    v_clipped = batch["old_values"] + torch.clamp(new_value - batch["old_values"], -clip_eps, clip_eps)
                     v_loss_clipped = (v_clipped - batch["returns"]) ** 2
                     v_loss = 0.5 * torch.max(v_loss_unclipped, v_loss_clipped).mean()
                 else:

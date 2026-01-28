@@ -11,8 +11,8 @@ mp.set_start_method("spawn", force=True)
 
 def worker_orthogonal(worker_id: int, result_queue: mp.Queue):
     """Worker that uses orthogonal init."""
-    from torch import nn
     import numpy as np
+    from torch import nn
 
     def layer_init_orthogonal(layer, std=np.sqrt(2)):
         if isinstance(layer, nn.Linear):
@@ -39,7 +39,7 @@ def worker_kaiming(worker_id: int, result_queue: mp.Queue):
 
     def layer_init_kaiming(layer):
         if isinstance(layer, nn.Linear):
-            nn.init.kaiming_normal_(layer.weight, mode='fan_in', nonlinearity='relu')
+            nn.init.kaiming_normal_(layer.weight, mode="fan_in", nonlinearity="relu")
         return layer
 
     start = time.time()
@@ -98,9 +98,9 @@ def main():
     print(f"Running {num_workers} workers in parallel")
 
     # First, baseline with single worker
-    print("\n" + "="*60)
+    print("\n" + "=" * 60)
     print("BASELINE: Single worker")
-    print("="*60)
+    print("=" * 60)
 
     result_queue = mp.Queue()
 
@@ -119,12 +119,14 @@ def main():
     parallel_orthogonal = run_test("ORTHOGONAL init", worker_orthogonal, num_workers)
     parallel_kaiming = run_test("KAIMING init", worker_kaiming, num_workers)
 
-    print("\n" + "="*60)
+    print("\n" + "=" * 60)
     print("SUMMARY")
-    print("="*60)
+    print("=" * 60)
     print(f"\n{'Method':<20} {'Single':>10} {'Parallel':>10} {'Slowdown':>10}")
     print("-" * 50)
-    print(f"{'Orthogonal':<20} {single_orthogonal:>9.2f}s {parallel_orthogonal:>9.2f}s {parallel_orthogonal/single_orthogonal:>9.1f}x")
+    print(
+        f"{'Orthogonal':<20} {single_orthogonal:>9.2f}s {parallel_orthogonal:>9.2f}s {parallel_orthogonal/single_orthogonal:>9.1f}x"
+    )
     print(f"{'Kaiming':<20} {single_kaiming:>9.2f}s {parallel_kaiming:>9.2f}s {parallel_kaiming/single_kaiming:>9.1f}x")
     print()
     print(f"Switching to Kaiming would save: {parallel_orthogonal - parallel_kaiming:.1f}s")

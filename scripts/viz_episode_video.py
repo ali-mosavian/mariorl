@@ -11,16 +11,16 @@ import argparse
 from io import BytesIO
 
 import cv2
-import matplotlib
-import matplotlib.pyplot as plt
-import numpy as np
 import torch
+import matplotlib
+import numpy as np
 from PIL import Image
-from scipy.ndimage import zoom
 from tqdm import tqdm
+import matplotlib.pyplot as plt
+from scipy.ndimage import zoom
 
-from mario_rl.agent.ddqn_net import DoubleDQN
 from mario_rl.models.ddqn import symexp
+from mario_rl.agent.ddqn_net import DoubleDQN
 
 matplotlib.use("Agg")  # Non-interactive backend
 
@@ -278,14 +278,14 @@ def generate_episode_video(
     frame_skip: int = 4,
 ) -> None:
     """Generate video of a single episode with overlays.
-    
+
     Captures EVERY frame (before frame skip) for smooth video playback.
     Model predictions are updated every `frame_skip` frames.
     """
     from collections import deque
 
-    from gym_super_mario_bros import actions as smb_actions
     from nes_py.wrappers import JoypadSpace
+    from gym_super_mario_bros import actions as smb_actions
 
     from mario_rl.environment.mariogym import SuperMarioBrosMultiLevel
 
