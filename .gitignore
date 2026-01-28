@@ -101,3 +101,10 @@ docs/_templates/
 Thumbs.db
 .DS_Store
 
+# Vendor/development copies
+vendor/
+
+# Benchmark scripts (experimental)
+benchmark*.py
+scripts/benchmark_*.py
+
