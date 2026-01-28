@@ -284,13 +284,13 @@ def create_diagnostic_image(
     Worst Action: {ACTION_NAMES[worst_action]} (Q={record.q_values[worst_action]:.2f})
     Q Range:      {q_range:.2f}
     Q Std Dev:    {q_std:.2f}
-    
+
     JUMP ANALYSIS
     =============
     Avg Q (jump actions):     {jump_q_avg:.2f}
     Avg Q (non-jump actions): {non_jump_q_avg:.2f}
     Jump Preference:          {jump_q_avg - non_jump_q_avg:+.2f}
-    
+
     POSITION
     ========
     X Position: {record.x_pos}

@@ -460,7 +460,7 @@ def main(
         action_history_len=action_history_len,
     ).to(device)
     log(f"Parameters: {sum(p.numel() for p in model.parameters()):,}")
-    log(f"Architecture: CNN(3 layers) → Self-Attention(8×8) → Policy/Value heads")
+    log("Architecture: CNN(3 layers) → Self-Attention(8×8) → Policy/Value heads")
     if action_history_len > 0:
         log(f"Action history: {action_history_len} steps × {num_actions} actions = {action_history_len * num_actions} features")
 

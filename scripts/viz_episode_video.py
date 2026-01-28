@@ -9,7 +9,6 @@ Creates a video showing:
 
 import argparse
 from io import BytesIO
-from pathlib import Path
 
 import cv2
 import matplotlib
@@ -21,7 +20,6 @@ from scipy.ndimage import zoom
 from tqdm import tqdm
 
 from mario_rl.agent.ddqn_net import DoubleDQN
-from mario_rl.environment.factory import create_mario_env
 from mario_rl.models.ddqn import symexp
 
 matplotlib.use("Agg")  # Non-interactive backend
@@ -148,16 +146,16 @@ def render_chart_to_image(
 def create_qvalue_chart(q_values: np.ndarray, chart_width: int, chart_height: int) -> np.ndarray:
     """Create Q-values bar chart as RGBA image."""
     actions = ["NOOP", "Right", "R+J", "R+B", "R+J+B", "Jump", "Left"]
-    
+
     fig, ax = plt.subplots(figsize=(2.5, 2.0))
     fig.patch.set_alpha(0)
     ax.patch.set_alpha(0.6)
     ax.patch.set_facecolor("black")
-    
+
     colors = ["#d62728" if q < 0 else "#2ca02c" for q in q_values]
     best_action = q_values.argmax()
     colors[best_action] = "#ffd700"  # Gold for best action
-    
+
     ax.barh(range(7), q_values, color=colors, edgecolor="white", linewidth=0.5)
     ax.set_yticks(range(7))
     ax.set_yticklabels(actions, fontsize=7, color="white")
@@ -165,11 +163,11 @@ def create_qvalue_chart(q_values: np.ndarray, chart_width: int, chart_height: in
     ax.set_title(f"Q (max={q_values.max():.1f})", fontsize=8, color="white", pad=2)
     ax.tick_params(axis="x", colors="white", labelsize=6)
     ax.set_xlim(min(q_values.min() * 1.1, -10), max(q_values.max() * 1.1, 10))
-    
+
     for spine in ax.spines.values():
         spine.set_color("white")
         spine.set_linewidth(0.5)
-    
+
     img = render_chart_to_image(fig, chart_width, chart_height)
     plt.close(fig)
     return img
@@ -181,29 +179,29 @@ def create_danger_chart(danger_probs: np.ndarray, chart_width: int, chart_height
     fig.patch.set_alpha(0)
     ax.patch.set_alpha(0.6)
     ax.patch.set_facecolor("black")
-    
+
     num_bins = len(danger_probs)
     behind_bins = num_bins // 4
     ahead_bins = num_bins - behind_bins
-    
+
     colors = ["#9467bd"] * behind_bins + ["#ff7f0e"] * ahead_bins
     peak_bin = danger_probs.argmax()
     colors[peak_bin] = "#ff0000"  # Red for peak danger
-    
+
     ax.bar(range(num_bins), danger_probs, color=colors, edgecolor="white", linewidth=0.3)
     ax.axvline(behind_bins - 0.5, color="white", linewidth=1, linestyle="--", alpha=0.7)
-    
+
     ax.set_title(f"Danger (peak={peak_bin})", fontsize=8, color="white", pad=2)
     ax.set_xlim(-0.5, num_bins - 0.5)
     ax.set_ylim(0, 1.0)
     ax.tick_params(axis="both", colors="white", labelsize=5)
     ax.set_xticks([0, behind_bins, num_bins - 1])
     ax.set_xticklabels(["-64", "0", "+256"], fontsize=6, color="white")
-    
+
     for spine in ax.spines.values():
         spine.set_color("white")
         spine.set_linewidth(0.5)
-    
+
     img = render_chart_to_image(fig, chart_width, chart_height)
     plt.close(fig)
     return img
@@ -212,7 +210,7 @@ def create_danger_chart(danger_probs: np.ndarray, chart_width: int, chart_height
 def overlay_rgba_on_bgr(base: np.ndarray, overlay: np.ndarray, x: int, y: int) -> np.ndarray:
     """Overlay RGBA image on BGR image at position (x, y)."""
     h, w = overlay.shape[:2]
-    
+
     # Clamp to image bounds
     if x + w > base.shape[1]:
         w = base.shape[1] - x
@@ -220,22 +218,22 @@ def overlay_rgba_on_bgr(base: np.ndarray, overlay: np.ndarray, x: int, y: int) -
     if y + h > base.shape[0]:
         h = base.shape[0] - y
         overlay = overlay[:h]
-    
+
     if w <= 0 or h <= 0:
         return base
-    
+
     # Extract alpha channel and normalize
     alpha = overlay[:, :, 3:4].astype(np.float32) / 255.0
     rgb = overlay[:, :, :3]
-    
+
     # Convert RGB to BGR for OpenCV
     bgr = rgb[:, :, ::-1]
-    
+
     # Blend
     roi = base[y : y + h, x : x + w].astype(np.float32)
     blended = roi * (1 - alpha) + bgr.astype(np.float32) * alpha
     base[y : y + h, x : x + w] = blended.astype(np.uint8)
-    
+
     return base
 
 
@@ -247,20 +245,20 @@ def apply_attention_overlay(
     """Apply attention heatmap overlay to frame."""
     if attention is None:
         return frame
-    
+
     # Resize attention to match frame size
     scale_y = frame.shape[0] / attention.shape[0]
     scale_x = frame.shape[1] / attention.shape[1]
     attn_resized = zoom(attention, (scale_y, scale_x), order=1)
-    
+
     # Normalize attention
     attn_norm = (attn_resized - attn_resized.min()) / (attn_resized.max() - attn_resized.min() + 1e-8)
-    
+
     # Apply grayscale colormap (white = high attention)
     heatmap = plt.cm.gray(attn_norm)[:, :, :3]  # Drop alpha
     heatmap = (heatmap * 255).astype(np.uint8)
     heatmap_bgr = heatmap[:, :, ::-1]  # RGB to BGR
-    
+
     # Blend with original frame
     blended = cv2.addWeighted(frame, 1 - alpha, heatmap_bgr, alpha, 0)
     return blended
@@ -285,59 +283,59 @@ def generate_episode_video(
     Model predictions are updated every `frame_skip` frames.
     """
     from collections import deque
-    
+
     from gym_super_mario_bros import actions as smb_actions
     from nes_py.wrappers import JoypadSpace
-    
+
     from mario_rl.environment.mariogym import SuperMarioBrosMultiLevel
-    
+
     # Create base environment WITHOUT frame skip wrapper
     base_env = SuperMarioBrosMultiLevel(level=level)
     env = JoypadSpace(base_env, actions=smb_actions.SIMPLE_MOVEMENT)
-    
+
     # Video dimensions
     base_width, base_height = 256, 240
     out_width, out_height = base_width * scale, base_height * scale
-    
+
     # Chart dimensions (relative to output size)
     chart_width = out_width // 4
     chart_height_q = out_height // 4
     chart_height_d = out_height // 5
     chart_margin = 10
-    
+
     # Initialize video writer
     fourcc = cv2.VideoWriter_fourcc(*"mp4v")
     writer = cv2.VideoWriter(output_path, fourcc, fps, (out_width, out_height))
-    
+
     # Reset environment
     obs_rgb, info = env.reset()
-    
+
     # Initialize frame stack (4 grayscale 64x64 frames)
     def preprocess_frame(rgb_frame: np.ndarray) -> np.ndarray:
         """Convert RGB to grayscale 64x64."""
         gray = cv2.cvtColor(rgb_frame, cv2.COLOR_RGB2GRAY)
         resized = cv2.resize(gray, (64, 64), interpolation=cv2.INTER_AREA)
         return resized
-    
+
     # Initialize frame stack with first frame repeated
     first_gray = preprocess_frame(obs_rgb)
     frame_stack = deque([first_gray] * 4, maxlen=4)
-    
+
     action_history = torch.zeros(1, action_history_len, 7, device=device)
-    
+
     frames_written = 0
     total_reward = 0
     current_action = 0
     frame_in_skip = 0
-    
+
     # Cache for model predictions (updated every frame_skip frames)
     q_real_cached = None
     danger_probs_cached = None
     attn_cached = None
-    
+
     env_step = 0
     done = False
-    
+
     # Progress bar for total frames (max_steps * frame_skip)
     pbar = tqdm(
         total=max_steps * frame_skip,
@@ -345,12 +343,12 @@ def generate_episode_video(
         unit="frame",
         ncols=80,
     )
-    
+
     while env_step < max_steps and not done:
         # Get current stacked observation for model
         obs_stacked = np.stack(list(frame_stack), axis=0).astype(np.uint8)
         state_tensor = torch.from_numpy(obs_stacked).unsqueeze(0).to(device)
-        
+
         # Update model predictions at start of each frame skip cycle
         if frame_in_skip == 0:
             with torch.no_grad():
@@ -359,29 +357,29 @@ def generate_episode_video(
                 q_real_cached = symexp(q_symlog)
                 danger_logits = model.online.danger_head(features)
                 danger_probs_cached = torch.softmax(danger_logits, dim=1)
-                
+
                 # Get attention map
                 _ = model.online(state_tensor, action_history)
                 attn_cached = model.online.backbone.get_attention_map()
-            
+
             # Select action for this frame skip cycle
             if np.random.random() < epsilon:
                 current_action = np.random.randint(7)
             else:
                 current_action = q_symlog.argmax(dim=1).item()
-        
+
         # Get RGB frame and render
         rgb_frame = base_env.render(mode="rgb_array")
-        
+
         # Resize to output dimensions
         frame_resized = cv2.resize(rgb_frame, (out_width, out_height), interpolation=cv2.INTER_NEAREST)
         frame_bgr = cv2.cvtColor(frame_resized, cv2.COLOR_RGB2BGR)
-        
+
         # Apply attention overlay
         if attn_cached is not None:
             attn_np = attn_cached[0, 0].cpu().numpy()
             frame_bgr = apply_attention_overlay(frame_bgr, attn_np, attention_alpha)
-        
+
         # Create and overlay Q-value chart
         if q_real_cached is not None:
             q_chart = create_qvalue_chart(q_real_cached[0].cpu().numpy(), chart_width, chart_height_q)
@@ -391,7 +389,7 @@ def generate_episode_video(
                 out_width - chart_width - chart_margin,
                 chart_margin,
             )
-        
+
         # Create and overlay danger chart
         if danger_probs_cached is not None:
             d_chart = create_danger_chart(danger_probs_cached[0].cpu().numpy(), chart_width, chart_height_d)
@@ -401,7 +399,7 @@ def generate_episode_video(
                 out_width - chart_width - chart_margin,
                 chart_margin + chart_height_q + 5,
             )
-        
+
         # Add info text overlay
         x_pos = info.get("x_pos", 0)
         info_text = f"Step: {env_step} | X: {x_pos} | Reward: {total_reward:.0f}"
@@ -425,54 +423,54 @@ def generate_episode_video(
             1,
             cv2.LINE_AA,
         )
-        
+
         writer.write(frame_bgr)
         frames_written += 1
         pbar.update(1)
-        
+
         # Step environment (single frame)
         obs_rgb, reward, terminated, truncated, info = env.step(current_action)
         total_reward += reward
         done = terminated or truncated
-        
+
         # Update frame stack
         gray_frame = preprocess_frame(obs_rgb)
         frame_stack.append(gray_frame)
-        
+
         # Track frame skip cycle
         frame_in_skip += 1
         if frame_in_skip >= frame_skip:
             frame_in_skip = 0
             env_step += 1
-            
+
             # Update action history at end of frame skip cycle
             ah = torch.zeros(1, 1, 7, device=device)
             ah[0, 0, current_action] = 1.0
             action_history = torch.cat([action_history[:, 1:, :], ah], dim=1)
-            
+
             # Update progress bar postfix
             pbar.set_postfix(x=x_pos, r=f"{total_reward:.0f}")
-    
+
     pbar.close()
-    
+
     if done:
         x_pos = info.get("x_pos", 0)
         flag = info.get("flag_get", False)
         print(f"Episode ended: steps={env_step}, reward={total_reward:.0f}, x={x_pos}, flag={flag}")
-    
+
     writer.release()
     env.close()
-    
+
     print(f"Saved {frames_written} frames to {output_path}")
 
 
 def main() -> None:
     args = parse_args()
-    
+
     # Parse level
     world, stage = map(int, args.level.split("-"))
     level = (world, stage)
-    
+
     print(f"Loading model from {args.weights}...")
     model, action_history_len = load_model(
         args.weights,
@@ -480,7 +478,7 @@ def main() -> None:
         action_history_len=args.action_history_len,
         danger_bins=args.danger_bins,
     )
-    
+
     print(f"Generating episode video for level {args.level}...")
     generate_episode_video(
         model=model,

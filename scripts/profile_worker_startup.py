@@ -10,7 +10,6 @@ multiple workers start simultaneously.
 from __future__ import annotations
 
 import os
-import sys
 import time
 import signal
 from pathlib import Path
@@ -52,15 +51,15 @@ def run_worker_with_timing(
 ) -> None:
     """Run worker startup with detailed timing."""
     install_exit_handler()
-    
+
     timings = {}
     worker_start = time.time()
-    
+
     def record(name: str):
         timings[name] = time.time() - worker_start
-    
+
     print(f"[{format_time(time.time())}] Worker {worker_id}: Starting...")
-    
+
     # ==========================================================================
     # Phase 1: Heavy imports (this is what each spawned process must do)
     # ==========================================================================
@@ -68,24 +67,20 @@ def run_worker_with_timing(
     import torch
     record("import_torch")
     print(f"[{format_time(time.time())}] Worker {worker_id}: torch imported ({time.time()-t0:.2f}s)")
-    
+
     t1 = time.time()
-    from mario_rl.metrics import DDQNMetrics
-    from mario_rl.metrics import MetricLogger
     record("import_metrics")
-    
+
     t2 = time.time()
-    from mario_rl.distributed.shm_heartbeat import SharedHeartbeat
     from mario_rl.distributed.training_worker import TrainingWorker
-    from mario_rl.training.shared_gradient_tensor import attach_tensor_buffer
     record("import_distributed")
-    
+
     t3 = time.time()
     from mario_rl.environment.snapshot_wrapper import create_snapshot_mario_env
     record("import_environment")
-    
+
     print(f"[{format_time(time.time())}] Worker {worker_id}: All imports done ({time.time()-t1:.2f}s)")
-    
+
     # ==========================================================================
     # Phase 2: Device setup
     # ==========================================================================
@@ -95,7 +90,7 @@ def run_worker_with_timing(
     device = torch.device(device_str)
     record("device_setup")
     print(f"[{format_time(time.time())}] Worker {worker_id}: Device={device} ({time.time()-t4:.2f}s)")
-    
+
     # ==========================================================================
     # Phase 3: Environment creation
     # ==========================================================================
@@ -113,14 +108,14 @@ def run_worker_with_timing(
     )
     record("create_environment")
     print(f"[{format_time(time.time())}] Worker {worker_id}: Environment created ({time.time()-t5:.2f}s)")
-    
+
     # ==========================================================================
     # Phase 4: Model and learner creation (skip init - will load weights)
     # ==========================================================================
     t6 = time.time()
     from mario_rl.agent.ddqn_net import DoubleDQN, set_skip_weight_init
     from mario_rl.learners.ddqn import DDQNLearner
-    
+
     # Skip expensive orthogonal init - we'll load pre-initialized weights
     set_skip_weight_init(True)
     model = DoubleDQN(
@@ -135,22 +130,22 @@ def run_worker_with_timing(
     set_skip_weight_init(False)
     record("create_model_cpu")
     print(f"[{format_time(time.time())}] Worker {worker_id}: Model created on CPU (skip init) ({time.time()-t6:.2f}s)")
-    
+
     t7 = time.time()
     model = model.to(device)
     record("model_to_device")
     print(f"[{format_time(time.time())}] Worker {worker_id}: Model moved to {device} ({time.time()-t7:.2f}s)")
-    
+
     # Load pre-initialized weights from main process
     t_load = time.time()
     model.load_state_dict(torch.load(weights_path, map_location=device, weights_only=True))
     record("load_weights")
     print(f"[{format_time(time.time())}] Worker {worker_id}: Loaded pre-init weights ({time.time()-t_load:.2f}s)")
-    
+
     t8 = time.time()
     learner = DDQNLearner(model=model, gamma=0.99, n_step=10, entropy_coef=0.01)
     record("create_learner")
-    
+
     # ==========================================================================
     # Phase 5: Training worker creation
     # ==========================================================================
@@ -173,7 +168,7 @@ def run_worker_with_timing(
     )
     record("create_training_worker")
     print(f"[{format_time(time.time())}] Worker {worker_id}: TrainingWorker created ({time.time()-t9:.2f}s)")
-    
+
     # ==========================================================================
     # Phase 6: Weight sync (simulates actual startup)
     # ==========================================================================
@@ -181,15 +176,15 @@ def run_worker_with_timing(
     worker.sync_weights(weights_path)
     record("sync_weights")
     print(f"[{format_time(time.time())}] Worker {worker_id}: Weights synced ({time.time()-t10:.2f}s)")
-    
+
     # Cleanup
     env.close()
-    
+
     total_time = time.time() - worker_start
     record("total")
-    
+
     print(f"[{format_time(time.time())}] Worker {worker_id}: READY (total: {total_time:.2f}s)")
-    
+
     result_queue.put(TimingResult(
         worker_id=worker_id,
         timings=timings,
@@ -199,7 +194,7 @@ def run_worker_with_timing(
 
 def main():
     import click
-    
+
     @click.command()
     @click.option("--workers", "-w", default=4, help="Number of workers to start")
     @click.option("--level", "-l", default="1,1", help="Level to use (1,1 or random)")
@@ -207,22 +202,22 @@ def main():
         """Profile parallel worker startup."""
         global GLOBAL_START
         GLOBAL_START = time.time()
-        
+
         print("=" * 70)
         print(f"PROFILING PARALLEL WORKER STARTUP ({workers} workers)")
         print("=" * 70)
         print()
-        
+
         # Setup (same as train_distributed.py)
         from mario_rl.agent.ddqn_net import DoubleDQN
-        
+
         # Create temp directory and weights file
         import tempfile
         import shutil
-        
+
         tmp_dir = Path(tempfile.mkdtemp(prefix="mario_profile_"))
         weights_path = tmp_dir / "weights.pt"
-        
+
         # Create reference model and save weights
         print(f"[{format_time(time.time())}] Main: Creating reference model...")
         ref_model = DoubleDQN(
@@ -234,23 +229,23 @@ def main():
             action_history_len=4,
             danger_prediction_bins=16,
         )
-        
+
         import torch
         torch.save(ref_model.state_dict(), weights_path)
         del ref_model
         print(f"[{format_time(time.time())}] Main: Weights saved to {weights_path}")
-        
+
         # Result queue
         result_queue = mp.Queue()
-        
+
         # Start all workers simultaneously
         print()
         print(f"[{format_time(time.time())}] Main: Starting {workers} workers...")
         print("-" * 70)
-        
+
         processes = []
         start_time = time.time()
-        
+
         for i in range(workers):
             p = mp.Process(
                 target=run_worker_with_timing,
@@ -258,27 +253,27 @@ def main():
             )
             p.start()
             processes.append(p)
-        
+
         # Wait for all workers
         for p in processes:
             p.join()
-        
+
         wall_clock_time = time.time() - start_time
-        
+
         # Collect results
         results = []
         while not result_queue.empty():
             results.append(result_queue.get())
-        
+
         results.sort(key=lambda r: r.worker_id)
-        
+
         # Print summary
         print()
         print("-" * 70)
         print("TIMING SUMMARY")
         print("-" * 70)
         print()
-        
+
         # Aggregate timings
         all_timings = {}
         for r in results:
@@ -286,10 +281,10 @@ def main():
                 if name not in all_timings:
                     all_timings[name] = []
                 all_timings[name].append(t)
-        
+
         print(f"{'Phase':<25} {'Min':>8} {'Max':>8} {'Avg':>8}")
         print("-" * 55)
-        
+
         phases = [
             ("import_torch", "Import torch"),
             ("import_metrics", "Import metrics"),
@@ -305,23 +300,23 @@ def main():
             ("sync_weights", "Sync weights"),
             ("total", "TOTAL"),
         ]
-        
+
         for key, label in phases:
             if key in all_timings:
                 times = all_timings[key]
                 print(f"{label:<25} {min(times):>7.2f}s {max(times):>7.2f}s {sum(times)/len(times):>7.2f}s")
-        
+
         print()
         print(f"Wall-clock time for all {workers} workers: {wall_clock_time:.2f}s")
         print(f"Sum of individual worker times: {sum(r.total_time for r in results):.2f}s")
         print(f"Parallelism efficiency: {sum(r.total_time for r in results) / wall_clock_time / workers * 100:.1f}%")
-        
+
         # Cleanup
         shutil.rmtree(tmp_dir)
-        
+
         print()
         print("=" * 70)
-    
+
     run()
 
 
