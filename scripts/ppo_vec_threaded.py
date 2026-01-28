@@ -881,7 +881,7 @@ def main(
         desc="Training",
         unit="steps",
         dynamic_ncols=True,
-        bar_format="{l_bar}{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}, {rate_fmt}]",
+        bar_format="{l_bar}{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}, {rate_fmt}{postfix}]",
     )
 
     while total_steps < steps:
@@ -893,18 +893,33 @@ def main(
             for param_group in optimizer.param_groups:
                 param_group["lr"] = current_lr
 
-        # Collect rollout with sub-progress bar (show total env frames = steps * num_envs)
-        total_env_frames = rollout_steps * envs
+        # Collect rollout with sub-progress bar
+        # saved_frames = steps * envs (frames we store after frame skip)
+        # actual_frames = saved_frames * frame_skip (raw NES emulator frames)
+        frame_skip = 4
+        total_saved_frames = rollout_steps * envs
+        saved_fps_str = ""
+        actual_fps_str = ""
         rollout_pbar = tqdm(
-            total=total_env_frames,
-            desc="  Rollout",
+            total=total_saved_frames,
             leave=False,
             dynamic_ncols=True,
-            unit="frames",
-            bar_format="{desc}: {percentage:3.0f}%|{bar}| {n_fmt}/{total_fmt} frames [{rate_fmt}]",
+            unit="f",
+            bar_format="  Rollout: {percentage:3.0f}%|{bar}| {n_fmt}/{total_fmt}",
         )
+        rollout_loop_start = time.time()
         for step in range(rollout_steps):
-            rollout_pbar.update(envs)  # Each step collects `envs` frames
+            # Update progress with rates
+            elapsed = time.time() - rollout_loop_start
+            if elapsed > 0 and step > 0:
+                saved_collected = step * envs
+                actual_collected = saved_collected * frame_skip
+                saved_fps = saved_collected / elapsed
+                actual_fps = actual_collected / elapsed
+                saved_fps_str = f"{saved_fps:.0f}"
+                actual_fps_str = f"{actual_fps:.0f}"
+                rollout_pbar.bar_format = f"  Rollout: {{percentage:3.0f}}%|{{bar}}| {{n_fmt}}/{{total_fmt}} [{saved_fps_str} saved/s, {actual_fps_str} actual/s]"
+            rollout_pbar.update(envs)
             rollout.obs[step] = obs
 
             # Prepare action history tensor
@@ -1120,11 +1135,9 @@ def main(
         pbar.update(steps_per_update)
         pbar.set_postfix(
             {
-                "reward": f"{roll_reward:.0f}",
-                "x": f"{roll_x:.0f}",
-                "best": f"{best_x_ever:.0f}",
-                "flags": flags,
                 "loss": f"{roll_loss:.3f}",
+                "reward": f"{roll_reward:.1f}",
+                "x": f"{roll_x:.0f}",
             }
         )
 
